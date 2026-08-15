@@ -37,6 +37,3 @@ Thumbs.db
 *.log
 tmp/
 temp/
-
-# In-flight audit notes; kept out of history on purpose
-docs/relay-*.md

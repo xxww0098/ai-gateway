@@ -74,6 +74,7 @@ gw-authcore = { path = "crates/gw-authcore" }
 gw-pricing = { path = "crates/gw-pricing" }
 gw-ledger = { path = "crates/gw-ledger" }
 gw-provider = { path = "crates/gw-provider" }
+gw-relay = { path = "crates/gw-relay" }
 gw-proxy = { path = "crates/gw-proxy" }
 gw-panel = { path = "crates/gw-panel" }
 

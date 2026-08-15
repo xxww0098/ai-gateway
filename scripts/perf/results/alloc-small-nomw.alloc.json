@@ -1,7 +1,7 @@
 {
   "label": "alloc-small-nomw",
   "requests": 5000,
-  "wall_seconds": 0.3557119369506836,
+  "wall_seconds": 0.34681200981140137,
   "alloc_count": 835049,
   "alloc_bytes": 234057935,
   "dealloc_count": 775045,

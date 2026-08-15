@@ -26,7 +26,7 @@ BIN="$TARGET_DIR/release"
 ROUNDS="${ROUNDS:-5}"
 SSE_ROUNDS="${SSE_ROUNDS:-3}"
 WORKERS="${WORKERS:-3}"
-PHASES="${PHASES:-latency alloc throughput idempotency profile}"
+PHASES="${PHASES:-latency sseburst jsonrewrite alloc throughput idempotency profile}"
 
 # 每档请求数（concurrency=1）
 N_SMALL="${N_SMALL:-10000}"
@@ -144,6 +144,57 @@ phase_latency() {
       run "lat-sse-$t-r$r" "$port" "$Q_SSE" "$B_SMALL" "$N_SSE" sse 1
     done
     log "  SSE 长流轮 $r/$SSE_ROUNDS 完成"
+  done
+}
+
+# --------------------------------------------------- 档 1b：SSE 满速（每 chunk 成本）
+#
+# 为什么需要这一档：c) 规定的 1 ms 间隔，在本机实测被放大成 ~2.35 ms 的 mock
+# 定时器抖动，三个被测端的 chunk 间隔中位数因此全部落在 2.35 ms ± 10 µs ——
+# 网关每 chunk 的真实成本（个位数 µs）被埋在定时器噪声底下，量不出来。
+# 把间隔设成 0，chunk 间隔就变成"中继一个 chunk 要多久"本身，差值才有分辨率。
+
+Q_SSE_BURST='/v1/chat/completions?stream=1&chunks=500&chunk_bytes=1024&interval_us=0'
+
+phase_sseburst() {
+  log "档 1b SSE 满速（500×1 KiB，无间隔）—— 分辨每 chunk 中继成本"
+  local r t port
+  for r in $(seq 1 "${ROUNDS}"); do
+    for t in floor full nomw; do
+      case $t in
+        floor) port=$P_FLOOR ;; full) port=$P_FULL ;; nomw) port=$P_NOMW ;;
+      esac
+      run "lat-sseburst-$t-r$r" "$port" "$Q_SSE_BURST" "$B_SMALL" 300 sse 1
+    done
+  done
+}
+
+# ------------------------------------------ 档 1c：ensure_include_usage 的 JSON 往返
+#
+# 隔离思路：**同一个 256 KiB 请求体**，响应都压到最小（不让响应干扰），
+# 只切换 `stream` 真假。
+#   stream=false → payload 走 `to_vec()` + `into_owned()` 两次拷贝
+#   stream=true  → 多一次 `ensure_include_usage`：整个 body 反序列化成
+#                  `serde_json::Value` 再重新序列化（common.rs:226/238）
+# 两者之差，减掉 1 KiB 处同样两档的差（那是"流式路径本身"的固定成本），
+# 剩下的就是 JSON 往返随 body 增长的部分。
+
+Q_TINY_UNARY='/v1/chat/completions?resp_bytes=256'
+Q_TINY_SSE='/v1/chat/completions?stream=1&chunks=1&chunk_bytes=64&interval_us=0'
+
+phase_jsonrewrite() {
+  log "档 1c ensure_include_usage 的 serde_json 往返（同一 body，只切 stream）"
+  local r t port
+  for r in $(seq 1 "${ROUNDS}"); do
+    for t in floor full; do
+      case $t in
+        floor) port=$P_FLOOR ;; full) port=$P_FULL ;;
+      esac
+      run "json-u1k-$t-r$r"   "$port" "$Q_TINY_UNARY" "$B_SMALL" 6000 unary 1
+      run "json-s1k-$t-r$r"   "$port" "$Q_TINY_SSE"   "$B_SMALL" 6000 sse   1
+      run "json-u256k-$t-r$r" "$port" "$Q_TINY_UNARY" "$B_LARGE" 2000 unary 1
+      run "json-s256k-$t-r$r" "$port" "$Q_TINY_SSE"   "$B_LARGE" 2000 sse   1
+    done
   done
 }
 
@@ -292,6 +343,8 @@ start_stack 0
 for p in $PHASES; do
   case "$p" in
     latency)      phase_latency ;;
+    sseburst)     phase_sseburst ;;
+    jsonrewrite)  phase_jsonrewrite ;;
     alloc)        phase_alloc ;;
     throughput)   phase_throughput ;;
     idempotency)  phase_idempotency ;;

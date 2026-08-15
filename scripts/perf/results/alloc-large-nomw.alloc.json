@@ -1,11 +1,11 @@
 {
   "label": "alloc-large-nomw",
   "requests": 500,
-  "wall_seconds": 0.3018760681152344,
-  "alloc_count": 97731,
-  "alloc_bytes": 2660993587,
-  "dealloc_count": 91265,
-  "realloc_count": 6466,
-  "alloc_per_req": 195.462,
-  "bytes_per_req": 5321987.174
+  "wall_seconds": 0.22362017631530762,
+  "alloc_count": 97839,
+  "alloc_bytes": 2727820907,
+  "dealloc_count": 91324,
+  "realloc_count": 6515,
+  "alloc_per_req": 195.678,
+  "bytes_per_req": 5455641.814
 }

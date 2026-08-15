@@ -3,8 +3,9 @@
 一条命令跑完全部测量：
 
 ```bash
-./scripts/perf/run-baseline.sh          # 全量，约 9~12 分钟
-python3 scripts/perf/summarize.py       # 把 results/*.json 汇总成 markdown 表
+./scripts/perf/run-baseline.sh            # 全量（七档），约 20 分钟
+python3 scripts/perf/summarize.py         # results/*.json → markdown 表
+python3 scripts/perf/profile-summary.py   # CPU 热点按类别归因
 ```
 
 结论与解读在 [`docs/relay-perf-baseline.md`](../../docs/relay-perf-baseline.md)。
@@ -14,7 +15,7 @@ python3 scripts/perf/summarize.py       # 把 results/*.json 汇总成 markdown 
 
 ## 1. 它测什么
 
-三个被测端同时在跑，同一份 mock 上游、同一套负载：
+四个被测端同时在跑（空闲不耗 CPU），同一份 mock 上游、同一套负载：
 
 | 被测端 | 端口 | 是什么 |
 | --- | --- | --- |
@@ -27,7 +28,7 @@ python3 scripts/perf/summarize.py       # 把 results/*.json 汇总成 markdown 
 **网关自身开销 = `full` 实测 − `floor` 实测。**
 **access+hold 净成本 = `full` − `nomw`。**
 
-三个负载形态：
+负载形态：
 
 | 代号 | 形态 | 目的 |
 | --- | --- | --- |
@@ -35,6 +36,8 @@ python3 scripts/perf/summarize.py       # 把 results/*.json 汇总成 markdown 
 | b) `large` | 256 KiB 请求 / 1 MiB 响应，非流式 | 拷贝开销随 body 增长的斜率 |
 | c) `sse` | 500 chunk × 1 KiB × 1 ms | 流式中继开销、TTFB、chunk 间抖动 |
 | c-0) `ssettfb` | 1 chunk，无间隔 | 只测"建流"这一步的固定成本，样本量大，p99 才可信 |
+| c-1) `sseburst` | 500 chunk × 1 KiB，**间隔 0** | 1 ms 那一档量不出每 chunk 成本（mock 定时器在本机被放大到 ~2.35 ms，把个位数 µs 埋掉了），这一档把定时器拿掉 |
+| 1c) `json*` | 同一 body 只切 `stream` 真假，响应压最小 | 隔离 `ensure_include_usage` 的 serde_json 往返 |
 
 ## 2. 为什么不用现成的东西
 
@@ -65,8 +68,11 @@ workspace 的 `Cargo.toml`，CONTRACT §3 划给协调者独占。
 * 根 `Cargo.toml` 一个字没动 —— `members = ["crates/*", "tools/xtask"]` 匹配不到
   `scripts/`，`cargo build --workspace` 也不会编到它；
 * `crates/**` 下一个 `.rs` 没动；
-* 它的 `[profile.release]` 与根 workspace **逐字一致**（`opt-level=3`、
+* 它的 `[profile.release]` 的 **codegen 部分**与根 workspace 逐字一致（`opt-level=3`、
   `lto="thin"`、`codegen-units=1`），否则"网关 vs 下界"的差值里会混进编译参数差异。
+  **唯一差异是保留符号**（`strip="none"`、`debug=1`）：这两项不改变生成的机器码，
+  但没有它们 `/usr/bin/sample` 的输出全是 `??? load address + 0x…`，
+  CPU 热点档等于没测（第一次跑基线正是这么废掉的）。
 
 被测的 `gw-proxy` 需要的 `ports::*` 端口由 `perfkit/src/stubs.rs` 提供
 **内存常量实现**，不碰 Postgres / Redis。这是刻意的，代价见
@@ -77,9 +83,10 @@ workspace 的 `Cargo.toml`，CONTRACT §3 划给协调者独占。
 ```
 scripts/perf/
 ├── README.md              # 本文件
-├── run-baseline.sh        # 一条命令跑完五档
+├── run-baseline.sh        # 一条命令跑完七档
 ├── summarize.py           # results/*.json → markdown 表
-├── results/               # 产出（每次跑会覆盖）
+├── profile-summary.py     # sample 调用图 → 按类别的 CPU 占比
+├── results/               # 产出（每次跑会覆盖；含两份 ~1.5 MB 的原始 profile 调用图）
 └── perfkit/               # 独立 cargo 包（自己的 workspace）
     ├── Cargo.toml
     └── src/
@@ -94,19 +101,34 @@ scripts/perf/
             └── loadgen.rs        # 裸 TCP HTTP/1.1 压测客户端
 ```
 
-## 5. 单独跑某一档
+## 5. 七个档
+
+| 档 | 名字 | 量什么 |
+| --- | --- | --- |
+| 1 | `latency` | a/b/c 三种形态的 p50/p95/p99（concurrency=1，交错多轮） |
+| 1b | `sseburst` | SSE 间隔设 0，分辨每 chunk 中继成本（1 ms 那一档分辨不出来） |
+| 1c | `jsonrewrite` | 同一 body 只切 `stream` 真假，隔离 `ensure_include_usage` 的 JSON 往返 |
+| 2 | `alloc` | 每请求堆分配次数与字节（重启进程，`PERF_COUNT_ALLOC=1`） |
+| 3 | `throughput` | concurrency=16 的 rps（**会被本机后台负载污染**） |
+| 4 | `idempotency` | `Idempotency-Key` 触发的全量响应缓冲代价 |
+| 5 | `profile` | `/usr/bin/sample` 采 15 s CPU 调用图 |
+
+## 5.1 单独跑某一档
 
 ```bash
-PHASES=latency      ./scripts/perf/run-baseline.sh
-PHASES="alloc"      ./scripts/perf/run-baseline.sh
-PHASES="latency alloc throughput idempotency profile" ./scripts/perf/run-baseline.sh   # 默认
+PHASES=latency       ./scripts/perf/run-baseline.sh
+PHASES=alloc         ./scripts/perf/run-baseline.sh
+PHASES=sseburst      ./scripts/perf/run-baseline.sh   # SSE 满速：分辨每 chunk 成本
+PHASES=jsonrewrite   ./scripts/perf/run-baseline.sh   # 隔离 ensure_include_usage
+# 默认全跑：
+PHASES="latency sseburst jsonrewrite alloc throughput idempotency profile" ./scripts/perf/run-baseline.sh
 ```
 
 可调环境变量（都有默认值）：
 
 | 变量 | 默认 | 含义 |
 | --- | --- | --- |
-| `ROUNDS` | 7 | 延迟档交错轮数，跨轮取中位数 |
+| `ROUNDS` | 5 | 延迟/满速流/JSON 档的交错轮数，跨轮取中位数 |
 | `SSE_ROUNDS` | 3 | SSE 长流轮数（每轮 ≈ 20 s/被测端） |
 | `WORKERS` | 3 | 每个被测进程的 tokio worker 线程数（钉死以便复现） |
 | `N_SMALL` / `N_LARGE` / `N_SSE` / `N_SSE_TTFB` | 10000 / 1500 / 40 / 4000 | 各场景请求数 |
@@ -150,4 +172,10 @@ curl -sXPOST http://127.0.0.1:18090/reset && curl -s http://127.0.0.1:18090/stat
 * **延迟档一律 `concurrency=1`**。要量的是每请求固定开销，并发只会把排队时间
   混进来。吞吐单独一档量，并且明确标注它被后台负载污染。
 * `loadgen` 的 `stalls` 字段：单请求超时后重连继续的次数。**非零就要在结论里
-  说明**，不要当作没发生。
+  说明**，不要当作没发生。基线那一轮：161 次运行 / 3 619 149 个请求里出现 **3 次**，
+  全部落在 `floor`（对照组）的 SSE-TTFB 场景，网关侧 0 次 —— 那是我这 60 行对照组
+  反代自身的缺陷，不是 `gw-proxy` 的。复现时它还会出现。
+* **幂等档的 key 必须全进程唯一**。预热段和正式段共用一个 loadgen 进程，如果两段
+  各自从 0 开始编号，正式段每一发都会命中预热留下的缓存条目、直接重放、根本不打
+  上游 —— 量出来会是"开幂等比不开还快 138 µs"。`loadgen.rs` 的 `KEY_SEQ` 就是为此
+  存在的，别把它改回 per-run 计数器。

@@ -1,0 +1,11 @@
+{
+  "label": "alloc-sse-full",
+  "requests": 20,
+  "wall_seconds": 23.107610940933228,
+  "alloc_count": 27669,
+  "alloc_bytes": 9613581,
+  "dealloc_count": 27107,
+  "realloc_count": 562,
+  "alloc_per_req": 1383.45,
+  "bytes_per_req": 480679.05
+}

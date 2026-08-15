@@ -43,11 +43,17 @@ async-trait = "0.1"
 anyhow = "1"
 chrono = { version = "0.4", features = ["clock", "std"] }
 
-# 与根 workspace 的 [profile.release] 逐字一致 —— 基线必须在同一套 codegen
-# 设置下测，否则「网关 vs 下界」的差值里会混进编译参数的差异。
+# 与根 workspace 的 [profile.release] **codegen 部分**逐字一致 —— 基线必须在
+# 同一套优化设置下测，否则「网关 vs 下界」的差值里会混进编译参数的差异。
+#
+# 唯一的差异是符号：根清单写 `strip = "symbols"`，这里改成保留符号 + 行表。
+# 这两项**不改变生成的机器码**，只往产物里多放一张符号表；而没有符号，
+# `/usr/bin/sample` 的输出全是 `??? (in gateway) load address + 0x…`，
+# CPU 热点档就等于没测。第一次跑基线正是这么废掉的。
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-strip = "symbols"
+strip = "none"
+debug = 1
 incremental = false

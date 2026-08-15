@@ -1,0 +1,11 @@
+{
+  "label": "alloc-sse-nomw",
+  "requests": 20,
+  "wall_seconds": 22.967907905578613,
+  "alloc_count": 26206,
+  "alloc_bytes": 9415818,
+  "dealloc_count": 25644,
+  "realloc_count": 562,
+  "alloc_per_req": 1310.3,
+  "bytes_per_req": 470790.9
+}

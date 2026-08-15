@@ -27,6 +27,10 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
+/// 全进程单调的幂等 key 序号，预热与正式测量共用它，见 `worker` 里的注释。
+static KEY_SEQ: AtomicU64 = AtomicU64::new(0);
+
+
 // ---------------------------------------------------------------- 参数
 
 struct Args {
@@ -156,7 +160,7 @@ fn stddev_us(v: &[u64]) -> f64 {
     var.sqrt() / 1000.0
 }
 
-fn summarize(name: &str, v: &mut Vec<u64>) -> serde_json::Value {
+fn summarize(name: &str, v: &mut [u64]) -> serde_json::Value {
     v.sort_unstable();
     serde_json::json!({
         "metric": name,
@@ -306,6 +310,8 @@ async fn worker(
     };
     let mut line = Vec::with_capacity(256);
     let mut scratch = Vec::with_capacity(64 * 1024);
+    // 进程号进 key，防止同机先后两次 loadgen 撞到同一批幂等条目。
+    let pid = std::process::id();
 
     let mut sent = 0usize;
     loop {
@@ -320,7 +326,12 @@ async fn worker(
             break;
         }
 
-        let seq = counter.fetch_add(1, Ordering::Relaxed);
+        // 幂等 key 必须**全进程唯一**：预热和正式测量共用一个进程，如果两段
+        // 各自从 0 开始计数，正式测量的每一发都会命中预热留下的缓存条目，
+        // 于是根本不打上游 —— 量到的会是"重放有多快"，不是"幂等有多贵"。
+        // 这个坑第一次跑基线时真的踩了（正式档比对照组还快 138 µs）。
+        let seq = KEY_SEQ.fetch_add(1, Ordering::Relaxed);
+        let _ = counter.fetch_add(1, Ordering::Relaxed);
         let mut request = Vec::with_capacity(body.len() + 512);
         request.extend_from_slice(
             format!(
@@ -336,7 +347,7 @@ async fn worker(
         );
         if args.idempotency {
             request
-                .extend_from_slice(format!("Idempotency-Key: perf-{id}-{seq}\r\n").as_bytes());
+                .extend_from_slice(format!("Idempotency-Key: perf-{pid}-{id}-{seq}\r\n").as_bytes());
         }
         request.extend_from_slice(b"\r\n");
         request.extend_from_slice(&body);

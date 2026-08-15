@@ -1,7 +1,7 @@
 {
   "label": "alloc-small-floor",
   "requests": 5000,
-  "wall_seconds": 0.40323805809020996,
+  "wall_seconds": 0.3242051601409912,
   "alloc_count": 420049,
   "alloc_bytes": 148852895,
   "dealloc_count": 375045,

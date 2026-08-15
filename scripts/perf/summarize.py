@@ -184,6 +184,35 @@ def sse_table():
                 print(f"| **{TARGET_LABEL[t]} − 下界** | | " + " | ".join(f"**{fmt(x)}**" for x in d) + " |")
 
 
+def sseburst_table():
+    """SSE 满速：间隔设 0，整流耗时就是"中继 501 个 chunk 要多久"。
+
+    1 ms 间隔那一档量不出每 chunk 成本 —— mock 的定时器在本机被放大到
+    ~2.35 ms，网关的个位数 µs 埋在里面。这一档把定时器拿掉。
+    """
+    print("\n### c-1) SSE 满速（500 chunk × 1 KiB，间隔 0）—— 分辨每 chunk 中继成本\n")
+    print("| 被测端 | 轮数 | 整流 p50 µs | 跨轮 min–max | 每 chunk µs | TTFB p50 µs |")
+    print("| --- | ---: | ---: | --- | ---: | ---: |")
+    base = {}
+    for t in TARGETS:
+        docs = load(f"lat-sseburst-{t}-r*.json")
+        if not docs:
+            continue
+        tot = [d["latency"]["p50_us"] for d in docs]
+        chunks = max(d["chunks_per_response"]["max"] for d in docs) or 1
+        base[t] = (med(tot), chunks)
+        print(f"| {TARGET_LABEL[t]} | {len(docs)} | {fmt(med(tot))} | "
+              f"{fmt(min(tot))}–{fmt(max(tot))} | {fmt(med(tot)/chunks, 3)} | "
+              f"{fmt(med([d['ttfb']['p50_us'] for d in docs]))} |")
+    if "floor" in base:
+        f, ch = base["floor"]
+        for t in ("nomw", "full"):
+            if t in base:
+                d = base[t][0] - f
+                print(f"| **{TARGET_LABEL[t]} − 下界** | | **{fmt(d)}** | | "
+                      f"**{fmt(d/ch, 3)}** | |")
+
+
 def raw_dump():
     print("\n### 逐轮原始值\n```")
     for path in sorted(glob.glob(os.path.join(RESULTS, "*.json"))):
@@ -217,6 +246,7 @@ def main():
     latency_table("ssettfb", "c-0) 流式路径固定开销（1 chunk，无间隔）—— 只测建流成本",
                   field="ttfb")
     sse_table()
+    sseburst_table()
     alloc_table()
     throughput_table()
     idempotency_table()

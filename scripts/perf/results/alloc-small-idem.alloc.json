@@ -1,0 +1,11 @@
+{
+  "label": "alloc-small-idem",
+  "requests": 5000,
+  "wall_seconds": 0.3928649425506592,
+  "alloc_count": 1330124,
+  "alloc_bytes": 343439209,
+  "dealloc_count": 1225120,
+  "realloc_count": 95002,
+  "alloc_per_req": 266.0248,
+  "bytes_per_req": 68687.8418
+}

@@ -1,0 +1,51 @@
+{
+  "chunk_gap": {
+    "max_us": 88.625,
+    "mean_us": 2.489778165025123,
+    "metric": "chunk_gap",
+    "n": 150062,
+    "p50_us": 0.083,
+    "p90_us": 10.667,
+    "p95_us": 14.458,
+    "p99_us": 20.5,
+    "stddev_us": 5.233692436696732
+  },
+  "chunks_per_response": {
+    "max": 502,
+    "min": 501
+  },
+  "concurrency": 1,
+  "errors": 0,
+  "label": "lat-sseburst-nomw-r1",
+  "latency": {
+    "max_us": 1918.875,
+    "mean_us": 1329.5862566666665,
+    "metric": "total",
+    "n": 300,
+    "p50_us": 1307.354,
+    "p90_us": 1623.3295,
+    "p95_us": 1668.30805,
+    "p99_us": 1782.6653299999996,
+    "stddev_us": 196.34949001955826
+  },
+  "mode": "sse",
+  "non_200": 0,
+  "request_bytes": 1024,
+  "requests": 300,
+  "rps": 723.3166237147192,
+  "stalls": 0,
+  "target": "http://127.0.0.1:18084/v1/chat/completions?stream=1&chunks=500&chunk_bytes=1024&interval_us=0",
+  "timeout_ms": 5000,
+  "ttfb": {
+    "max_us": 163.041,
+    "mean_us": 83.26972,
+    "metric": "ttfb",
+    "n": 300,
+    "p50_us": 77.771,
+    "p90_us": 111.13310000000003,
+    "p95_us": 121.05445000000002,
+    "p99_us": 133.01375,
+    "stddev_us": 18.610631642748558
+  },
+  "wall_seconds": 0.414756125
+}

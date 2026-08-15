@@ -1,0 +1,78 @@
+用法：
+    python3 scripts/perf/profile-summary.py            # 打印
+    python3 scripts/perf/profile-summary.py --save     # 同时写 results/profile-summary.txt
+
+# 归因方法（写清楚，免得数字被当成比它更精确的东西）
+
+`sample` 的调用图里，一行的样本数 = 「这个帧及其所有子帧」的样本数。所以
+**只有叶子帧的计数才是自身 CPU 时间**（下一行缩进不比自己深 = 叶子）。本脚本
+只统计叶子，这与 `sample` 自己的语义一致，不会出现自身时间为负这种把和算爆的
+情况。
+
+`__psynch_cvwait` / park 是线程**空闲**在等活干，不是开销。表里单列，并额外给
+一份「扣掉 park 之后的有效 CPU 占比」—— 那才是可比的口径。
+
+两个 profile 是在**同样的 15 秒、同样 concurrency=8 的负载**下采的。因为网关
+每秒服务的请求数比对照组少，所以这里的百分比是"每单位 CPU 花在哪"，不是
+"每请求花了多少"。要每请求的量，看分配计数表。
+
+
+##### 网关 全链路 (full)  叶子样本合计 = 58431 #####
+  分配器 malloc/free/realloc              11769   20.14%
+  memmove / memset / memcpy             2636    4.51%
+  getentropy（uuid v4 取熵）                 900    1.54%
+  serde_json                            1094    1.87%
+  网络系统调用 recv/writev/kevent             7221   12.36%
+  线程 park / 条件变量（空闲）                   11913   20.39%
+  取时间 mach_absolute_time / clock        1589    2.72%
+  其余                                   21309   36.47%
+  --- 扣掉 park 之后的有效 CPU 样本 = 46518 ---
+    分配器 malloc/free/realloc          占有效 CPU  25.30%
+    memmove / memset / memcpy        占有效 CPU   5.67%
+    getentropy（uuid v4 取熵）           占有效 CPU   1.93%
+    serde_json                       占有效 CPU   2.35%
+    网络系统调用 recv/writev/kevent        占有效 CPU  15.52%
+    取时间 mach_absolute_time / clock   占有效 CPU   3.42%
+  自身耗时 top 12 叶子帧：
+      10542 18.04%  __psynch_cvwait  (in libsystem_kernel.dylib)
+       2671  4.57%  __recvfrom  (in libsystem_kernel.dylib) + 8,4  [0x18f6d83bc,0x18f6d83b8]
+       2375  4.06%  writev  (in libsystem_kernel.dylib) + 8,4  [0x18f6d7b8c,0x18f6d7b88]
+       2127  3.64%  _xzm_free  (in libsystem_malloc.dylib)
+       1439  2.46%  _xzm_xzone_malloc_tiny  (in libsystem_malloc.dylib)
+       1052  1.80%  _platform_memmove  (in libsystem_platform.dylib)
+        884  1.51%  mach_absolute_time  (in libsystem_kernel.dylib)
+        747  1.28%  getentropy  (in libsystem_kernel.dylib) + 8,4  [0x18f6d4144,0x18f6d4140]
+        672  1.15%  __psynch_cvwait  (in libsystem_kernel.dylib) + 8,4  [0x18f6d750c,0x18f6d7508]
+        645  1.10%  <deduplicated_symbol>  (in libsystem_malloc.dylib)
+        622  1.06%  writev  (in libsystem_kernel.dylib) + 8,4,...  [0x18f6d7b8c,0x18f6d7b88,...]
+        587  1.00%  kevent  (in libsystem_kernel.dylib) + 8,4  [0x18f6d9fc4,0x18f6d9fc0]
+
+##### 对照组下界 (floor)  叶子样本合计 = 53367 #####
+  分配器 malloc/free/realloc               6084   11.40%
+  memmove / memset / memcpy             1520    2.85%
+  getentropy（uuid v4 取熵）                   0    0.00%
+  serde_json                               0    0.00%
+  网络系统调用 recv/writev/kevent            11719   21.96%
+  线程 park / 条件变量（空闲）                   15991   29.96%
+  取时间 mach_absolute_time / clock        1776    3.33%
+  其余                                   16277   30.50%
+  --- 扣掉 park 之后的有效 CPU 样本 = 37376 ---
+    分配器 malloc/free/realloc          占有效 CPU  16.28%
+    memmove / memset / memcpy        占有效 CPU   4.07%
+    getentropy（uuid v4 取熵）           占有效 CPU   0.00%
+    serde_json                       占有效 CPU   0.00%
+    网络系统调用 recv/writev/kevent        占有效 CPU  31.35%
+    取时间 mach_absolute_time / clock   占有效 CPU   4.75%
+  自身耗时 top 12 叶子帧：
+      10877 20.38%  __psynch_cvwait  (in libsystem_kernel.dylib)
+       4811  9.01%  writev  (in libsystem_kernel.dylib) + 8,4  [0x18f6d7b8c,0x18f6d7b88]
+       4476  8.39%  __recvfrom  (in libsystem_kernel.dylib) + 8,4  [0x18f6d83bc,0x18f6d83b8]
+       3673  6.88%  __psynch_cvwait  (in libsystem_kernel.dylib) + 8,4  [0x18f6d750c,0x18f6d7508]
+       1758  3.29%  kevent  (in libsystem_kernel.dylib) + 8,4  [0x18f6d9fc4,0x18f6d9fc0]
+        940  1.76%  _xzm_free  (in libsystem_malloc.dylib)
+        928  1.74%  mach_absolute_time  (in libsystem_kernel.dylib)
+        668  1.25%  _platform_memmove  (in libsystem_platform.dylib)
+        588  1.10%  __psynch_mutexwait  (in libsystem_kernel.dylib)
+        531  0.99%  _xzm_xzone_malloc_tiny  (in libsystem_malloc.dylib)
+        470  0.88%  writev  (in libsystem_kernel.dylib)
+        339  0.64%  mach_absolute_time  (in libsystem_kernel.dylib) + 108,112  [0x18f6d410c,0x18f6d4110]

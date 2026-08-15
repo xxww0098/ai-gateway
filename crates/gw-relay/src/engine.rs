@@ -37,10 +37,9 @@ use http::{HeaderMap, Method, StatusCode};
 use http_body::Frame;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, StreamBody};
-use tokio::time::{Instant, timeout, timeout_at};
+use tokio::time::{Instant, timeout};
 use url::Url;
 
-use crate::body::join;
 use crate::contract::{
     Relay, RelayBody, RelayError, RelayRequest, RelayResponse, RelayResponseBody, RelayTimeouts,
     RelayTransportError, UpstreamTarget, UsageProbe,
@@ -240,12 +239,22 @@ impl<T: Transport> Relay for RelayEngine<T> {
 
         // 上游给了 status，就再也没有 `Err` 了 —— 429 的 `retry-after`、
         // `x-ratelimit-*`、`request-id` 全部跟着 header 原样回去（缺陷 #3）。
-        let body = if is_event_stream(&head.headers) {
-            RelayResponseBody::Stream(watch_frames(head.body, probe, to.timeouts.stream_idle))
+        // 流式与非流式走**同一条**回写路径：逐帧转发，probe 在旁路看。
+        //
+        // 曾经这里为非流式分了一条 `collect_frames` 的岔路，收完最后一个字节才
+        // 返回响应头 —— 因为非流式的 usage 在完整 JSON 的末尾，probe 要整份 body。
+        // 那是把**计费的需要塞进了回写路径**，恰好违反本 crate 的核心原则。
+        // 实测代价（`docs/relay-perf-acceptance.md` §4.1）：1 MiB 响应比 floor 慢
+        // 493.7 µs，其中约 400 µs 不是拷贝，而是「上游读与客户端写从并行变串行」。
+        // 缓冲已经搬回旁路（见 [`crate::probe::SseUsageProbe`] 的 JSON 累积）。
+        //
+        // 差别只剩超时口径：流式看**帧间**空闲，非流式看整请求剩余预算。
+        let idle = if is_event_stream(&head.headers) {
+            to.timeouts.stream_idle
         } else {
-            let budget = to.timeouts.request.saturating_sub(started.elapsed());
-            collect_frames(head.body, probe, budget).await
+            to.timeouts.request.saturating_sub(started.elapsed())
         };
+        let body = RelayResponseBody::Stream(watch_frames(head.body, probe, idle));
 
         Ok(RelayResponse {
             status: head.status,
@@ -348,58 +357,6 @@ fn watch_frames(
         }
     }))
     .boxed()
-}
-
-/// 非流式：整体收进 [`RelayResponseBody::Buffered`]，probe 吃完整 body。
-///
-/// 中途失败时**不丢已经收到的字节** —— 降级成一个帧流：前缀原样交出去，
-/// 末尾接一个 `Err`，客户端照样能察觉截断（缺陷 #6 的非流式那一半）。
-///
-/// 错误体全程 [`Bytes`]，**不经过 `String`**（缺陷 #12）。
-async fn collect_frames(
-    mut body: BoxBody<Bytes, RelayError>,
-    probe: Option<Box<dyn UsageProbe>>,
-    budget: Duration,
-) -> RelayResponseBody {
-    let deadline = Instant::now() + budget;
-    let mut parts: Vec<Bytes> = Vec::new();
-
-    let failure = loop {
-        let Ok(next) = timeout_at(deadline, body.frame()).await else {
-            break Some(RelayError::Idle(budget));
-        };
-        match next {
-            None => break None,
-            Some(Ok(frame)) => {
-                if let Ok(data) = frame.into_data() {
-                    parts.push(data);
-                }
-            }
-            Some(Err(err)) => break Some(err),
-        }
-    };
-
-    let mut guard = ProbeGuard::new(probe);
-    match failure {
-        None => {
-            let whole = join(parts);
-            // 非流式也要能取 usage：同一套解析器吃完整 body。
-            guard.observe(&whole);
-            drop(guard);
-            RelayResponseBody::Buffered(whole)
-        }
-        Some(err) => {
-            for part in &parts {
-                guard.observe(part);
-            }
-            drop(guard);
-            let items = parts
-                .into_iter()
-                .map(|part| Ok(Frame::data(part)))
-                .chain(std::iter::once(Err(err)));
-            RelayResponseBody::Stream(StreamBody::new(stream::iter(items)).boxed())
-        }
-    }
 }
 
 /// 保证 [`UsageProbe::finish`] **恰好被调一次**，包括客户端中途断开那一次。

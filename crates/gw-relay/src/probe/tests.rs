@@ -275,3 +275,29 @@ fn non_data_sse_lines_are_ignored() {
         Some(5)
     );
 }
+
+/// 非流式 JSON 被切成多帧后，usage 照样解析得出来。
+///
+/// 守护的 bug：`observe` 只在**首帧**以 `{` 开头时解析一次整块。中继改成逐帧
+/// 转发（上游读与客户端写并行，见 `docs/relay-perf-acceptance.md` §4.1）之后，
+/// 1 MiB 的响应会被 reqwest 切成几十帧 —— 首帧是半截 JSON，解析必然失败。
+/// 那样每一次非流式请求都会静默落 fallback 计费，而没有任何断言会红。
+#[test]
+fn a_non_streaming_json_body_survives_being_split_across_frames() {
+    let whole = br#"{"id":"x","usage":{"prompt_tokens":11,"completion_tokens":22}}"#;
+
+    // 逐个切点都试一遍：任何一处被切开都不该丢 usage。
+    for cut in 1..whole.len() {
+        let (mut probe, handle) = SseUsageProbe::new(UsageShape::OpenAi);
+        probe.observe(&Bytes::copy_from_slice(&whole[..cut]));
+        probe.observe(&Bytes::copy_from_slice(&whole[cut..]));
+        Box::new(probe).finish();
+
+        let usage = handle
+            .get()
+            .expect("流已结束")
+            .unwrap_or_else(|| panic!("切点 {cut} 处丢了 usage"));
+        assert_eq!(usage.input_tokens, Some(11), "切点 {cut}");
+        assert_eq!(usage.output_tokens, Some(22), "切点 {cut}");
+    }
+}

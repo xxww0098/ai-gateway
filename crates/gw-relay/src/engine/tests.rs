@@ -15,6 +15,18 @@ use bytes::Bytes;
 use http::uri::PathAndQuery;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use http_body_util::BodyExt;
+/// 把回写 body 收成字节。
+///
+/// 测的是**客户端最终收到什么**，不是中继内部用了哪个 `RelayResponseBody` 变体
+/// —— 后者是实现选择，把它抄进断言就是规范 2.11 点名的那种测试。
+async fn body_bytes(body: RelayResponseBody) -> Bytes {
+    body.into_http_body()
+        .collect()
+        .await
+        .expect("回写 body 不该失败")
+        .to_bytes()
+}
+
 use url::Url;
 
 use super::{RelayEngine, RelayOptions, Transport, UpstreamHead, UpstreamRequest};
@@ -249,9 +261,7 @@ async fn an_upstream_error_status_is_a_response_with_all_its_headers() {
             "{name} 丢了"
         );
     }
-    let RelayResponseBody::Buffered(got) = response.body else {
-        panic!("非流式响应必须是 Buffered");
-    };
+    let got = body_bytes(response.body).await;
     assert_eq!(got, error_body, "错误体必须逐字节原样，不经过 String");
 }
 
@@ -443,14 +453,14 @@ async fn a_non_streaming_response_hands_the_probe_the_whole_body() {
     )
     .await;
 
-    let RelayResponseBody::Buffered(got) = response.body else {
-        panic!("非 event-stream 必须走 Buffered");
-    };
+    let got = body_bytes(response.body).await;
     assert_eq!(got.as_ref(), whole.as_slice());
 
+    // 非流式也逐帧转发（上游读与客户端写保持并行），所以 probe 看到的是
+    // **同一串帧**而不是一个大块 —— 攒整份 JSON 是 probe 自己在旁路做的事。
     let seen = log.frames.lock().expect("测试锁");
-    assert_eq!(seen.len(), 1, "非流式必须整块喂给 probe，不是逐帧");
-    assert_eq!(seen[0].as_ref(), whole.as_slice());
+    let fed: Vec<u8> = seen.iter().flat_map(|f| f.iter().copied()).collect();
+    assert_eq!(fed, whole, "probe 必须看到全部字节，一个不少");
     assert_eq!(log.finishes.load(Ordering::SeqCst), 1);
 }
 

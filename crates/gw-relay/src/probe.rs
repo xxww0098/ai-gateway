@@ -39,6 +39,14 @@ use crate::contract::{RelayUsage, UsageProbe};
 /// 这个闸门只会砍掉本来就解析不了的东西。
 const MAX_LINE: usize = 256 * 1024;
 
+/// 非流式 JSON body 的累积上限。
+///
+/// 非流式的 usage 在整份文档的末尾，所以 probe 必须攒齐才解析得动 ——
+/// 但这是**旁路**的攒，不在回写路径上（中继早就逐帧发给客户端了）。
+/// 超过就放弃解析、计费落 fallback，而不是无上限吃内存。
+/// 真实的非流式 LLM 响应远在这个量级之下。
+const MAX_JSON: usize = 8 * 1024 * 1024;
+
 /// 上游帧的形状。**不是** provider 名 —— `gemini` 与 `vertex` 的 wire 协议同构，
 /// 共用 [`UsageShape::Google`]；`openai` 与 `codex` 共用 [`UsageShape::OpenAi`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,8 +72,13 @@ pub struct SseUsageProbe {
     shape: UsageShape,
     /// 跨帧的半行。稳态长度 = `O(单行)`。
     pending: Vec<u8>,
-    /// 当前这一行已经超长，丢弃到下一个 `\n` 为止。
+    /// 当前这一行已经超长，丢弃到下一个 `\n` 为止；
+    /// 非流式路径上复用为「JSON 已超 [`MAX_JSON`]，放弃解析」。
     discarding: bool,
+    /// 非流式 JSON body 的旁路累积。`None` = 还没认定是 JSON。
+    json: Option<Vec<u8>>,
+    /// 认定 JSON 只看第一帧，之后不再改判。
+    seen_any_frame: bool,
     tally: RelayUsage,
     /// 有没有看到过**任何**一个 usage 字段。`false` → `finish()` 返回 `None`。
     seen: bool,
@@ -85,6 +98,8 @@ impl SseUsageProbe {
             shape,
             pending: Vec::new(),
             discarding: false,
+            json: None,
+            seen_any_frame: false,
             tally: RelayUsage::default(),
             seen: false,
             sink: sink.clone(),
@@ -99,6 +114,29 @@ impl SseUsageProbe {
     #[must_use]
     pub fn buffered_len(&self) -> usize {
         self.pending.len()
+    }
+
+    /// 非流式 JSON 的累积。超过 [`MAX_JSON`] 就放弃 —— usage 在文档末尾，
+    /// 截断的前缀解析不出任何东西，攒下去只是白占内存。放弃后
+    /// [`UsageProbe::finish`] 返回 `None`，计费落 fallback（诚实降级）。
+    ///
+    /// 注意这个上限**只影响计费精度，不影响转发** —— 中继早就把这些字节
+    /// 逐帧发给客户端了，probe 是旁路。
+    fn accumulate_json(&mut self, chunk: &[u8]) {
+        let Some(buf) = self.json.as_mut() else {
+            let mut buf = Vec::with_capacity(chunk.len());
+            buf.extend_from_slice(chunk);
+            self.json = Some(buf);
+            return;
+        };
+        if buf.len().saturating_add(chunk.len()) > MAX_JSON {
+            self.json = Some(Vec::new());
+            self.discarding = true;
+            return;
+        }
+        if !self.discarding {
+            buf.extend_from_slice(chunk);
+        }
     }
 
     /// 一行走完了（遇到 `\n`）。
@@ -178,12 +216,19 @@ impl UsageProbe for SseUsageProbe {
     fn observe(&mut self, frame: &Bytes) {
         let bytes: &[u8] = frame.as_ref();
 
-        // 非流式：中继把完整 body 作为一帧交进来，它是一个 JSON object 而不是
-        // SSE。SSE 的行永远以字段名开头（`data:` / `event:` / `:`），不会以 `{`
-        // 开头，所以这一发探测对流式路径是零成本的。
-        if trim(bytes).first() == Some(&b'{') {
-            self.absorb(bytes);
+        // 非流式：body 是一个 JSON object 而不是 SSE，usage 在**整份文档的末尾**，
+        // 所以必须攒齐才能解析。攒在**这里**（旁路），不是在回写路径上 ——
+        // 中继逐帧转发，客户端边收边拿，probe 自己慢慢攒。
+        //
+        // 判据：SSE 的行永远以字段名开头（`data:` / `event:` / `:`），不会以 `{`
+        // 开头，所以这一发探测对流式路径是零成本的；一旦认定是 JSON，
+        // 后续帧全部走累积，不再做行解析。
+        if self.json.is_some() || (!self.seen_any_frame && trim(bytes).first() == Some(&b'{')) {
+            self.seen_any_frame = true;
+            self.accumulate_json(bytes);
+            return;
         }
+        self.seen_any_frame = true;
 
         let mut rest = bytes;
         while let Some(idx) = rest.iter().position(|&b| b == b'\n') {
@@ -195,9 +240,14 @@ impl UsageProbe for SseUsageProbe {
     }
 
     fn finish(self: Box<Self>) -> Option<RelayUsage> {
+        let mut me = *self;
+        // 非流式：整份 JSON 攒齐了才解析得动。
+        if let Some(buf) = me.json.take() {
+            me.absorb(&buf);
+        }
         let Self {
             tally, seen, sink, ..
-        } = *self;
+        } = me;
         let outcome = seen.then_some(tally);
         sink.set(outcome.clone());
         outcome

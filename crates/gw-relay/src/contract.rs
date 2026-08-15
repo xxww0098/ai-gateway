@@ -325,7 +325,7 @@ impl RelayUsage {
 /// OpenAI↔Google、Anthropic↔Google（P1 四格，`translate/google.rs`），
 /// OpenAI↔Anthropic 双向（P2 三格，`translate/anthropic.rs`）。
 pub trait Translator: Send + Sync {
-    fn from_surface(&self) -> Surface;
+    fn surface(&self) -> Surface;
     fn to_dialect(&self) -> UpstreamDialect;
 
     /// 入口方言的请求体 → 上游方言的请求体。

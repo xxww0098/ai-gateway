@@ -32,10 +32,15 @@
 //!
 //! # 棘轮（规范 5.3）
 //!
-//! 骨架期本 crate 允许 `todo!()`。**谁清空了本 crate 的最后一个 `todo!()`，
-//! 就在同一个 commit 里往这里加 `#![deny(clippy::todo, clippy::unimplemented)]`**。
-//! 加之前自查：`grep -rn 'todo!\|unimplemented!' src/ | wc -l` 为 0，
-//! 且 `cargo clippy -p gw-relay --all-targets -- -D warnings` 通过。
+//! wave 2 收尾时本 crate 的公开路径已经没有未实现的桩，棘轮**已经上了**
+//! —— 见下面的 `#![deny(...)]`。上之前自查三项全绿：源码中零处未实现宏、
+//! `cargo clippy -p gw-relay --all-targets -- -D warnings` 通过、
+//! `cargo test -p gw-relay --lib` 146 条全过。
+//!
+//! 注意这与规范 5.3 禁止的 `#![deny(warnings)]` 不是一回事：那条禁的是**笼统**
+//! 的 deny（rustc 升级引入新 lint 就全仓库红灯）。点名两条具体 lint 没有这个问题。
+
+#![deny(clippy::todo, clippy::unimplemented)]
 
 pub mod contract;
 

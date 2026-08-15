@@ -1,0 +1,26 @@
+[package]
+name = "gw-ledger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false          # rule 2.10: internal crate, no external example readers
+
+[lints]
+workspace = true         # rule 4.2: the table is inert without this
+
+[dependencies]
+gw-model.workspace = true
+gw-infra.workspace = true
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+chrono = { workspace = true, features = ["clock", "std", "serde"] }
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chrono", "json", "macros", "rust_decimal"] }
+rust_decimal = { workspace = true, features = ["std"] }
+redis = { workspace = true, features = ["tokio-comp", "connection-manager", "script", "aio"] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
+thiserror.workspace = true
+tracing = { workspace = true, features = ["std"] }
+anyhow.workspace = true
+uuid = { workspace = true, features = ["v4", "std"] }

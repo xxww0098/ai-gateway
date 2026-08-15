@@ -1,0 +1,268 @@
+@import "tailwindcss";
+@config "../tailwind.config.js";
+@import "tw-animate-css";
+
+/* class-based dark mode (matches previous darkMode: ["class"]) */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Preserve v3 container center + padding behavior */
+@utility container {
+  margin-inline: auto;
+  padding-inline: 2rem;
+  max-width: 1400px;
+}
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 173 80% 40%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 173 80% 40%;
+    --radius: 0.75rem;
+  }
+
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 173 80% 40%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 173 80% 40%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    @apply scroll-smooth antialiased;
+    overflow-x: clip;
+  }
+
+  body {
+    @apply bg-background text-foreground min-h-screen;
+    overflow-x: clip;
+  }
+
+  /* Coarse pointers (phones/tablets): larger default hit targets */
+  @media (pointer: coarse) {
+    .btn {
+      min-height: 2.75rem; /* 44px */
+    }
+  }
+
+  /* Custom Scrollbar */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+
+  *:hover,
+  *:focus-within {
+    scrollbar-color: rgba(156, 163, 175, 0.5) transparent;
+  }
+
+  .dark *:hover,
+  .dark *:focus-within {
+    scrollbar-color: rgba(75, 85, 99, 0.5) transparent;
+  }
+
+  ::-webkit-scrollbar {
+    @apply h-2 w-2;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-transparent;
+    transition: background-color 0.2s ease;
+  }
+
+  *:hover::-webkit-scrollbar-thumb {
+    @apply bg-gray-300/50 dark:bg-dark-600/50;
+  }
+
+  *:hover::-webkit-scrollbar-thumb:hover {
+    @apply bg-gray-400 dark:bg-dark-500;
+  }
+
+  ::selection {
+    @apply bg-primary-500/20 text-primary-900 dark:text-primary-100;
+  }
+}
+
+/* ============ BUTTONS ============ */
+@utility btn {
+  @apply inline-flex items-center justify-center gap-2;
+  @apply rounded-xl px-4 py-2.5 text-sm font-medium;
+  @apply transition-all duration-200 ease-out;
+  @apply focus:outline-hidden focus:ring-2 focus:ring-primary-500/50 focus:ring-offset-2;
+  @apply disabled:transform-none disabled:cursor-not-allowed disabled:opacity-50;
+  @apply active:scale-[0.98];
+}
+
+@utility btn-primary {
+  @apply bg-primary-600;
+  @apply text-white shadow-md shadow-primary-500/25;
+  @apply hover:bg-primary-700 hover:shadow-lg hover:shadow-primary-500/30;
+  @apply active:bg-primary-800;
+  @apply dark:shadow-primary-500/20;
+}
+
+@utility btn-secondary {
+  @apply bg-secondary text-secondary-foreground;
+  @apply border border-border;
+  @apply shadow-xs hover:bg-secondary/80;
+}
+
+@utility btn-ghost {
+  @apply bg-transparent text-gray-600 dark:text-gray-300;
+  @apply hover:bg-muted dark:hover:bg-dark-800;
+}
+
+@utility btn-danger {
+  @apply bg-destructive text-destructive-foreground shadow-xs;
+  @apply hover:bg-destructive/90;
+}
+
+@utility btn-success {
+  @apply bg-linear-to-r from-emerald-500 to-emerald-600;
+  @apply text-white shadow-md shadow-emerald-500/25;
+  @apply hover:from-emerald-600 hover:to-emerald-700 hover:shadow-lg hover:shadow-emerald-500/30;
+  @apply dark:shadow-emerald-500/20;
+}
+
+@utility btn-warning {
+  @apply bg-linear-to-r from-amber-500 to-amber-600;
+  @apply text-white shadow-md shadow-amber-500/25;
+  @apply hover:from-amber-600 hover:to-amber-700 hover:shadow-lg hover:shadow-amber-500/30;
+  @apply dark:shadow-amber-500/20;
+}
+
+/* ============ INPUTS ============ */
+@utility input {
+  @apply w-full rounded-xl px-4 py-2.5 text-sm;
+  @apply bg-white dark:bg-dark-800;
+  @apply border border-gray-200 dark:border-dark-600;
+  @apply text-gray-900 dark:text-gray-100;
+  @apply placeholder:text-gray-400 dark:placeholder:text-dark-400;
+  @apply transition-all duration-200;
+  @apply focus:border-primary-500 focus:outline-hidden focus:ring-2 focus:ring-primary-500/30;
+  @apply disabled:cursor-not-allowed disabled:bg-gray-100 dark:disabled:bg-dark-900;
+}
+
+@utility input-label {
+  @apply mb-1.5 block text-sm font-medium text-gray-700 dark:text-gray-300;
+}
+
+@utility input-error {
+  @apply border-red-500 focus:border-red-500 focus:ring-red-500/30;
+}
+
+@utility input-error-text {
+  @apply mt-1 text-xs text-red-500;
+}
+
+/* ============ GLASS & CARDS ============ */
+@utility glass {
+  @apply bg-white/80 backdrop-blur-xl dark:bg-dark-800/80;
+}
+
+@utility glass-card {
+  @apply bg-white/70 dark:bg-dark-800/70;
+  @apply backdrop-blur-xl;
+  @apply rounded-2xl;
+  @apply border border-white/20 dark:border-dark-700/50;
+  @apply shadow-glass;
+  @apply transition-all duration-300;
+}
+
+@utility card {
+  @apply bg-white dark:bg-dark-800/50;
+  @apply rounded-2xl;
+  @apply border border-border;
+  @apply shadow-card;
+  @apply transition-all duration-300;
+}
+
+@utility card-hover {
+  @apply hover:-translate-y-0.5 hover:shadow-card-hover;
+  @apply hover:border-gray-200 dark:hover:border-dark-600;
+}
+
+/* ============ STAT CARDS ============ */
+@utility stat-card {
+  @apply card p-5;
+  @apply flex items-start gap-4;
+}
+
+@utility stat-icon {
+  @apply h-12 w-12 rounded-xl;
+  @apply flex items-center justify-center;
+  @apply text-xl;
+}
+
+/* ============ TABLES ============ */
+@utility table {
+  @apply w-full text-left text-sm;
+}
+
+@utility text-gradient {
+  @apply bg-linear-to-r from-primary-500 to-accent-500 bg-clip-text text-transparent;
+}
+
+@utility scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* Table element styles that can't be pure utilities (descendants) */
+@layer components {
+  .table th {
+    @apply border-b border-border bg-gray-50 px-4 py-3 font-medium;
+    @apply text-gray-600 dark:bg-dark-800/50 dark:text-dark-300;
+  }
+
+  .table td {
+    @apply border-b border-border/50 px-4 py-3;
+    @apply text-gray-700 dark:text-gray-300;
+  }
+
+  .table tbody tr {
+    @apply transition-colors duration-150;
+    @apply hover:bg-gray-50/50 dark:hover:bg-dark-800/30;
+  }
+}

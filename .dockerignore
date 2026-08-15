@@ -1,0 +1,15 @@
+# Keep the build context small and reproducible.
+.git
+.github
+.claude
+frontend/node_modules
+frontend/dist
+docs
+*.md
+# Local build artifacts / prebuilt binaries.
+cpa-gateway
+/gateway
+*.test
+/tmp
+# Scratch / editor.
+.DS_Store

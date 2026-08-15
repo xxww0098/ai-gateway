@@ -1,0 +1,43 @@
+[package]
+name = "gw-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "gw_server"
+path = "src/lib.rs"
+doctest = false
+
+[[bin]]
+name = "gw-server"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+gw-config.workspace = true
+gw-model.workspace = true
+gw-infra.workspace = true
+gw-authcore.workspace = true
+gw-pricing.workspace = true
+gw-ledger.workspace = true
+gw-provider.workspace = true
+gw-proxy.workspace = true
+gw-panel.workspace = true
+axum = { workspace = true, features = ["http1", "http2", "json", "query", "tokio", "macros", "tracing"] }
+tower = { workspace = true, features = ["util"] }
+tower-http = { workspace = true, features = ["trace", "cors", "fs", "compression-gzip", "limit"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync", "fs"] }
+tokio-util = { workspace = true, features = ["rt"] }
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+chrono = { workspace = true, features = ["clock", "std", "serde"] }
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chrono", "macros", "migrate"] }
+redis = { workspace = true, features = ["tokio-comp", "connection-manager", "aio"] }
+thiserror.workspace = true
+tracing = { workspace = true, features = ["std"] }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "std", "ansi"] }
+anyhow.workspace = true
+futures = { workspace = true, features = ["std", "async-await"] }

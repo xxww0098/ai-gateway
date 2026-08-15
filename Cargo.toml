@@ -1,0 +1,127 @@
+# Virtual manifest (rule 1.2): no [package] on the root, so no crate becomes
+# "the default one" that new code gets dumped into.
+[workspace]
+resolver = "3"                       # rule 4.4: virtual manifests do NOT infer it
+members = ["crates/*", "tools/xtask"]
+default-members = ["crates/*"]       # rule 3.13: bare `cargo build` skips xtask
+
+[workspace.package]
+version = "0.0.0"                    # rule 1.4: internal crates carry no semver
+edition = "2024"
+rust-version = "1.97"
+
+# Rule 4.1: pin VERSION + default-features here only. Business features belong
+# to the member that actually needs them (antipattern #24: putting serde's
+# `derive` here forces every member to compile the serde macros).
+[workspace.dependencies]
+tokio = { version = "1", default-features = false }
+tokio-stream = { version = "0.1", default-features = false }
+# TaskTracker: detached settlement tasks must be drained before the runtime
+# drops on SIGTERM, or in-flight Settle calls are silently aborted.
+tokio-util = { version = "0.7", default-features = false }
+async-trait = "0.1"
+futures = { version = "0.3", default-features = false }
+futures-util = { version = "0.3", default-features = false }
+
+axum = { version = "0.8", default-features = false }
+tower = { version = "0.5", default-features = false }
+tower-http = { version = "0.6", default-features = false }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+mime = "0.3"
+url = "2"
+
+reqwest = { version = "0.12", default-features = false }
+eventsource-stream = "0.2"
+
+sqlx = { version = "0.8", default-features = false }
+# Postgres NUMERIC/DECIMAL cannot decode into f64 in sqlx (f64 <-> FLOAT8 only).
+# Money columns in the existing schema are `decimal`, so decoding needs this.
+rust_decimal = { version = "1", default-features = false }
+redis = { version = "0.27", default-features = false }
+
+serde = { version = "1", default-features = false }
+serde_json = { version = "1", default-features = false }
+serde_yaml_ng = "0.10"
+
+chrono = { version = "0.4", default-features = false }
+uuid = { version = "1", default-features = false }
+thiserror = "2"
+anyhow = "1"
+tracing = { version = "0.1", default-features = false }
+tracing-subscriber = { version = "0.3", default-features = false }
+
+jsonwebtoken = { version = "9", default-features = false }
+aes-gcm = { version = "0.10", default-features = false }
+bcrypt = { version = "0.16", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+hmac = "0.12"
+hex = "0.4"
+base64 = "0.22"
+rand = { version = "0.8", default-features = false }
+
+dashmap = "6"
+arc-swap = "1"
+parking_lot = "0.12"
+once_cell = "1"
+
+# Local crates (rule 1.12: members must never hand-write `path = "../x"`).
+gw-config = { path = "crates/gw-config" }
+gw-model = { path = "crates/gw-model" }
+gw-infra = { path = "crates/gw-infra" }
+gw-authcore = { path = "crates/gw-authcore" }
+gw-pricing = { path = "crates/gw-pricing" }
+gw-ledger = { path = "crates/gw-ledger" }
+gw-provider = { path = "crates/gw-provider" }
+gw-proxy = { path = "crates/gw-proxy" }
+gw-panel = { path = "crates/gw-panel" }
+
+# Rule 4.2 + 5.3 ratchet: only `deny` what has ZERO violations today. The
+# skeleton still carries todo!()/unimplemented!(), so those stay `warn` and get
+# flipped to deny in the same commit that removes the last one.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+unreachable_pub = "warn"             # pairs with rule 1.7 (shrink `pub`)
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+print_stdout = "warn"
+todo = "deny"                        # ratcheted: every crate verified clean (rule 5.3).
+unimplemented = "deny"               # ratcheted: same.
+
+# ---------------------------------------------------------------- profiles
+# Rule 3.11. NOTE rule 3.3: `build-override` and per-package overrides are a
+# PAIR. Removing the `"*"` wildcard without adding build-override measured
+# SLOWER than doing nothing (269s vs 255s); with it, 75.8s.
+[profile.dev]
+opt-level = 0
+debug = 1                            # line tables only: enough for backtraces
+incremental = true
+codegen-units = 256
+
+[profile.dev.build-override]         # code that RUNS AT COMPILE TIME
+opt-level = 3
+debug = false
+
+[profile.fast]
+inherits = "dev"
+debug = 0
+
+[profile.ci]                         # rule 3.12
+inherits = "dev"
+incremental = false
+debug = 0
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+incremental = false
+
+[profile.release-fast]
+inherits = "release"
+lto = false
+codegen-units = 16

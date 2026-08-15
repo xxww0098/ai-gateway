@@ -1,0 +1,56 @@
+[package]
+name = "gw-panel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false          # rule 2.10: internal crate, no external example readers
+
+# Rule 2.8: ONE integration binary, submodules inside it — not one binary per
+# file. Cargo only auto-discovers `tests/*.rs`, so a `tests/<name>/main.rs`
+# layout must be declared explicitly or every file under it is dead code.
+[[test]]
+name = "panel"
+path = "tests/panel/main.rs"
+
+[lints]
+workspace = true         # rule 4.2: the table is inert without this
+
+[dependencies]
+gw-config.workspace = true
+gw-model.workspace = true
+gw-infra.workspace = true
+gw-authcore.workspace = true
+gw-pricing.workspace = true
+gw-ledger.workspace = true
+gw-provider.workspace = true
+axum = { workspace = true, features = ["http1", "http2", "json", "query", "form", "matched-path", "original-uri", "tokio", "macros", "multipart", "tracing"] }
+tower = { workspace = true, features = ["util"] }
+tower-http = { workspace = true, features = ["trace", "cors", "limit"] }
+# OAuth token exchange in the `upstream` domain talks to Google/Anthropic/OpenAI
+# token endpoints directly. Narrower feature set than gw-provider: the
+# panel never streams or uploads, so no `stream`/`multipart` (rule 3.6).
+reqwest = { workspace = true, features = ["json", "rustls-tls", "http2", "charset"] }
+http.workspace = true
+bytes.workspace = true
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+chrono = { workspace = true, features = ["clock", "std", "serde"] }
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chrono", "json", "macros", "rust_decimal"] }
+rust_decimal = { workspace = true, features = ["std"] }
+redis = { workspace = true, features = ["tokio-comp", "connection-manager", "script", "aio"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
+futures = { workspace = true, features = ["std", "async-await"] }
+thiserror.workspace = true
+tracing = { workspace = true, features = ["std"] }
+anyhow.workspace = true
+uuid = { workspace = true, features = ["v4", "std"] }
+hmac.workspace = true
+sha2 = { workspace = true, features = ["std"] }
+hex.workspace = true
+base64.workspace = true
+rand = { workspace = true, features = ["std", "std_rng"] }
+bcrypt = { workspace = true, features = ["std"] }
+mime.workspace = true
+url.workspace = true

@@ -1,0 +1,36 @@
+[package]
+name = "gw-authcore"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false          # rule 2.10: internal crate, no external example readers
+
+[lints]
+workspace = true         # rule 4.2: the table is inert without this
+
+[dependencies]
+gw-config.workspace = true
+gw-model.workspace = true
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+chrono = { workspace = true, features = ["clock", "std", "serde"] }
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chrono", "json", "macros"] }
+jsonwebtoken = { workspace = true, features = ["use_pem"] }
+aes-gcm = { workspace = true, features = ["aes", "alloc", "getrandom"] }
+bcrypt = { workspace = true, features = ["std"] }
+sha2 = { workspace = true, features = ["std"] }
+hmac.workspace = true
+hex.workspace = true
+base64.workspace = true
+rand = { workspace = true, features = ["std", "std_rng"] }
+thiserror.workspace = true
+tracing = { workspace = true, features = ["std"] }
+async-trait.workspace = true
+anyhow.workspace = true
+
+# Rule 2.5: test-only. This crate has no runtime tokio dependency, so
+# `#[tokio::test]` needs it declared here (`rt` + `macros` is the minimum).
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

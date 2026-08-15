@@ -1,0 +1,3 @@
+# Rule 5.1: checks live in `cargo xtask`, orchestration stays in shell.
+[alias]
+xtask = "run -p xtask --"

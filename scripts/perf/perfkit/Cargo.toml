@@ -1,0 +1,53 @@
+# 独立压测工具箱。
+#
+# 它**故意**是自己的 workspace（下面那个空 `[workspace]` 表），原因有二：
+#   1. CONTRACT.md 把根 `Cargo.toml` 划给协调者独占，audit-perf 不许改它；
+#   2. 压测装置不该进产品构建图 —— `cargo build --workspace` 不应该编它。
+#
+# 它通过 path 依赖引用 crates/ 下的真实 crate（**只读引用，不改一行**），
+# 所以量到的是真 gw-proxy / 真 gw-provider，不是复刻品。
+[workspace]
+
+[package]
+name = "perfkit"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[dependencies]
+# 被测对象：真实内核，只读引用。
+gw-proxy = { path = "../../../crates/gw-proxy" }
+gw-provider = { path = "../../../crates/gw-provider" }
+gw-authcore = { path = "../../../crates/gw-authcore" }
+
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "time",
+    "io-util",
+    "sync",
+    "signal",
+] }
+tokio-util = { version = "0.7", features = ["rt"] }
+axum = { version = "0.8", features = ["http1", "http2", "json", "query", "tokio"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "http2"] }
+http = "1"
+bytes = "1"
+futures = { version = "0.3", features = ["std", "async-await"] }
+futures-util = { version = "0.3", features = ["std", "async-await"] }
+serde = { version = "1", features = ["derive", "std"] }
+serde_json = { version = "1", features = ["std"] }
+async-trait = "0.1"
+anyhow = "1"
+chrono = { version = "0.4", features = ["clock", "std"] }
+
+# 与根 workspace 的 [profile.release] 逐字一致 —— 基线必须在同一套 codegen
+# 设置下测，否则「网关 vs 下界」的差值里会混进编译参数的差异。
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+incremental = false

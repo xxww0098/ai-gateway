@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%" fill="none">
+  <!-- Outer Gateway Arc 'C' -->
+  <path d="M 360 152 A 148 148 0 1 0 360 360"
+        stroke="#0F172A"
+        stroke-width="28"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+
+  <!-- Inner Concentric Stream Conduit -->
+  <path d="M 315 197 A 84 84 0 1 0 315 315"
+        stroke="#0D9488"
+        stroke-width="22"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+
+  <!-- Central Precision Data Beam -->
+  <path d="M 180 256 L 275 256"
+        stroke="#0F172A"
+        stroke-width="20"
+        stroke-linecap="round"/>
+
+  <!-- Focal Core Node -->
+  <circle cx="308" cy="256" r="15" fill="#0D9488"/>
+  <circle cx="308" cy="256" r="6" fill="#FFFFFF"/>
+</svg>

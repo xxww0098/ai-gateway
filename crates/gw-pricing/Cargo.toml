@@ -1,0 +1,25 @@
+[package]
+name = "gw-pricing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false          # rule 2.10: internal crate, no external example readers
+
+[lints]
+workspace = true         # rule 4.2: the table is inert without this
+
+[dependencies]
+gw-model.workspace = true
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+chrono = { workspace = true, features = ["clock", "std", "serde"] }
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chrono", "macros", "rust_decimal"] }
+rust_decimal = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
+thiserror.workspace = true
+tracing = { workspace = true, features = ["std"] }
+arc-swap.workspace = true
+parking_lot.workspace = true
+anyhow.workspace = true

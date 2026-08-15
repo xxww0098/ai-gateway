@@ -1,0 +1,83 @@
+server:
+  host: 127.0.0.1
+  port: 8888
+
+database:
+  host: 127.0.0.1
+  port: 5432
+  user: cpa_gateway
+  password: ""
+  dbname: cpa_gateway
+  sslmode: disable
+  # Connection pool tuning (optional). Omit/0 → gateway defaults (25/200/30m),
+  # sized for a hot proxy path. Also settable via DB_MAX_IDLE_CONNS /
+  # DB_MAX_OPEN_CONNS / DB_CONN_MAX_LIFETIME_MINUTES.
+  max_idle_conns: 0
+  max_open_conns: 0
+  conn_max_lifetime_minutes: 0
+
+redis:
+  addr: 127.0.0.1:6379
+  password: ""
+  db: 0
+
+auth:
+  jwt:
+    secret: ""
+    expiry_hours: 24
+  # 32-byte key (hex/base64) enabling AES-GCM encryption-at-rest of upstream
+  # provider credentials (auth_records.metadata). Empty = cleartext (not
+  # recommended for production). Prefer the CREDENTIAL_ENCRYPTION_KEY env var.
+  credential_encryption_key: ""
+  # First-run admin bootstrap: on a fresh deploy with no admin yet, the user
+  # with this exact email is promoted to admin (at startup if already registered,
+  # otherwise the moment they register) so you can reach the ops panel without
+  # manual SQL. Inert once any admin exists. Prefer the BOOTSTRAP_ADMIN_EMAIL env
+  # var. Leave empty to disable.
+  bootstrap_admin_email: ""
+
+sdk:
+  base_url: https://sdk.example.com
+  api_key: ""
+  timeout_seconds: 30
+  openai:
+    enabled: true
+    base_url: ""
+    api_key: ""
+  openai_compatible:
+    enabled: false
+    base_url: ""
+    api_key: ""
+  claude:
+    enabled: false
+    base_url: ""
+    api_key: ""
+  gemini:
+    enabled: false
+    base_url: ""
+    api_key: ""
+  codex:
+    enabled: false
+    base_url: ""
+    api_key: ""
+  vertex:
+    enabled: false
+    base_url: ""
+    api_key: ""
+
+frontend:
+  port: 3000
+
+billing:
+  hold_amount: 100
+  default_price_per_1k_tokens: 0.001
+  hold_ttl_seconds: 3600
+  # strict_usage_metadata_mode controls how billing settles a successful
+  # upstream response when the provider's usage metadata envelope is missing
+  # (e.g. OpenAI streaming response without a terminal `usage` event).
+  #   false (default): conservative fallback — settle at least the
+  #     Active_Hold_Amount so tenants cannot obtain free upstream output.
+  #   true: strict mode — do NOT settle or release; leave the Hold in place
+  #     until it expires via TTL (or out-of-band reconciliation), and write
+  #     a UsageLog row with Failed=true for operator follow-up.
+  strict_usage_metadata_mode: false

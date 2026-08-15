@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# CI is a third build shape, distinct from a cold local build and a hot
+# incremental one: incremental is pure overhead on an always-cold runner, and
+# debuginfo is the main driver of cache size. See Cargo.toml [profile.ci].
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  backend:
+    name: Rust backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins 1.97.1 and requests clippy + rustfmt. `minimal`
+      # would not ship them, which is why the file lists components explicitly.
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Caches the dependency build, not the whole target/ — our own crates
+      # change every push and would only make the cache big and dirty.
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      # Warnings are denied here, never via `#![deny(warnings)]` in source: a
+      # rustc upgrade that adds a lint must not turn the whole tree red for
+      # every downstream consumer.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Machine-checked architecture rules. The highest-value one is module
+      # reachability: an .rs file that no `mod` declaration reaches compiles to
+      # nothing, and neither the compiler nor code review will say a word.
+      - name: Architecture gates
+        run: cargo xtask ci
+
+      - name: Test
+        run: cargo test --workspace
+
+  integration:
+    name: Rust integration (Postgres + Redis)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+        ports: ["5432:5432"]
+      redis:
+        image: redis:8
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 10s
+          --health-timeout 5s --health-retries 5
+        ports: ["6379:6379"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The tests that need real services are #[ignore]d so a bare `cargo test`
+      # stays honest on a machine without them. This job is where they run.
+      - name: Test (ignored tier)
+        env:
+          GW_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+          GW_TEST_REDIS_URL: redis://127.0.0.1:6379
+        run: cargo test --workspace -- --ignored
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build

@@ -1,0 +1,11 @@
+{
+  "label": "alloc-small-full",
+  "requests": 5000,
+  "wall_seconds": 0.4210031032562256,
+  "alloc_count": 1165122,
+  "alloc_bytes": 280583748,
+  "dealloc_count": 1105118,
+  "realloc_count": 60002,
+  "alloc_per_req": 233.0244,
+  "bytes_per_req": 56116.7496
+}

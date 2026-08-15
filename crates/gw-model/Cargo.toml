@@ -1,0 +1,25 @@
+[package]
+name = "gw-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false          # rule 2.10: internal crate, no external example readers
+
+[lints]
+workspace = true         # rule 4.2: the table is inert without this
+
+[dependencies]
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+chrono = { workspace = true, features = ["clock", "std", "serde"] }
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "macros", "migrate", "rust_decimal"] }
+rust_decimal = { workspace = true, features = ["std"] }
+uuid = { workspace = true, features = ["v4", "serde", "std"] }
+thiserror.workspace = true
+
+# Rule 2.5: test-only. The seed helpers are `async fn`, so their tests need a
+# runtime, but nothing in this crate requires tokio at build time.
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

@@ -1,0 +1,27 @@
+[package]
+name = "gw-infra"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false          # rule 2.10: internal crate, no external example readers
+
+[lints]
+workspace = true         # rule 4.2: the table is inert without this
+
+[dependencies]
+gw-config.workspace = true
+gw-model.workspace = true
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+chrono = { workspace = true, features = ["clock", "std", "serde"] }
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "macros"] }
+redis = { workspace = true, features = ["tokio-comp", "connection-manager", "script", "aio", "keep-alive"] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
+thiserror.workspace = true
+tracing = { workspace = true, features = ["std"] }
+dashmap.workspace = true
+parking_lot.workspace = true
+once_cell.workspace = true
+anyhow.workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "gw-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false          # rule 2.10: internal crate, no external example readers
+
+[lints]
+workspace = true         # rule 4.2: the table is inert without this
+
+[dependencies]
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+serde_yaml_ng.workspace = true
+thiserror.workspace = true
+tracing = { workspace = true, features = ["std"] }

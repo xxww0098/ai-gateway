@@ -1,0 +1,449 @@
+//! Unit tests for the Anthropic executor.
+//!
+//! These cover the parts of the executor that need no socket: the credential
+//! precedence ladder, endpoint normalisation, header injection, and SSE usage
+//! merging.
+
+use gw_authcore::AuthRecord;
+use serde_json::json;
+
+use super::*;
+use crate::common::{REQUESTED_MODEL_METADATA_KEY, requested_model};
+
+fn auth_with(metadata: serde_json::Value) -> AuthRecord {
+    AuthRecord {
+        metadata,
+        ..AuthRecord::new("auth-1", PROVIDER_CLAUDE, chrono::Utc::now())
+    }
+}
+
+fn provider(base_url: &str, api_key: &str) -> ClaudeProvider {
+    ClaudeProvider::new(
+        &ProviderConfig {
+            base_url: base_url.to_owned(),
+            api_key: api_key.to_owned(),
+            enabled: true,
+        },
+        0,
+    )
+    .expect("provider")
+}
+
+fn endpoint(base_url: &str) -> Url {
+    ClaudeProvider::messages_endpoint(&[], base_url).expect("endpoint")
+}
+
+// --- endpoint ---------------------------------------------------------------
+
+/// The three accepted spellings of a base URL converge on one endpoint. That
+/// convergence — not any particular path string — is what an operator relies on
+/// when pointing the gateway at a relay.
+#[test]
+fn every_base_url_spelling_resolves_to_the_same_endpoint() {
+    let bare = endpoint("https://relay.example.com");
+    let versioned = endpoint("https://relay.example.com/v1");
+    let complete = endpoint(bare.as_str());
+
+    assert_eq!(bare, versioned);
+    assert_eq!(
+        bare, complete,
+        "an already-complete endpoint must not grow a second path"
+    );
+}
+
+#[test]
+fn trailing_slashes_and_padding_do_not_change_the_endpoint() {
+    assert_eq!(
+        endpoint("https://relay.example.com"),
+        endpoint("  https://relay.example.com///  ")
+    );
+}
+
+#[test]
+fn caller_query_parameters_reach_the_endpoint_in_order() {
+    let url = ClaudeProvider::messages_endpoint(
+        &[
+            ("beta".to_owned(), "first".to_owned()),
+            ("beta".to_owned(), "second".to_owned()),
+        ],
+        "https://relay.example.com",
+    )
+    .expect("endpoint");
+    let pairs: Vec<_> = url
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![
+            ("beta".to_owned(), "first".to_owned()),
+            ("beta".to_owned(), "second".to_owned())
+        ],
+        "duplicate keys and their order are both significant"
+    );
+}
+
+#[test]
+fn a_base_url_without_a_host_is_rejected() {
+    assert!(ClaudeProvider::messages_endpoint(&[], "not-a-url").is_err());
+    assert!(
+        ClaudeProvider::messages_endpoint(&[], "https://").is_err(),
+        "a hostless URL must not re-parse with a path segment as the host"
+    );
+    assert!(
+        ClaudeProvider::new(
+            &ProviderConfig {
+                base_url: "not-a-url".to_owned(),
+                api_key: String::new(),
+                enabled: true,
+            },
+            0
+        )
+        .is_err()
+    );
+}
+
+// --- credentials ------------------------------------------------------------
+
+/// The ladder is strictly ordered: each rung is consulted only when every rung
+/// above it is absent.
+#[test]
+fn credential_precedence_prefers_the_most_specific_rung() {
+    let provider = provider("https://api.example.com", "from-config");
+
+    let all = auth_with(json!({
+        "api_key": "top-api-key",
+        "access_token": "top-access-token",
+        "token_data": {"api_key": "nested-api-key", "access_token": "nested-access-token"},
+        "storage": {"APIKey": "stored-api-key"},
+    }));
+    assert_eq!(
+        provider.resolve_credentials(Some(&all)).0.value,
+        "top-api-key"
+    );
+
+    let nested_key = auth_with(json!({
+        "access_token": "top-access-token",
+        "token_data": {"api_key": "nested-api-key"},
+    }));
+    assert_eq!(
+        provider.resolve_credentials(Some(&nested_key)).0.value,
+        "nested-api-key",
+        "a nested api_key still outranks any access token"
+    );
+
+    let oauth = auth_with(json!({
+        "access_token": "top-access-token",
+        "token_data": {"access_token": "nested-access-token"},
+    }));
+    let resolved = provider.resolve_credentials(Some(&oauth)).0;
+    assert_eq!(resolved.value, "top-access-token");
+    assert_eq!(resolved.source, CredentialSource::OauthToken);
+
+    let stored = auth_with(json!({"storage": {"AccessToken": "stored-access-token"}}));
+    assert_eq!(
+        provider.resolve_credentials(Some(&stored)).0.value,
+        "stored-access-token"
+    );
+
+    let fallback = provider.resolve_credentials(Some(&auth_with(json!({})))).0;
+    assert_eq!(fallback.value, "from-config");
+    assert_eq!(fallback.source, CredentialSource::ApiKey);
+}
+
+#[test]
+fn a_record_without_any_credential_falls_back_to_the_configured_key() {
+    let provider = provider("https://api.example.com", "from-config");
+    assert_eq!(provider.resolve_credentials(None).0.value, "from-config");
+}
+
+/// The persisted blob is written by two different producers, so both the JSON
+/// spelling and the struct field name have to resolve.
+#[test]
+fn stored_credentials_resolve_under_either_spelling() {
+    let provider = provider("https://api.example.com", "");
+    for (stored, expected) in [
+        (json!({"storage": {"api_key": "snake"}}), "snake"),
+        (json!({"storage": {"APIKey": "pascal"}}), "pascal"),
+    ] {
+        assert_eq!(
+            provider
+                .resolve_credentials(Some(&auth_with(stored)))
+                .0
+                .value,
+            expected
+        );
+    }
+}
+
+#[test]
+fn a_record_can_override_the_base_url() {
+    let provider = provider("https://api.example.com", "k");
+    for key in ["base_url", "base-url"] {
+        let mut auth = auth_with(json!({}));
+        auth.attributes
+            .insert(key.to_owned(), "https://override.example.com/".to_owned());
+        assert_eq!(
+            provider.resolve_credentials(Some(&auth)).1,
+            "https://override.example.com"
+        );
+    }
+}
+
+#[test]
+fn refresh_token_precedence_matches_the_credential_ladder() {
+    let cases = [
+        (
+            json!({
+                "refresh_token": "top",
+                "token_data": {"refresh_token": "nested"},
+                "storage": {"RefreshToken": "stored"},
+            }),
+            "top",
+        ),
+        (
+            json!({
+                "token_data": {"refresh_token": "nested"},
+                "storage": {"RefreshToken": "stored"},
+            }),
+            "nested",
+        ),
+        (json!({"storage": {"refresh_token": "stored"}}), "stored"),
+    ];
+    for (metadata, expected) in cases {
+        assert_eq!(
+            ClaudeProvider::resolve_refresh_token(Some(&auth_with(metadata))).as_deref(),
+            Some(expected)
+        );
+    }
+    assert!(ClaudeProvider::resolve_refresh_token(Some(&auth_with(json!({})))).is_none());
+    assert!(ClaudeProvider::resolve_refresh_token(None).is_none());
+}
+
+/// Some tooling persists `token_data` as a JSON *string*. The resolver has to
+/// see through that, or a perfectly good record silently loses its credential.
+#[test]
+fn token_data_encoded_as_a_json_string_is_still_readable() {
+    let provider = provider("https://api.example.com", "");
+    let auth = auth_with(json!({"token_data": r#"{"api_key":"inside-a-string"}"#}));
+    assert_eq!(
+        provider.resolve_credentials(Some(&auth)).0.value,
+        "inside-a-string"
+    );
+}
+
+// --- headers ----------------------------------------------------------------
+
+/// An inbound `x-api-key` belongs to the client leg and must never reach
+/// Anthropic.
+#[test]
+fn the_resolved_credential_replaces_any_caller_supplied_key() {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-api-key", HeaderValue::from_static("caller-key"));
+    ClaudeProvider::inject_credential_headers(
+        &mut headers,
+        &ClaudeCredential {
+            value: "real-key".to_owned(),
+            source: CredentialSource::ApiKey,
+        },
+    )
+    .expect("inject");
+    assert_eq!(headers["x-api-key"], "real-key");
+    assert_eq!(headers.get_all("x-api-key").iter().count(), 1);
+}
+
+#[test]
+fn a_caller_supplied_api_version_survives_but_a_missing_one_is_filled_in() {
+    let credential = ClaudeCredential {
+        value: "k".to_owned(),
+        source: CredentialSource::ApiKey,
+    };
+
+    let mut pinned = HeaderMap::new();
+    pinned.insert("anthropic-version", HeaderValue::from_static("1999-01-01"));
+    ClaudeProvider::inject_credential_headers(&mut pinned, &credential).expect("inject");
+    assert_eq!(pinned["anthropic-version"], "1999-01-01");
+
+    let mut bare = HeaderMap::new();
+    ClaudeProvider::inject_credential_headers(&mut bare, &credential).expect("inject");
+    assert!(bare.contains_key("anthropic-version"));
+}
+
+#[test]
+fn a_credential_that_cannot_be_a_header_value_is_reported_not_panicked() {
+    let mut headers = HeaderMap::new();
+    let err = ClaudeProvider::inject_credential_headers(
+        &mut headers,
+        &ClaudeCredential {
+            value: "bad\nvalue".to_owned(),
+            source: CredentialSource::ApiKey,
+        },
+    )
+    .expect_err("rejected");
+    assert!(matches!(err, ProviderError::Credential(_)));
+}
+
+#[test]
+fn streaming_pins_accept_but_a_plain_request_keeps_the_callers_choice() {
+    let mut streamed = HeaderMap::new();
+    streamed.insert(http::header::ACCEPT, HeaderValue::from_static("text/plain"));
+    default_content_negotiation(&mut streamed, true);
+    assert_eq!(streamed[http::header::ACCEPT], "text/event-stream");
+
+    let mut plain = HeaderMap::new();
+    plain.insert(http::header::ACCEPT, HeaderValue::from_static("text/plain"));
+    default_content_negotiation(&mut plain, false);
+    assert_eq!(plain[http::header::ACCEPT], "text/plain");
+
+    let mut bare = HeaderMap::new();
+    default_content_negotiation(&mut bare, false);
+    assert!(bare.contains_key(http::header::ACCEPT));
+    assert!(bare.contains_key(http::header::CONTENT_TYPE));
+}
+
+#[test]
+fn hop_by_hop_and_authorization_headers_never_reach_the_upstream() {
+    let mut src = HeaderMap::new();
+    src.insert(
+        http::header::AUTHORIZATION,
+        HeaderValue::from_static("Bearer leak"),
+    );
+    src.insert(
+        http::header::HOST,
+        HeaderValue::from_static("inbound.example"),
+    );
+    src.insert("anthropic-beta", HeaderValue::from_static("tools-2024"));
+
+    let mut dst = HeaderMap::new();
+    copy_outbound_headers(&mut dst, &src);
+    assert!(!dst.contains_key(http::header::AUTHORIZATION));
+    assert!(!dst.contains_key(http::header::HOST));
+    assert_eq!(dst["anthropic-beta"], "tools-2024");
+}
+
+// --- stream usage -----------------------------------------------------------
+
+/// Claude splits the tally across frames: `message_start` knows the input
+/// count, the last `message_delta` knows the final output count. Neither frame
+/// alone settles correctly.
+#[test]
+fn usage_is_merged_across_message_start_and_message_delta() {
+    let body = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1200,\"output_tokens\":1}}}\n",
+        "\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":37}}\n",
+        "\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n",
+    );
+    let tokens = parse_claude_stream_usage(body.as_bytes()).expect("usage");
+    assert_eq!(tokens.input, Some(1200));
+    assert_eq!(tokens.output, Some(37));
+}
+
+#[test]
+fn a_stream_with_no_usage_frames_yields_no_tally() {
+    assert!(parse_claude_stream_usage(b"event: ping\ndata: {\"type\":\"ping\"}\n\n").is_none());
+    assert!(parse_claude_stream_usage(b"data: [DONE]\n").is_none());
+    assert!(parse_claude_stream_usage(b"").is_none());
+}
+
+/// The same helper backs both paths, so an upstream that answers a stream
+/// request with a whole JSON envelope must still bill.
+#[test]
+fn a_plain_json_body_takes_the_fast_path() {
+    let tokens = parse_claude_stream_usage(
+        br#"{"type":"message","usage":{"input_tokens":7,"output_tokens":11}}"#,
+    )
+    .expect("usage");
+    assert_eq!((tokens.input, tokens.output), (Some(7), Some(11)));
+}
+
+/// A frame cut in half by a TCP boundary is unparseable; it must not drag the
+/// tally down below what a complete frame already reported.
+#[test]
+fn a_truncated_frame_cannot_defeat_a_complete_one() {
+    let body = concat!(
+        "data: {\"usage\":{\"input_tokens\":10,\"output_tokens\":900}}\n",
+        "data: {\"usage\":{\"input_tokens\":10,\"output_to\n",
+    );
+    let tokens = parse_claude_stream_usage(body.as_bytes()).expect("usage");
+    assert_eq!(tokens.output, Some(900));
+}
+
+// --- shared helpers ---------------------------------------------------------
+
+#[test]
+fn the_router_hint_supplies_the_model_when_the_request_has_none() {
+    let mut req = ProviderRequest {
+        model: "  ".to_owned(),
+        ..Default::default()
+    };
+    req.metadata.insert(
+        REQUESTED_MODEL_METADATA_KEY.to_owned(),
+        " claude-opus-4 ".to_owned(),
+    );
+    assert_eq!(requested_model(&req), "claude-opus-4");
+
+    let explicit = ProviderRequest {
+        model: " claude-sonnet-4 ".to_owned(),
+        ..req
+    };
+    assert_eq!(requested_model(&explicit), "claude-sonnet-4");
+}
+
+#[test]
+fn metadata_that_is_not_an_object_is_replaced_rather_than_lost() {
+    let mut metadata = serde_json::Value::String("junk".to_owned());
+    shared::metadata_object_mut(&mut metadata).insert("k".to_owned(), json!("v"));
+    assert_eq!(metadata, json!({"k": "v"}));
+}
+
+/// A model name is caller-controlled, so a path separator inside one must not
+/// survive into the URL.
+#[test]
+fn a_path_segment_cannot_climb_out_of_its_segment() {
+    assert!(!shared::path_escape("../../admin").contains('/'));
+    assert_eq!(shared::path_escape("gemini-2.5-pro"), "gemini-2.5-pro");
+}
+
+#[test]
+fn round_tripping_a_timestamp_through_metadata_preserves_the_instant() {
+    let now = chrono::Utc::now();
+    let parsed = shared::parse_rfc3339(&shared::rfc3339(now)).expect("parsed");
+    assert_eq!(parsed.timestamp(), now.timestamp());
+    assert!(shared::parse_rfc3339("not a timestamp").is_none());
+}
+
+/// A provider-owned parameter must win over a caller's, and must not be
+/// duplicated.
+#[test]
+fn setting_a_query_key_drops_every_earlier_value_for_it() {
+    let mut query = vec![
+        ("alt".to_owned(), "json".to_owned()),
+        ("keep".to_owned(), "me".to_owned()),
+        ("alt".to_owned(), "proto".to_owned()),
+    ];
+    shared::set_query(&mut query, "alt", "sse");
+    assert_eq!(
+        query,
+        vec![
+            ("keep".to_owned(), "me".to_owned()),
+            ("alt".to_owned(), "sse".to_owned())
+        ]
+    );
+}
+
+#[test]
+fn an_upstream_failure_carries_the_status_and_the_whole_body() {
+    let err = upstream_error(429, br#"{"error":{"type":"rate_limit_error"}}"#);
+    match err {
+        ProviderError::Upstream { status, body } => {
+            assert_eq!(status, 429);
+            assert!(body.contains("rate_limit_error"));
+        }
+        other => panic!("expected an upstream error, got {other}"),
+    }
+}

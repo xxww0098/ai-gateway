@@ -1,0 +1,11 @@
+{
+  "label": "alloc-sse-floor",
+  "requests": 20,
+  "wall_seconds": 23.375497341156006,
+  "alloc_count": 21769,
+  "alloc_bytes": 1101605,
+  "dealloc_count": 21587,
+  "realloc_count": 182,
+  "alloc_per_req": 1088.45,
+  "bytes_per_req": 55080.25
+}

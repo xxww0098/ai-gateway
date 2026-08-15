@@ -1,0 +1,42 @@
+# Rust
+target/
+
+# Built binary (Makefile copies it to the repo root)
+/ai-gateway
+
+# Config: contains secrets. Copy config.example.yaml and fill it in.
+config.yaml
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Node / frontend
+node_modules/
+dist/
+dist-ssr/
+*.tsbuildinfo
+.npm
+
+# Agent tooling state
+.claude/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.sublime-*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs & temp
+*.log
+tmp/
+temp/
+
+# In-flight audit notes; kept out of history on purpose
+docs/relay-*.md

@@ -1,0 +1,48 @@
+[package]
+name = "gw-proxy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false          # rule 2.10: internal crate, no external example readers
+
+[lints]
+workspace = true         # rule 4.2: the table is inert without this
+
+[dependencies]
+gw-config.workspace = true
+gw-model.workspace = true
+gw-infra.workspace = true
+gw-authcore.workspace = true
+gw-pricing.workspace = true
+gw-ledger.workspace = true
+gw-provider.workspace = true
+axum = { workspace = true, features = ["http1", "http2", "json", "query", "form", "matched-path", "original-uri", "tokio", "macros", "tracing"] }
+tower = { workspace = true, features = ["util"] }
+tower-http = { workspace = true, features = ["trace", "limit"] }
+http.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+chrono = { workspace = true, features = ["clock", "std", "serde"] }
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chrono", "json", "macros", "rust_decimal"] }
+rust_decimal = { workspace = true, features = ["std"] }
+redis = { workspace = true, features = ["tokio-comp", "connection-manager", "script", "aio"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio-stream.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
+futures = { workspace = true, features = ["std", "async-await"] }
+futures-util = { workspace = true, features = ["std", "async-await"] }
+async-trait.workspace = true
+thiserror.workspace = true
+tracing = { workspace = true, features = ["std"] }
+anyhow.workspace = true
+uuid = { workspace = true, features = ["v4", "std"] }
+dashmap.workspace = true
+parking_lot.workspace = true
+arc-swap.workspace = true
+rand = { workspace = true, features = ["std", "std_rng"] }
+# D4: CachedResponse.Body is []byte, serialized as base64 on the wire.
+base64.workspace = true

@@ -1,0 +1,901 @@
+{
+  "minimax": [
+    {
+      "id": "MiniMax-M2.7",
+      "object": "model",
+      "owned_by": "minimax",
+      "type": "minimax",
+      "display_name": "MiniMax M2.7",
+      "version": "M2.7",
+      "description": "MiniMax M2.7, recursive self-improvement model for programming, tool calling, search, office productivity, and agent workflows.",
+      "context_length": 204800,
+      "supported_parameters": [
+        "tools"
+      ]
+    },
+    {
+      "id": "MiniMax-M2.7-highspeed",
+      "object": "model",
+      "owned_by": "minimax",
+      "type": "minimax",
+      "display_name": "MiniMax M2.7 Highspeed",
+      "version": "M2.7",
+      "description": "MiniMax M2.7 highspeed variant with the same performance profile and faster output speed.",
+      "context_length": 204800,
+      "supported_parameters": [
+        "tools"
+      ]
+    },
+    {
+      "id": "MiniMax-M2.5",
+      "object": "model",
+      "owned_by": "minimax",
+      "type": "minimax",
+      "display_name": "MiniMax M2.5",
+      "version": "M2.5",
+      "description": "MiniMax M2.5, high-value model for complex programming, office, and agent tasks.",
+      "context_length": 204800,
+      "supported_parameters": [
+        "tools"
+      ]
+    },
+    {
+      "id": "MiniMax-M2.5-highspeed",
+      "object": "model",
+      "owned_by": "minimax",
+      "type": "minimax",
+      "display_name": "MiniMax M2.5 Highspeed",
+      "version": "M2.5",
+      "description": "MiniMax M2.5 highspeed variant with the same performance profile and faster output speed.",
+      "context_length": 204800,
+      "supported_parameters": [
+        "tools"
+      ]
+    },
+    {
+      "id": "MiniMax-M2.1",
+      "object": "model",
+      "owned_by": "minimax",
+      "type": "minimax",
+      "display_name": "MiniMax M2.1",
+      "version": "M2.1",
+      "description": "MiniMax M2.1, multilingual programming model with enhanced coding experience.",
+      "context_length": 204800,
+      "supported_parameters": [
+        "tools"
+      ]
+    },
+    {
+      "id": "MiniMax-M2.1-highspeed",
+      "object": "model",
+      "owned_by": "minimax",
+      "type": "minimax",
+      "display_name": "MiniMax M2.1 Highspeed",
+      "version": "M2.1",
+      "description": "MiniMax M2.1 highspeed variant for faster and more agile responses.",
+      "context_length": 204800,
+      "supported_parameters": [
+        "tools"
+      ]
+    },
+    {
+      "id": "MiniMax-M2",
+      "object": "model",
+      "owned_by": "minimax",
+      "type": "minimax",
+      "display_name": "MiniMax M2",
+      "version": "M2",
+      "description": "MiniMax M2, model for efficient coding, agent workflows, and advanced reasoning.",
+      "context_length": 204800,
+      "supported_parameters": [
+        "tools"
+      ]
+    }
+  ],
+  "kimi": [
+    {
+      "id": "kimi-k2-0905-preview",
+      "object": "model",
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K2 0905 Preview",
+      "version": "K2 0905",
+      "description": "Kimi K2 preview with enhanced agentic coding, frontend code quality, and context understanding.",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "supported_parameters": [
+        "tools"
+      ]
+    },
+    {
+      "id": "kimi-k2-0711-preview",
+      "object": "model",
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K2 0711 Preview",
+      "version": "K2 0711",
+      "description": "Kimi K2 preview MoE model with strong code and agent capabilities.",
+      "context_length": 131072,
+      "max_completion_tokens": 32768,
+      "supported_parameters": [
+        "tools"
+      ]
+    },
+    {
+      "id": "kimi-k2-turbo-preview",
+      "object": "model",
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K2 Turbo Preview",
+      "version": "K2 Turbo",
+      "description": "High-speed Kimi K2 preview variant with improved output throughput.",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "supported_parameters": [
+        "tools"
+      ]
+    },
+    {
+      "id": "kimi-k2-thinking-turbo",
+      "object": "model",
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K2 Thinking Turbo",
+      "version": "K2 Thinking Turbo",
+      "description": "High-speed Kimi K2 thinking variant for deep reasoning with faster output.",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "moonshot-v1-8k",
+      "object": "model",
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Moonshot V1 8K",
+      "version": "v1",
+      "description": "Moonshot V1 generation model for short text generation.",
+      "context_length": 8192
+    },
+    {
+      "id": "moonshot-v1-32k",
+      "object": "model",
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Moonshot V1 32K",
+      "version": "v1",
+      "description": "Moonshot V1 generation model for longer text generation.",
+      "context_length": 32768
+    },
+    {
+      "id": "moonshot-v1-128k",
+      "object": "model",
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Moonshot V1 128K",
+      "version": "v1",
+      "description": "Moonshot V1 generation model for very long text generation.",
+      "context_length": 131072
+    },
+    {
+      "id": "moonshot-v1-8k-vision-preview",
+      "object": "model",
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Moonshot V1 8K Vision Preview",
+      "version": "v1 vision",
+      "description": "Moonshot V1 vision model for image understanding and text output.",
+      "context_length": 8192
+    },
+    {
+      "id": "moonshot-v1-32k-vision-preview",
+      "object": "model",
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Moonshot V1 32K Vision Preview",
+      "version": "v1 vision",
+      "description": "Moonshot V1 vision model for image understanding with longer context.",
+      "context_length": 32768
+    },
+    {
+      "id": "moonshot-v1-128k-vision-preview",
+      "object": "model",
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Moonshot V1 128K Vision Preview",
+      "version": "v1 vision",
+      "description": "Moonshot V1 vision model for image understanding with very long context.",
+      "context_length": 131072
+    },
+    {
+      "id": "moonshotai/kimi-k2:free",
+      "object": "model",
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K2 (OpenRouter Free)",
+      "version": "K2",
+      "description": "OpenRouter-style Kimi K2 compatibility id.",
+      "context_length": 131072,
+      "max_completion_tokens": 32768,
+      "supported_parameters": [
+        "tools"
+      ]
+    }
+  ],
+  "deepseek": [
+    {
+      "id": "deepseek-v4-flash",
+      "object": "model",
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek V4 Flash",
+      "version": "V4 Flash",
+      "description": "DeepSeek current fast model with thinking and non-thinking modes, tool calls, JSON output, prefix completion, and FIM in non-thinking mode.",
+      "context_length": 1000000,
+      "max_completion_tokens": 384000,
+      "supported_parameters": [
+        "tools",
+        "response_format",
+        "prefix",
+        "fim"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "object": "model",
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek V4 Pro",
+      "version": "V4 Pro",
+      "description": "DeepSeek higher-quality V4 model with thinking and non-thinking modes for reasoning, coding, agent, and long-context tasks.",
+      "context_length": 1000000,
+      "max_completion_tokens": 384000,
+      "supported_parameters": [
+        "tools",
+        "response_format",
+        "prefix",
+        "fim"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "deepseek-chat",
+      "object": "model",
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek Chat",
+      "version": "V4 Flash compatibility",
+      "description": "Compatibility model name for DeepSeek V4 Flash non-thinking mode.",
+      "context_length": 1000000,
+      "max_completion_tokens": 384000,
+      "supported_parameters": [
+        "tools",
+        "response_format"
+      ]
+    },
+    {
+      "id": "deepseek-reasoner",
+      "object": "model",
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek Reasoner",
+      "version": "V4 Flash compatibility",
+      "description": "Compatibility model name for DeepSeek V4 Flash thinking mode.",
+      "context_length": 1000000,
+      "max_completion_tokens": 384000,
+      "supported_parameters": [
+        "tools",
+        "response_format"
+      ],
+      "thinking": {
+        "levels": [
+          "enabled"
+        ]
+      }
+    }
+  ],
+  "glm": [
+    {
+      "id": "glm-5.1",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 5.1",
+      "version": "5.1",
+      "description": "Flagship Z.AI model for long-horizon autonomous coding, agent workflows, complex engineering, and general tasks.",
+      "context_length": 200000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools",
+        "response_format",
+        "web_search"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-5",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 5",
+      "version": "5",
+      "description": "Z.AI foundation model for agentic engineering, coding, and long-range tasks.",
+      "context_length": 200000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools",
+        "response_format",
+        "web_search"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-5-turbo",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 5 Turbo",
+      "version": "5 Turbo",
+      "description": "Z.AI model optimized for OpenClaw-style tool invocation, command following, and long-chain execution.",
+      "context_length": 200000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools",
+        "response_format",
+        "web_search"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-4.7",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 4.7",
+      "version": "4.7",
+      "description": "Z.AI model series for agent tasks, programming, multi-step reasoning, and natural conversation.",
+      "context_length": 200000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools",
+        "response_format",
+        "web_search"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-4.7-flashx",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 4.7 FlashX",
+      "version": "4.7 FlashX",
+      "description": "Lightweight high-speed GLM 4.7 variant.",
+      "context_length": 200000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools",
+        "response_format",
+        "web_search"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-4.7-flash",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 4.7 Flash",
+      "version": "4.7 Flash",
+      "description": "Lightweight free GLM 4.7 variant.",
+      "context_length": 200000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools",
+        "response_format",
+        "web_search"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-4.6",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 4.6",
+      "version": "4.6",
+      "description": "Z.AI model for coding, long-context processing, reasoning, search, writing, and agentic applications.",
+      "context_length": 200000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools",
+        "response_format",
+        "web_search"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-4.5",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 4.5",
+      "version": "4.5",
+      "description": "Z.AI GLM 4.5 model for coding, reasoning, and agent tasks.",
+      "context_length": 200000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools",
+        "response_format",
+        "web_search"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-4.5-x",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 4.5 X",
+      "version": "4.5 X",
+      "description": "Higher-performance GLM 4.5 variant.",
+      "context_length": 200000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools",
+        "response_format",
+        "web_search"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-4.5-air",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 4.5 Air",
+      "version": "4.5 Air",
+      "description": "Cost-efficient GLM 4.5 variant.",
+      "context_length": 200000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools",
+        "response_format",
+        "web_search"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-4.5-airx",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 4.5 AirX",
+      "version": "4.5 AirX",
+      "description": "High-speed GLM 4.5 Air variant.",
+      "context_length": 200000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools",
+        "response_format",
+        "web_search"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-4.5-flash",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 4.5 Flash",
+      "version": "4.5 Flash",
+      "description": "Lightweight free GLM 4.5 variant.",
+      "context_length": 200000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools",
+        "response_format",
+        "web_search"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-4-32b-0414-128k",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 4 32B 0414 128K",
+      "version": "4 32B 0414",
+      "description": "Cost-effective GLM foundation model with enhanced tool use, online search, and code task capability.",
+      "context_length": 128000,
+      "max_completion_tokens": 16000,
+      "supported_parameters": [
+        "tools",
+        "response_format",
+        "web_search"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "glm-5v-turbo",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 5V Turbo",
+      "version": "5V Turbo",
+      "description": "Z.AI multimodal coding model for image, video, text, and file understanding in agent workflows.",
+      "context_length": 200000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools",
+        "response_format",
+        "web_search"
+      ]
+    },
+    {
+      "id": "glm-4.6v",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 4.6V",
+      "version": "4.6V",
+      "description": "Z.AI vision-language model for image, video, document, and text understanding.",
+      "context_length": 128000,
+      "supported_parameters": [
+        "tools",
+        "response_format",
+        "web_search"
+      ]
+    },
+    {
+      "id": "glm-4.6v-flashx",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 4.6V FlashX",
+      "version": "4.6V FlashX",
+      "description": "Lightweight high-speed GLM 4.6V vision-language variant.",
+      "context_length": 128000,
+      "supported_parameters": [
+        "tools",
+        "response_format",
+        "web_search"
+      ]
+    },
+    {
+      "id": "glm-4.6v-flash",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 4.6V Flash",
+      "version": "4.6V Flash",
+      "description": "Lightweight free GLM 4.6V vision-language variant.",
+      "context_length": 128000,
+      "supported_parameters": [
+        "tools",
+        "response_format",
+        "web_search"
+      ]
+    },
+    {
+      "id": "glm-4.5v",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 4.5V",
+      "version": "4.5V",
+      "description": "Z.AI GLM 4.5 vision-language model.",
+      "context_length": 128000,
+      "supported_parameters": [
+        "tools",
+        "response_format",
+        "web_search"
+      ]
+    }
+  ],
+  "mimo": [
+    {
+      "id": "mimo-v2.5-pro",
+      "object": "model",
+      "owned_by": "xiaomi",
+      "type": "mimo",
+      "display_name": "MiMo V2.5 Pro",
+      "version": "V2.5 Pro",
+      "description": "Xiaomi MiMo strongest MoE language model for demanding agentic, complex software engineering, and long-horizon tasks.",
+      "context_length": 1048576,
+      "max_completion_tokens": 131072,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "xiaomi/mimo-v2.5-pro",
+      "object": "model",
+      "owned_by": "xiaomi",
+      "type": "mimo",
+      "display_name": "MiMo V2.5 Pro",
+      "version": "V2.5 Pro",
+      "description": "Xiaomi MiMo strongest MoE language model for demanding agentic, complex software engineering, and long-horizon tasks.",
+      "context_length": 1048576,
+      "max_completion_tokens": 131072,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "mimo-v2.5",
+      "object": "model",
+      "owned_by": "xiaomi",
+      "type": "mimo",
+      "display_name": "MiMo V2.5",
+      "version": "V2.5",
+      "description": "Xiaomi MiMo native omnimodal model for text, image, video, audio understanding, long-context reasoning, and agentic workflows.",
+      "context_length": 1048576,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "xiaomi/mimo-v2.5",
+      "object": "model",
+      "owned_by": "xiaomi",
+      "type": "mimo",
+      "display_name": "MiMo V2.5",
+      "version": "V2.5",
+      "description": "Xiaomi MiMo native omnimodal model for text, image, video, audio understanding, long-context reasoning, and agentic workflows.",
+      "context_length": 1048576,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "mimo-v2-pro",
+      "object": "model",
+      "owned_by": "xiaomi",
+      "type": "mimo",
+      "display_name": "MiMo V2 Pro",
+      "version": "V2 Pro",
+      "description": "Xiaomi MiMo V2 Pro model for global top-tier agent capabilities and long-context workflows.",
+      "context_length": 1048576,
+      "max_completion_tokens": 131072,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "xiaomi/mimo-v2-pro",
+      "object": "model",
+      "owned_by": "xiaomi",
+      "type": "mimo",
+      "display_name": "MiMo V2 Pro",
+      "version": "V2 Pro",
+      "description": "Xiaomi MiMo V2 Pro model for global top-tier agent capabilities and long-context workflows.",
+      "context_length": 1048576,
+      "max_completion_tokens": 131072,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "mimo-v2-omni",
+      "object": "model",
+      "owned_by": "xiaomi",
+      "type": "mimo",
+      "display_name": "MiMo V2 Omni",
+      "version": "V2 Omni",
+      "description": "Xiaomi MiMo V2 Omni model for multimodal agent scenarios.",
+      "context_length": 1048576,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "xiaomi/mimo-v2-omni",
+      "object": "model",
+      "owned_by": "xiaomi",
+      "type": "mimo",
+      "display_name": "MiMo V2 Omni",
+      "version": "V2 Omni",
+      "description": "Xiaomi MiMo V2 Omni model for multimodal agent scenarios.",
+      "context_length": 1048576,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "mimo-v2-flash",
+      "object": "model",
+      "owned_by": "xiaomi",
+      "type": "mimo",
+      "display_name": "MiMo V2 Flash",
+      "version": "V2 Flash",
+      "description": "Xiaomi MiMo V2 Flash model for high-speed performance.",
+      "context_length": 1048576,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "xiaomi/mimo-v2-flash",
+      "object": "model",
+      "owned_by": "xiaomi",
+      "type": "mimo",
+      "display_name": "MiMo V2 Flash",
+      "version": "V2 Flash",
+      "description": "Xiaomi MiMo V2 Flash model for high-speed performance.",
+      "context_length": 1048576,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "disabled",
+          "enabled"
+        ],
+        "dynamic_allowed": true
+      }
+    }
+  ]
+}

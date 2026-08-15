@@ -1,0 +1,38 @@
+[package]
+name = "gw-relay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false          # rule 2.10: internal crate, no external example readers
+
+[lints]
+workspace = true         # rule 4.2: the table is inert without this
+
+[dependencies]
+bytes.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+url.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing = { workspace = true, features = ["std"] }
+futures = { workspace = true, features = ["std", "async-await"] }
+futures-util = { workspace = true, features = ["std", "async-await"] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "sync", "io-util"] }
+reqwest = { workspace = true, features = ["stream", "rustls-tls", "http2"] }
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+
+# DELIBERATE DEVIATION from rule 4.1 (`[workspace.dependencies]` pins every
+# version). `http-body` is not in the root table, and the root manifest is
+# currently being edited by an agent outside this Run — adding a line there
+# would race. `http_body::Frame` is unavoidable: `RelayResponseBody` is a frame
+# stream whose item type is `Result<Frame<Bytes>, RelayError>` precisely so a
+# mid-stream failure is expressible (audit defect #6). Upstream this pin into
+# `[workspace.dependencies]` in wave 3, once the root manifest has one owner.
+http-body = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "io-util"] }

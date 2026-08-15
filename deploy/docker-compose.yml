@@ -1,0 +1,76 @@
+# Local / single-host stack for ai-gateway.
+#
+#   JWT_SECRET=... CREDENTIAL_ENCRYPTION_KEY=... docker compose -f deploy/docker-compose.yml up --build
+#
+# Generate the two secrets with `make gen-secrets`. They are REQUIRED and are
+# only ever passed via the environment — never baked into the image or config.
+# The frontend is a separate Vite app built independently, so it cannot be
+# embedded into the root binary; serve its built dist via a reverse proxy
+# (e.g. Caddy) that also proxies /api and /v1 to the app — added separately.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DB_USER:-cpa}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-cpa_dev_password}
+      POSTGRES_DB: ${DB_NAME:-cpa_gateway}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-cpa} -d ${DB_NAME:-cpa_gateway}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # Bind all interfaces inside the container (SERVER_HOST env override).
+      SERVER_HOST: "0.0.0.0"
+      SERVER_PORT: "8888"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-cpa}
+      DB_PASSWORD: ${DB_PASSWORD:-cpa_dev_password}
+      DB_NAME: ${DB_NAME:-cpa_gateway}
+      DB_SSLMODE: ${DB_SSLMODE:-disable}
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: "0"
+      # Secrets — required, must be supplied by the caller's environment.
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET (see make gen-secrets)}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?set CREDENTIAL_ENCRYPTION_KEY (see make gen-secrets)}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+    # The image CMD points at /app/config.yaml; mount one, or rely entirely on
+    # the env overrides above plus the shipped /app/config.example.yaml.
+    command: ["--config", "/app/config.example.yaml"]
+    # The distroless image has no shell/curl, so the binary self-probes readiness.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ai-gateway", "--health-check"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+      start_period: 20s
+    ports:
+      - "${APP_PORT:-8888}:8888"
+
+volumes:
+  pgdata:

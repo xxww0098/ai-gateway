@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CPA Gateway — 极简线条·白底设计提案</title>
+  <style>
+    :root {
+      --bg: #F8FAFC;
+      --card-bg: #FFFFFF;
+      --border: #E2E8F0;
+      --text: #0F172A;
+      --text-muted: #64748B;
+      --primary: #0D9488;
+      --accent: #14B8A6;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      padding: 48px 24px;
+      line-height: 1.5;
+    }
+    .container { max-width: 1200px; margin: 0 auto; }
+    header {
+      margin-bottom: 40px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 24px;
+    }
+    h1 { font-size: 30px; font-weight: 800; letter-spacing: -0.02em; color: #0F172A; }
+    .subtitle { color: var(--text-muted); font-size: 15px; margin-top: 6px; }
+    .tag {
+      display: inline-block;
+      background: #F1F5F9;
+      color: #334155;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 6px;
+      margin-top: 10px;
+      margin-right: 8px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 24px;
+      margin-bottom: 48px;
+    }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 28px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      position: relative;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
+      transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s;
+    }
+    .card:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.08);
+      border-color: #CBD5E1;
+    }
+    .badge {
+      position: absolute;
+      top: 16px;
+      left: 16px;
+      background: #F0FDF4;
+      border: 1px solid #BBF7D0;
+      color: #15803D;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 6px;
+    }
+    .icon-preview {
+      width: 140px;
+      height: 140px;
+      margin: 16px 0;
+      border-radius: 28px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.06);
+    }
+    .card h2 { font-size: 17px; font-weight: 700; margin-bottom: 6px; text-align: center; color: #0F172A; }
+    .card p { font-size: 12.5px; color: var(--text-muted); text-align: center; margin-bottom: 18px; min-height: 38px; }
+    
+    .scales {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      padding: 12px;
+      background: #F8FAFC;
+      border-radius: 12px;
+      width: 100%;
+      border: 1px solid #F1F5F9;
+      margin-top: auto;
+    }
+    .scale-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+    .scale-label { font-size: 10px; color: var(--text-muted); font-weight: 600; }
+
+    .mockup-section {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 32px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
+    }
+    .mockup-header {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 20px;
+      color: #0F172A;
+    }
+    .mockup-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+    }
+    .brand-preview-pill {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 18px;
+      background: #F8FAFC;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+    }
+    .brand-title { font-weight: 700; font-size: 15px; color: #0F172A; }
+    .brand-sub { font-size: 11px; color: var(--text-muted); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>CPA Gateway — 极简线条·纯净白底设计方案</h1>
+      <div class="subtitle">严格按照「干净利落、简单线条、纯白背景」原则，打造极致克制与高辨识度的现代开发者工具图标</div>
+      <div>
+        <span class="tag">✓ 简单单线条 (Monoline)</span>
+        <span class="tag">✓ 纯白背景 (#FFFFFF)</span>
+        <span class="tag">✓ 无冗杂渐变与阴影</span>
+        <span class="tag">✓ 16px ~ 512px 全尺度清晰</span>
+      </div>
+    </header>
+
+    <div class="grid">
+      <!-- Option 1 -->
+      <div class="card">
+        <span class="badge">方案 1 · 经典双轨</span>
+        <img class="icon-preview" src="/icon-line-1.svg" alt="Line Arch" />
+        <h2>①「双轨门径」Dual-Arch</h2>
+        <p>深黑外环拱门 + 翡翠青内环同心圆弧，中央贯穿水平数据流线。结构工整对称，极简而有力量。</p>
+        <div class="scales">
+          <div class="scale-item"><img src="/icon-line-1.svg" width="48" height="48" /><span class="scale-label">48px</span></div>
+          <div class="scale-item"><img src="/icon-line-1.svg" width="32" height="32" /><span class="scale-label">32px</span></div>
+          <div class="scale-item"><img src="/icon-line-1.svg" width="24" height="24" /><span class="scale-label">24px</span></div>
+          <div class="scale-item"><img src="/icon-line-1.svg" width="16" height="16" /><span class="scale-label">16px</span></div>
+        </div>
+      </div>
+
+      <!-- Option 2 -->
+      <div class="card">
+        <span class="badge">方案 2 · 连续拓扑</span>
+        <img class="icon-preview" src="/icon-line-2.svg" alt="Topology Loop" />
+        <h2>②「拓扑回环」Topology Loop</h2>
+        <p>一笔成型的莫比乌斯极简单线条，外弧自然构成「C」，内弧回旋穿引，充满连续流式计算的灵动美。</p>
+        <div class="scales">
+          <div class="scale-item"><img src="/icon-line-2.svg" width="48" height="48" /><span class="scale-label">48px</span></div>
+          <div class="scale-item"><img src="/icon-line-2.svg" width="32" height="32" /><span class="scale-label">32px</span></div>
+          <div class="scale-item"><img src="/icon-line-2.svg" width="24" height="24" /><span class="scale-label">24px</span></div>
+          <div class="scale-item"><img src="/icon-line-2.svg" width="16" height="16" /><span class="scale-label">16px</span></div>
+        </div>
+      </div>
+
+      <!-- Option 3 -->
+      <div class="card">
+        <span class="badge">方案 3 · 三路汇聚</span>
+        <img class="icon-preview" src="/icon-line-3.svg" alt="Multi-Stream" />
+        <h2>③「三线汇流」Multi-Stream</h2>
+        <p>三道同心等距的极简圆弧轨道，代表上游模型渠道的多路汇聚分流与智能路由，线条干净利落。</p>
+        <div class="scales">
+          <div class="scale-item"><img src="/icon-line-3.svg" width="48" height="48" /><span class="scale-label">48px</span></div>
+          <div class="scale-item"><img src="/icon-line-3.svg" width="32" height="32" /><span class="scale-label">32px</span></div>
+          <div class="scale-item"><img src="/icon-line-3.svg" width="24" height="24" /><span class="scale-label">24px</span></div>
+          <div class="scale-item"><img src="/icon-line-3.svg" width="16" height="16" /><span class="scale-label">16px</span></div>
+        </div>
+      </div>
+
+      <!-- Option 4 -->
+      <div class="card">
+        <span class="badge">方案 4 · 几何切角</span>
+        <img class="icon-preview" src="/icon-line-4.svg" alt="Chamfer Portal" />
+        <h2>④「切角方门」Chamfer Portal</h2>
+        <p>45° 倒角纯直线硬朗构型，外层方弧门框 + 内层青绿转折导向核心，具有强烈的现代代码与工程建筑感。</p>
+        <div class="scales">
+          <div class="scale-item"><img src="/icon-line-4.svg" width="48" height="48" /><span class="scale-label">48px</span></div>
+          <div class="scale-item"><img src="/icon-line-4.svg" width="32" height="32" /><span class="scale-label">32px</span></div>
+          <div class="scale-item"><img src="/icon-line-4.svg" width="24" height="24" /><span class="scale-label">24px</span></div>
+          <div class="scale-item"><img src="/icon-line-4.svg" width="16" height="16" /><span class="scale-label">16px</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- UI Integration Mockups -->
+    <div class="mockup-section">
+      <div class="mockup-header">实际导航栏（Navbar）实装视觉对照</div>
+      <div class="mockup-grid">
+        <div class="brand-preview-pill">
+          <img src="/icon-line-1.svg" width="36" height="36" style="border-radius: 8px; border: 1px solid #E2E8F0;" />
+          <div>
+            <div class="brand-title">CPA Gateway</div>
+            <div class="brand-sub">方案 1 · 双轨门径</div>
+          </div>
+        </div>
+
+        <div class="brand-preview-pill">
+          <img src="/icon-line-2.svg" width="36" height="36" style="border-radius: 8px; border: 1px solid #E2E8F0;" />
+          <div>
+            <div class="brand-title">CPA Gateway</div>
+            <div class="brand-sub">方案 2 · 拓扑回环</div>
+          </div>
+        </div>
+
+        <div class="brand-preview-pill">
+          <img src="/icon-line-3.svg" width="36" height="36" style="border-radius: 8px; border: 1px solid #E2E8F0;" />
+          <div>
+            <div class="brand-title">CPA Gateway</div>
+            <div class="brand-sub">方案 3 · 三线汇流</div>
+          </div>
+        </div>
+
+        <div class="brand-preview-pill">
+          <img src="/icon-line-4.svg" width="36" height="36" style="border-radius: 8px; border: 1px solid #E2E8F0;" />
+          <div>
+            <div class="brand-title">CPA Gateway</div>
+            <div class="brand-sub">方案 4 · 切角方门</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

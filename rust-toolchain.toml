@@ -1,0 +1,6 @@
+[toolchain]
+channel = "1.97.1"
+profile = "minimal"
+# Rule 4.4: `minimal` does NOT ship clippy/rustfmt. Omitting these makes every
+# lint gate silently not run for a fresh clone.
+components = ["clippy", "rustfmt"]

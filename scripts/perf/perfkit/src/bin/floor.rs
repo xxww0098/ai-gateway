@@ -13,6 +13,9 @@
 //!
 //! 环境变量与 `gateway` 同名同义（`PERF_PORT` / `PERF_ADMIN_PORT` /
 //! `PERF_UPSTREAM` / `PERF_WORKERS` / `PERF_COUNT_ALLOC`）。
+//!
+//! 另有 `PERF_TLS=1`：放行自签证书，供 TLS + h2 档用（见 `run-baseline.sh`
+//! 的 `phase_tls`）。它**只**关掉证书校验，连接池与其余配置一个字节不改。
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -128,10 +131,15 @@ fn main() -> anyhow::Result<()> {
 
     rt.block_on(async move {
         // 与 gw-provider 的 `shared_client()` 同配置，否则连接池差异会污染对比。
-        let client = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .pool_max_idle_per_host(100)
-            .pool_idle_timeout(Duration::from_secs(90))
-            .build()?;
+            .pool_idle_timeout(Duration::from_secs(90));
+        // TLS + h2 档：mock 上游用自签证书，对照组也得放行它，否则这一档
+        // 只有被测端有数字、没有下界可减。**只影响证书校验，不影响分帧与拷贝**。
+        if std::env::var("PERF_TLS").as_deref() == Ok("1") {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+        let client = builder.build()?;
         let state = Arc::new(Floor {
             client,
             upstream: upstream.clone(),

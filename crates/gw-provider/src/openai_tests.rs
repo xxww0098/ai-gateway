@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::types::is_skipped_proxy_header;
+use bytes::Bytes;
 use gw_authcore::AuthRecord;
 use serde_json::json;
 use std::collections::HashMap;
@@ -144,7 +145,7 @@ fn built(
 fn the_outbound_request_carries_the_bearer_token_and_json_defaults() {
     let provider = provider();
     let req = ProviderRequest {
-        payload: br#"{"model":"gpt-4o"}"#.to_vec(),
+        payload: Bytes::from_static(br#"{"model":"gpt-4o"}"#),
         ..Default::default()
     };
     let request = built(&provider, &req, false);
@@ -159,7 +160,7 @@ fn the_outbound_request_carries_the_bearer_token_and_json_defaults() {
     assert_eq!(request.headers()[ACCEPT], "application/json");
     assert_eq!(
         request.body().and_then(reqwest::Body::as_bytes),
-        Some(req.payload.as_slice()),
+        Some(req.payload.as_ref()),
         "a non-streaming payload must go out untouched"
     );
 }
@@ -168,19 +169,38 @@ fn the_outbound_request_carries_the_bearer_token_and_json_defaults() {
 fn streaming_requests_ask_for_sse_and_force_include_usage() {
     let provider = provider();
     let req = ProviderRequest {
-        payload: br#"{"model":"gpt-4o","stream":true}"#.to_vec(),
+        payload: Bytes::from_static(br#"{"model":"gpt-4o","stream":true}"#),
         stream: true,
         ..Default::default()
     };
     let request = built(&provider, &req, true);
 
     assert_eq!(request.headers()[ACCEPT], "text/event-stream");
-    let sent: serde_json::Value =
-        serde_json::from_slice(request.body().and_then(reqwest::Body::as_bytes).unwrap()).unwrap();
+    assert_declares_the_spliced_length(&request, &req.payload);
+}
+
+/// 定点插入之后 body 是**两帧零拷贝流**（前缀 + 原 body 的切片），不再是一块能
+/// 直接读回来的缓冲区 —— 那正是省掉那次全量拷贝的代价。上游真正看到的长度契约
+/// 是网关显式声明的 `content-length`，所以 executor 这一层就断言它。
+///
+/// 插入段的内容与幂等性由 `common_tests` 的全量矩阵覆盖，这里只证明
+/// **executor 确实接上了那条路，并且把长度算对了**。
+fn assert_declares_the_spliced_length(request: &reqwest::Request, payload: &Bytes) {
+    let declared: usize = request.headers()[http::header::CONTENT_LENGTH]
+        .to_str()
+        .expect("content-length must be ASCII")
+        .parse()
+        .expect("content-length must be a number");
+    assert!(
+        declared > payload.len(),
+        "content-length 没有把插入的那一段算进去"
+    );
     assert_eq!(
-        sent.pointer("/stream_options/include_usage"),
-        Some(&json!(true)),
-        "the terminal usage envelope must be requested"
+        declared,
+        crate::common::ensure_include_usage(payload, Surface::OpenAiCompletions)
+            .expect("fixture must be spliceable")
+            .len(),
+        "声明的长度必须等于两段之和，否则上游会读短或读挂"
     );
 }
 
@@ -190,14 +210,14 @@ fn a_body_that_does_not_declare_stream_is_never_rewritten() {
     // payload whose body says otherwise.
     let provider = provider();
     let req = ProviderRequest {
-        payload: br#"{"model":"gpt-4o"}"#.to_vec(),
+        payload: Bytes::from_static(br#"{"model":"gpt-4o"}"#),
         stream: true,
         ..Default::default()
     };
     let request = built(&provider, &req, true);
     assert_eq!(
         request.body().and_then(reqwest::Body::as_bytes),
-        Some(req.payload.as_slice())
+        Some(req.payload.as_ref())
     );
 }
 
@@ -294,13 +314,22 @@ async fn refresh_only_remarks_a_static_key_as_healthy() {
     assert_eq!(refreshed.id, stale.id, "identity must be preserved");
 }
 
+/// 上游没有计数端点，所以这里必须**报错**，不能编一个数字
+/// （`docs/relay-surface-plan.md` §2.1 缺陷 ①）。
+///
+/// 测的性质是「任何输入都拿不到数字」，而不是核对某一句错误文案 ——
+/// 后者会把实现抄进断言。
 #[tokio::test]
-async fn count_tokens_estimates_from_the_payload_length() {
+async fn count_tokens_refuses_rather_than_fabricating_a_number() {
     let provider = provider();
-    let req = ProviderRequest {
-        payload: vec![b'x'; 400],
-        ..Default::default()
-    };
-    let counted = provider.count_tokens(&bare_auth(), req).await.unwrap();
-    assert_eq!(counted, approximate_tokens_from_bytes(400));
+    for len in [0, 4, 400, 4000] {
+        let req = ProviderRequest {
+            payload: Bytes::from(vec![b'x'; len]),
+            ..Default::default()
+        };
+        assert!(
+            provider.count_tokens(&bare_auth(), req).await.is_err(),
+            "{len} bytes produced a fabricated count"
+        );
+    }
 }

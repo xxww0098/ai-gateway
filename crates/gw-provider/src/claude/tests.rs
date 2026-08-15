@@ -33,6 +33,70 @@ fn endpoint(base_url: &str) -> Url {
     ClaudeProvider::messages_endpoint(&[], base_url).expect("endpoint")
 }
 
+// --- count_tokens（根除伪造值，`docs/relay-surface-plan.md` §2.1 缺陷 ①）--------
+
+/// 计数端点是 Messages 端点再挂一段，且**同一套 base 归一化**。
+///
+/// 测的是「三种 base 写法收敛到同一个计数端点，且它就是 messages 端点的子路径」，
+/// 不核对任何硬编码 URL。
+#[test]
+fn the_count_tokens_endpoint_hangs_off_the_messages_endpoint() {
+    for base in [
+        "https://relay.example.com",
+        "https://relay.example.com/v1",
+        "https://relay.example.com/v1/messages",
+    ] {
+        let messages = ClaudeProvider::messages_endpoint(&[], base).expect("messages");
+        let counting = ClaudeProvider::count_tokens_endpoint(&[], base).expect("count");
+        assert_eq!(
+            counting.origin(),
+            messages.origin(),
+            "base {base}: 计数端点换了主机"
+        );
+        assert!(
+            counting.path().starts_with(messages.path()),
+            "base {base}: {} 不在 {} 之下",
+            counting.path(),
+            messages.path()
+        );
+        assert_ne!(counting.path(), messages.path(), "base {base}: 端点没变");
+    }
+}
+
+#[test]
+fn caller_query_parameters_reach_the_count_tokens_endpoint() {
+    let query = vec![("beta".to_owned(), "1".to_owned())];
+    let url = ClaudeProvider::count_tokens_endpoint(&query, "https://relay.example.com")
+        .expect("endpoint");
+    let pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    assert_eq!(pairs, query);
+}
+
+/// 上游给不出数就**报错**，绝不回落到估算 —— 回落等于把伪造值请回来，
+/// 而调用方无从分辨真假。
+#[test]
+fn a_count_response_without_a_usable_number_is_an_error_not_an_estimate() {
+    let counted = parse_count_tokens(br#"{"input_tokens":123}"#).expect("well-formed response");
+    assert_eq!(counted, 123);
+
+    for broken in [
+        &b""[..],
+        b"not json",
+        br#"{}"#,
+        br#"{"input_tokens":"twelve"}"#,
+        br#"{"tokens":12}"#,
+    ] {
+        assert!(
+            parse_count_tokens(broken).is_err(),
+            "{} 应当报错而不是编一个数",
+            String::from_utf8_lossy(broken)
+        );
+    }
+}
+
 // --- endpoint ---------------------------------------------------------------
 
 /// The three accepted spellings of a base URL converge on one endpoint. That

@@ -27,6 +27,28 @@ fn surfaces_are_pairwise_distinct() {
     }
 }
 
+/// `path()` 与 `from_path()` 必须互为反函数。
+///
+/// 守护的 bug：加第四个入口时只在 `from_path` 加了臂，`path()` 忘了跟
+/// （编译器会拦，因为 match 穷尽），或者两边写了**不同的**路径字面量
+/// （编译器拦不住）。后者会让 `gw-proxy` 写进 metadata 的路径 executor 认不出来，
+/// 于是静默回落到 `OpenAiCompletions` —— `/v1/responses` 又被打回
+/// chat/completions，缺陷 #1 悄悄复活，而所有测试照样绿。
+#[test]
+fn path_and_from_path_are_inverses() {
+    for surface in [
+        Surface::OpenAiCompletions,
+        Surface::OpenAiResponses,
+        Surface::AnthropicMessages,
+    ] {
+        assert_eq!(
+            Surface::from_path(surface.path()),
+            Some(surface),
+            "{surface:?} 的 path() 没能被 from_path() 认回来"
+        );
+    }
+}
+
 /// 不认识的路径必须是 `None`，不许兜底猜一个。
 ///
 /// 守护的 bug：给 `from_path` 加一条 `_ => Some(Self::OpenAiCompletions)` 兜底。

@@ -28,8 +28,8 @@ use gw_proxy::ports::{
 
 /// 压测租户。
 pub const PERF_USER_ID: Id = 7;
-/// 压测 API key 明文，`loadgen` 用同一个值。
-pub const PERF_API_KEY: &str = "cpa-perfbaselinekey";
+
+pub use crate::PERF_API_KEY;
 
 // ---------------------------------------------------------------- 计费
 

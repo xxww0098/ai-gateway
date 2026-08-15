@@ -1,0 +1,6 @@
+{
+  "label": "noise-relay",
+  "idle_seconds": 5,
+  "alloc_count": 40,
+  "alloc_per_sec": 8.0
+}

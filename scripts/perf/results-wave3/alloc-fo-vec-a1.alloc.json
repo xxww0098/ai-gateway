@@ -1,0 +1,11 @@
+{
+  "label": "alloc-fo-vec-a1",
+  "requests": 300,
+  "wall_seconds": 0.07387900352478027,
+  "alloc_count": 35157,
+  "alloc_bytes": 323235651,
+  "dealloc_count": 31852,
+  "realloc_count": 3303,
+  "alloc_per_req": 117.19,
+  "bytes_per_req": 1077452.17
+}

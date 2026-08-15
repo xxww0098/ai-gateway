@@ -3,9 +3,10 @@
 //! OWNER: worker `provider-openai`.
 
 use crate::common::{
-    DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_OPENAI, ProviderConfig, approximate_tokens_from_bytes,
-    chat_completions_endpoint, ensure_include_usage, requested_model, resolve_timeout,
-    shared_client, stream_response, string_from_map, usage_stream,
+    DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_OPENAI, ProviderConfig, attach_body,
+    chat_completions_endpoint, ensure_include_usage, request_surface, requested_model,
+    resolve_timeout, responses_endpoint, shared_client, stream_response, string_from_map,
+    usage_stream,
 };
 use crate::types::{
     Provider, ProviderError, ProviderRequest, ProviderResponse, StreamResponse,
@@ -13,9 +14,9 @@ use crate::types::{
 };
 use crate::usage::{parse_openai_stream_usage, parse_openai_usage};
 use gw_authcore::{AuthRecord, AuthStatus};
+use gw_relay::Surface;
 use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use http::{HeaderMap, HeaderValue};
-use std::borrow::Cow;
 use std::time::Duration;
 
 /// Executor for any OpenAI-compatible API.
@@ -95,16 +96,25 @@ impl OpenAiCompatibleProvider {
         api_key: &str,
         base_url: &str,
     ) -> Result<reqwest::RequestBuilder, ProviderError> {
-        let endpoint = chat_completions_endpoint(base_url, &req.query)?;
+        // 端点由**入口**决定，不由 provider 名或 model 名猜 —— 那正是缺陷 #1
+        // （S1）的成因。入口 B（`/v1/responses`）在此之前会被发到
+        // chat/completions 端点，上游必 400。
+        let surface = request_surface(req);
+        let endpoint = match surface {
+            Surface::OpenAiResponses => responses_endpoint(base_url, &req.query)?,
+            Surface::OpenAiCompletions | Surface::AnthropicMessages => {
+                chat_completions_endpoint(base_url, &req.query)?
+            }
+        };
         // Streaming requests must ask for the terminal usage envelope so the
         // billing pipeline settles on precise token counts instead of its
         // fallback estimate. The helper re-checks `stream: true` in the body
         // itself, so a mis-set `req.stream` cannot force include_usage onto a
-        // non-streaming payload.
-        let payload: Cow<'_, [u8]> = if stream {
-            ensure_include_usage(&req.payload)
+        // non-streaming payload. `None` means "not one byte is touched".
+        let spliced = if stream {
+            ensure_include_usage(&req.payload, surface)
         } else {
-            Cow::Borrowed(&req.payload)
+            None
         };
 
         let mut headers = HeaderMap::new();
@@ -119,11 +129,11 @@ impl OpenAiCompatibleProvider {
         }
         headers.insert(AUTHORIZATION, bearer(api_key)?);
 
-        let mut builder = self
-            .client
-            .post(endpoint)
-            .headers(headers)
-            .body(payload.into_owned());
+        let mut builder = attach_body(
+            self.client.post(endpoint).headers(headers),
+            &req.payload,
+            spliced,
+        );
         // reqwest scopes the cap per request, so streaming simply attaches no
         // whole-request timeout and relies on the idle watchdog instead — a
         // whole-request timeout would also bound reading the body and truncate
@@ -168,7 +178,7 @@ impl Provider for OpenAiCompatibleProvider {
 
         let status = response.status().as_u16();
         let headers = response.headers().clone();
-        let body = response.bytes().await?.to_vec();
+        let body = response.bytes().await?;
         if status >= 400 {
             return Err(ProviderError::Upstream {
                 status,
@@ -226,13 +236,25 @@ impl Provider for OpenAiCompatibleProvider {
         Ok(refreshed)
     }
 
-    /// Estimates token count from the payload byte length.
+    /// **上游没有这个端点，所以这里报错，不编数字。**
+    ///
+    /// OpenAI 的 REST API 没有 token 计数端点（对照 Anthropic 的
+    /// `/v1/messages/count_tokens`、Google 的 `:countTokens`）——
+    /// 分词发生在客户端（`tiktoken`），服务端不提供。
+    ///
+    /// 这里原来返回 `payload.len() / 4`：一个**伪造值**
+    /// （`docs/relay-surface-plan.md` §2.1）。它今天还在按 LLM 价格计费 ——
+    /// 一个 4 KB 的请求被当成 1024 个 token 收钱，而这 1024 从来没有被任何上游确认过。
+    /// 编一个数字比报错更坏：调用方无从分辨「上游算出来的」与「我们按字节除以 4 猜的」。
     async fn count_tokens(
         &self,
         _auth: &AuthRecord,
-        req: ProviderRequest,
+        _req: ProviderRequest,
     ) -> Result<i64, ProviderError> {
-        Ok(approximate_tokens_from_bytes(req.payload.len()))
+        Err(ProviderError::Other(anyhow::anyhow!(
+            "{} upstream exposes no token-counting endpoint",
+            self.provider
+        )))
     }
 }
 

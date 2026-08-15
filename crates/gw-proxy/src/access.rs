@@ -1,26 +1,30 @@
-//! Tenant authentication for the proxy surface.
+//! 代理面的租户鉴权。
 //!
-//! The provider and the middleware that used to bridge it into the HTTP layer
-//! collapse into one axum layer.
+//! provider 与它的 HTTP 桥接中间件合并成一个 axum layer。
 //!
-//! Two credential shapes are accepted:
+//! 只接受两种凭据形态：
 //!
 //! ```text
-//! cpa-<hex>   -> api_keys lookup (L1 cache -> DB)
-//! <jwt>       -> HS256 JWT signed with the panel secret
+//! cpa-<hex>   -> api_keys 查表（L1 缓存 -> DB）
+//! <jwt>       -> 面板密钥签的 HS256 JWT
 //! ```
 //!
-//! Where they may be presented depends on the dialect — see
-//! [`credential_from`]. `/v1/*` is `Authorization: Bearer` only, byte-for-
-//! byte. `/v1beta/*` also takes the header and query shapes Google's
-//! own SDKs send, because that surface was the SDK's and no Gemini client sets
-//! `Authorization`.
+//! **载体只有一个**：`Authorization: Bearer <token>`（见 [`credential_from`]）。
+//! 三面收敛（`docs/relay-surface-plan.md` §2）删掉 `/v1beta/**` 之后，
+//! Google SDK 用的 `x-goog-api-key` / `x-api-key` / `?key=` 三种载体一并下线 ——
+//! 它们只在 Gemini 原生面上有意义，而那个面已经不存在了。
 //!
-//! On success an [`AccessMetadata`] extension carries every piece of billing
-//! state [`crate::hold`] needs, so the hold pre-flight does not re-query.
+//! ⚠️ **`/v1` 上的 `x-api-key` 不是租户凭据**，它是 Anthropic 自己的上游头，
+//! 必须原样透传给 claude executor。历史上 `strip_consumed_credentials` 用
+//! `if !path.starts_with("/v1beta/") { return; }` 守住这个区别；`/v1beta` 消失后
+//! 整个剥离函数变成死代码被删掉了，但**这条语义必须保留** —— 否则下一个人会
+//! 「顺手」把 `/v1` 上的 `x-api-key` 也剥掉，Anthropic 直连立刻全线 401。
+//! 见 [`crate::routes::inbound`] 附近的同一条注释。
 //!
-//! This layer performs no Hold/Settle/Release side effects, so it stays
-//! idempotent and safely retryable.
+//! 成功后挂一个 [`AccessMetadata`] 扩展，带上 [`crate::hold`] 预扣需要的全部计费状态，
+//! 所以 hold 的 preflight 不必重查。
+//!
+//! 本层不做任何 Hold/Settle/Release 副作用，因此保持幂等、可安全重试。
 
 use std::sync::Arc;
 
@@ -36,153 +40,40 @@ use crate::ports::{AccessMetadata, AuthCrypto, Id, TenantDirectory};
 /// Prefix that marks a CPA-issued API key (as opposed to a JWT).
 const API_KEY_PREFIX: &str = "cpa-";
 
-/// The OpenAI/Anthropic dialect prefix.
+/// 代理面的**唯一**前缀。收敛后 `/v1beta/` 不再是兄弟前缀，它根本不存在。
 pub const V1_PATH_PREFIX: &str = "/v1/";
 
-/// The Gemini native dialect prefix — Google's own API version segment, which
-/// is why it is `v1beta` and not another `/v1` sub-path.
+/// `path` 是否属于计量代理面。
 ///
-/// This surface was formerly served upstream, but the
-/// dashboard still hands it to tenants as their integration endpoint
-/// (`QuickIntegrationPanel.tsx`, which is frozen), so a client that follows the
-/// panel's instructions must land on a real route rather than a 404.
-pub const V1BETA_PATH_PREFIX: &str = "/v1beta/";
-
-/// Whether `path` belongs to the metered proxy surface.
+/// 一个判据同时服务两道门是有意的：[`layer`] 鉴权的路径集合与
+/// [`crate::hold::is_billable`] 预扣的路径集合必须同源，否则会出现
+/// 「计费但匿名」或「鉴权但免费」的路由。
 ///
-/// One predicate serves both gates on purpose: [`layer`] authenticates exactly
-/// the paths [`crate::hold::is_billable`] reserves against. Letting the two
-/// drift is how a route ends up billed but anonymous, or authenticated but
-/// free — and `/v1beta` is precisely where that would have happened, since
-/// `"/v1beta/models"` does *not* start with `"/v1/"`.
+/// **收敛的连带收益**：这里只剩 `/v1/` 之后，它与
+/// `gw-server/src/metrics.rs` 的 `path.starts_with("/v1/")` 口径自动一致 ——
+/// 历史上 `/v1beta` 流量被鉴权、被计费，却不进 `cpa_v1_requests_total`。
 #[must_use]
 pub fn is_proxy_path(path: &str) -> bool {
-    path.starts_with(V1_PATH_PREFIX) || path.starts_with(V1BETA_PATH_PREFIX)
+    path.starts_with(V1_PATH_PREFIX)
 }
 
 /// The `users.status` value that grants access.
 const STATUS_ACTIVE: &str = "active";
 
-/// Header Google's own Gemini SDKs put the API key on. They never set
-/// `Authorization`, so without this the `/v1beta` surface answers every stock
-/// client with a 401 — which is only marginally better than the 404 it used to
-/// answer with.
-const GOOGLE_API_KEY_HEADER: &str = "x-goog-api-key";
-
-/// The header name the dashboard's own integration panel prints for this
-/// surface. Accepted for the same reason: the panel is frozen, so the backend
-/// is the only side that can make its instructions true.
-const API_KEY_HEADER: &str = "x-api-key";
-
-/// Query parameter Google's SDKs fall back to when a header is inconvenient.
-/// A credential in a query string is a credential in every access log that
-/// records a URI — see [`redact_query`], which is not optional.
-const KEY_QUERY_PARAM: &str = "key";
-
-/// Resolves the tenant credential a request presents, honouring the dialect of
-/// the surface it arrived on.
+/// 解析请求携带的租户凭据。**载体只有 `Authorization: Bearer`**。
 ///
-/// `/v1/*` accepts `Authorization: Bearer` and nothing else. That surface is
-/// this repo's own, so it is real parity territory and stays byte-for-byte
-/// identical.
+/// 收敛前还接受 `x-goog-api-key` / `x-api-key` / `?key=` 三种载体，那是为了让
+/// Gemini 客户端能在 `/v1beta` 上认证。`/v1beta` 已硬删，三种载体随之下线。
 ///
-/// `/v1beta/*` additionally accepts [`GOOGLE_API_KEY_HEADER`],
-/// [`API_KEY_HEADER`] and `?key=`, so a Gemini client can present its
-/// credential in any of those ways.
-///
-/// Priority is fixed rather than incidental, so a request carrying several has
-/// one defined outcome: **Authorization > x-goog-api-key > x-api-key > ?key=**.
-/// Whichever wins, it resolves through the same API-key lookup, the same
-/// user-status recheck and the same billing pipeline.
+/// 特别注意 `x-api-key`：它**没有**变成「不再接受的租户凭据」，而是回到了它在
+/// `/v1` 上一直以来的身份 —— **Anthropic 自己的上游头**，网关原样透传给 claude。
+/// 两者只是碰巧同名。
 #[must_use]
-pub fn credential_from<'a>(
-    path: &str,
-    headers: &'a HeaderMap,
-    query: Option<&'a str>,
-) -> Option<&'a str> {
-    if let Some(token) = headers
+pub fn credential_from(headers: &HeaderMap) -> Option<&str> {
+    headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(bearer_token)
-    {
-        return Some(token);
-    }
-    if !path.starts_with(V1BETA_PATH_PREFIX) {
-        return None;
-    }
-    for name in [GOOGLE_API_KEY_HEADER, API_KEY_HEADER] {
-        if let Some(token) = headers
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-        {
-            return Some(token);
-        }
-    }
-    query.and_then(key_query_param)
-}
-
-/// Reads the raw `key` parameter out of a query string.
-///
-/// Not percent-decoded: both credential shapes this gateway issues (`cpa-` plus
-/// hex, and a base64url JWT) are already URL-safe, and decoding would invent a
-/// transformation that was never applied.
-fn key_query_param(query: &str) -> Option<&str> {
-    query.split('&').find_map(|pair| {
-        let (name, value) = pair.split_once('=')?;
-        (name == KEY_QUERY_PARAM && !value.is_empty()).then_some(value)
-    })
-}
-
-/// Removes the credential carriers [`credential_from`] consumed, so they are
-/// not relayed upstream.
-///
-/// On `/v1beta` these carry a **tenant** credential; the upstream credential
-/// comes from the account pool. Relaying them hands a CPA API key to Google:
-/// `gw_provider::types::is_skipped_proxy_header` drops only `Authorization`,
-/// and the Gemini executor overwrites `x-goog-api-key` only when an upstream
-/// key is actually configured — with a pooled OAuth credential it is not, and
-/// the tenant's own key would travel to Google untouched. The layer that
-/// consumed a credential is the layer that has to drop it.
-///
-/// A no-op off the Gemini surface: `/v1` never reads a credential from these,
-/// and `x-api-key` there is Anthropic's own header, which its executor needs.
-pub fn strip_consumed_credentials(
-    path: &str,
-    headers: &mut HeaderMap,
-    query: &mut Vec<(String, String)>,
-) {
-    if !path.starts_with(V1BETA_PATH_PREFIX) {
-        return;
-    }
-    headers.remove(GOOGLE_API_KEY_HEADER);
-    headers.remove(API_KEY_HEADER);
-    query.retain(|(name, _)| name != KEY_QUERY_PARAM);
-}
-
-/// Rewrites a query string with the tenant credential masked.
-///
-/// **Anything that renders a proxy request's URI must render this instead** —
-/// access logs, tracing spans, error bodies, metric labels. `?key=` is how a
-/// Gemini client authenticates, so on this surface the query string is
-/// credential material, and a query string is the one part of a URI that
-/// everything logs by default (`tower_http::trace::DefaultMakeSpan` included).
-///
-/// Returns the query unchanged when it carries no credential, so callers can
-/// use it unconditionally.
-#[must_use]
-pub fn redact_query(query: &str) -> String {
-    query
-        .split('&')
-        .map(|pair| match pair.split_once('=') {
-            Some((name, value)) if name == KEY_QUERY_PARAM && !value.is_empty() => {
-                format!("{name}=REDACTED")
-            }
-            _ => pair.to_owned(),
-        })
-        .collect::<Vec<_>>()
-        .join("&")
 }
 
 /// Resolves credentials to a CPA tenant.
@@ -220,12 +111,10 @@ impl AccessProvider {
 
     /// Resolves an already-extracted credential to billing metadata.
     ///
-    /// Split out of [`Self::authenticate`] because the Gemini surface presents
-    /// the same token on extra carriers ([`credential_from`]).
-    /// Everything downstream of the extraction — API key vs JWT, the status
-    /// recheck, the entitlement filter — is deliberately identical whichever
-    /// carrier it arrived on, so a Gemini client is exactly as authenticated,
-    /// and exactly as billed, as an OpenAI one.
+    /// 与 [`Self::authenticate`] 分开，是因为 [`layer`] 已经用
+    /// [`credential_from`] 取过 token（它要先拿到所有权才能把结果插回请求扩展）。
+    /// 提取之后的一切 —— API key 还是 JWT、status 复查、entitlement 过滤 ——
+    /// 三个入口完全一致。
     pub async fn authenticate_token(&self, token: &str) -> Result<AccessMetadata, AuthError> {
         if token.is_empty() {
             return Err(AuthError::NoCredentials);
@@ -391,7 +280,7 @@ pub async fn layer(State(state): State<ProxyState>, mut req: Request, next: Next
 
     // Owned, because resolving it borrows the request and inserting the result
     // needs it back mutably.
-    let credential = credential_from(&path, req.headers(), req.uri().query()).map(str::to_owned);
+    let credential = credential_from(req.headers()).map(str::to_owned);
 
     let outcome = match &credential {
         Some(token) => state.access.authenticate_token(token).await,

@@ -15,11 +15,25 @@ edition = "2024"
 rust-version = "1.97"
 publish = false
 
+# `gateway` 被测端（真 gw-proxy 拓扑）要拖进半个工作区；`relay` / `floor` /
+# `mock-upstream` / `loadgen` 只需要 gw-relay 或什么都不需要。wave 3 里
+# `gw-proxy` / `gw-provider` 正被另外两个 worker 同时改，工作区中间态必然是红的 ——
+# 把 gateway 那半边做成可选 feature，就能在红的时候照样构建并验收 relay 对 floor
+# 的那几档（`--no-default-features`），而不是干等。
+[features]
+default = ["gateway"]
+gateway = ["dep:gw-proxy", "dep:gw-provider", "dep:gw-authcore", "dep:chrono"]
+
+[[bin]]
+name = "gateway"
+required-features = ["gateway"]
+
 [dependencies]
 # 被测对象：真实内核，只读引用。
-gw-proxy = { path = "../../../crates/gw-proxy" }
-gw-provider = { path = "../../../crates/gw-provider" }
-gw-authcore = { path = "../../../crates/gw-authcore" }
+gw-proxy = { path = "../../../crates/gw-proxy", optional = true }
+gw-provider = { path = "../../../crates/gw-provider", optional = true }
+gw-authcore = { path = "../../../crates/gw-authcore", optional = true }
+gw-relay = { path = "../../../crates/gw-relay" }
 
 tokio = { version = "1", features = [
     "rt-multi-thread",
@@ -41,7 +55,17 @@ serde = { version = "1", features = ["derive", "std"] }
 serde_json = { version = "1", features = ["std"] }
 async-trait = "0.1"
 anyhow = "1"
-chrono = { version = "0.4", features = ["clock", "std"] }
+chrono = { version = "0.4", features = ["clock", "std"], optional = true }
+# `relay` 被测端要自己拼 `splice_include_usage` 产出的两段字节成一个帧流。
+http-body = "1"
+http-body-util = "0.1"
+# TLS + h2 档：mock 上游要能用自签证书跑 https，并在 ALPN 里给出 h2。
+# 只在 `PERF_TLS_CERT` 设了的时候才走这条路，明文档一个字节都不受影响。
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+# rustls 0.23 要求进程显式装一个 crypto provider。reqwest 作为客户端自己会装，
+# 但 mock 上游是我们自己起的服务端，得自己来。钉 `ring` 是因为 lock 里已经是它
+# （reqwest 的 rustls-tls 走的同一个），换 provider 会平白多编一份密码学库。
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 # 与根 workspace 的 [profile.release] **codegen 部分**逐字一致 —— 基线必须在
 # 同一套优化设置下测，否则「网关 vs 下界」的差值里会混进编译参数的差异。

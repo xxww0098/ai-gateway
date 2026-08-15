@@ -8,6 +8,8 @@ use gw_authcore::AuthRecord;
 use serde_json::json;
 
 use super::*;
+use crate::streambuf::StreamUsageProbe;
+use bytes::Bytes;
 
 /// Throwaway keys generated for these tests only; they authenticate nothing.
 const PKCS1_KEY: &str = include_str!("testdata/service-account-pkcs1.pem");
@@ -47,57 +49,54 @@ fn expiry(offset: chrono::TimeDelta) -> String {
 
 // --- usage recovery ---------------------------------------------------------
 
-/// The M2 undercharge, reproduced: an early chunk latches a small cumulative
-/// tally, then the real terminal frame is split across two reads so no
-/// per-chunk parse ever sees it. Only the finish-time re-parse of the retained
-/// window, merged column-wise, recovers the true total.
+/// M2 少收的复现，现在由**跨帧行解析**根治。
+///
+/// 终局帧被读边界切成两半时，任何「按 chunk」的解析都看不见它 —— 那正是当初要为
+/// Vertex 单独写一个累加器（per-chunk latch + 收尾时对整个窗口再解析一遍）的原因。
+/// `StreamUsageProbe` 把跨帧的半行接上，这条路变成了普通情况。
 #[test]
-fn a_split_terminal_frame_is_recovered_from_the_aggregate() {
-    let mut aggregate = StreamUsageBuffer::new();
-    let mut tally = VertexUsageTally::default();
+fn a_split_terminal_frame_beats_the_stale_earlier_one() {
+    let mut probe = StreamUsageProbe::new(extract_latest_vertex_usage);
 
-    let mut feed = |chunk: &str| {
-        aggregate.write(chunk.as_bytes());
-        tally.observe(chunk.as_bytes());
-    };
-    feed("data: {\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":10}}\n");
-    // Neither half is valid JSON alone, so per-chunk parsing cannot see it.
-    feed("data: {\"usageMetadata\":{\"promptTokenCount\":100,\"candidates");
-    feed("TokenCount\":900}}\n");
+    let stale =
+        "data: {\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":10}}\n";
+    let real_head = "data: {\"usageMetadata\":{\"promptTokenCount\":100,\"candidates";
+    let real_tail = "TokenCount\":900}}\n";
 
+    // 前提：真正的终局帧被切开后，两半单独都解析不出来。
     assert!(
-        tally.found,
-        "precondition: the early complete frame must have been latched"
-    );
-    assert_eq!(
-        tally.latest.output,
-        Some(10),
-        "precondition: the per-chunk tally holds the stale small value"
+        extract_latest_vertex_usage(real_head.as_bytes()).is_none()
+            && extract_latest_vertex_usage(real_tail.as_bytes()).is_none(),
+        "precondition: neither half parses on its own"
     );
 
-    let tokens = tally.finish(&aggregate.bytes()).expect("usage");
+    probe.observe(stale.as_bytes());
+    probe.observe(real_head.as_bytes());
+    probe.observe(real_tail.as_bytes());
+
+    let tokens = probe.finish().expect("usage");
     assert_eq!(
         tokens.output,
         Some(900),
-        "the split terminal frame must beat the stale per-chunk value"
+        "被切开的终局帧必须压过前一个陈旧的小值"
     );
     assert_eq!(tokens.input, Some(100));
 }
 
-/// The finish-time merge is column-wise, not a wholesale replacement: a
-/// terminal frame that omits a column must not erase what an earlier frame
-/// reported for it.
+/// 合并是**按列**的，不是整体替换：终局帧省略了某一列，不得抹掉更早的帧
+/// 为那一列报过的值。「省略」与「零」是两件事。
 #[test]
-fn the_finish_merge_keeps_the_best_value_in_every_column() {
-    let mut tally = VertexUsageTally::default();
-    tally.observe(
-        br#"data: {"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":10,"cachedContentTokenCount":5}}"#,
+fn the_merge_keeps_the_best_value_in_every_column() {
+    let mut probe = StreamUsageProbe::new(extract_latest_vertex_usage);
+    probe.observe(
+        br#"data: {"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":10,"cachedContentTokenCount":5}}
+"#,
     );
-    let tokens = tally
-        .finish(
-            br#"data: {"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":500,"thoughtsTokenCount":7}}"#,
-        )
-        .expect("usage");
+    probe.observe(
+        br#"data: {"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":500,"thoughtsTokenCount":7}}
+"#,
+    );
+    let tokens = probe.finish().expect("usage");
 
     assert_eq!(tokens.input, Some(100));
     assert_eq!(tokens.output, Some(500));
@@ -107,9 +106,16 @@ fn the_finish_merge_keeps_the_best_value_in_every_column() {
 
 #[test]
 fn a_stream_that_never_reported_usage_produces_no_tally() {
-    let mut tally = VertexUsageTally::default();
-    tally.observe(br#"data: {"candidates":[{"content":{}}]}"#);
-    assert!(tally.finish(br#"data: {"candidates":[]}"#).is_none());
+    let mut probe = StreamUsageProbe::new(extract_latest_vertex_usage);
+    probe.observe(
+        br#"data: {"candidates":[{"content":{}}]}
+"#,
+    );
+    probe.observe(
+        br#"data: {"candidates":[]}
+"#,
+    );
+    assert!(probe.finish().is_none());
 }
 
 /// Vertex answers some callers with SSE and others with a chunked JSON array,
@@ -609,23 +615,25 @@ fn the_provider_prefix_is_stripped_only_when_it_is_a_whole_segment() {
     assert_eq!(strip_vertex_prefix("gemini-2.5-pro"), "gemini-2.5-pro");
 }
 
+/// 理由与 gemini 那条逐字相同：入口是 Anthropic 方言，Vertex 的 `:countTokens`
+/// 接不上，所以**报错**而不是编数字（`docs/relay-surface-plan.md` §2.1 缺陷 ①）。
 #[tokio::test]
-async fn token_counting_grows_with_the_payload() {
+async fn token_counting_refuses_rather_than_fabricating_a_number() {
     let provider = provider("", "");
     let auth = auth_with(json!({}));
-    let mut previous = -1;
     for len in [0, 8, 80, 800] {
-        let count = provider
-            .count_tokens(
-                &auth,
-                ProviderRequest {
-                    payload: vec![b'x'; len],
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("count");
-        assert!(count > previous);
-        previous = count;
+        assert!(
+            provider
+                .count_tokens(
+                    &auth,
+                    ProviderRequest {
+                        payload: Bytes::from(vec![b'x'; len]),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .is_err(),
+            "{len} bytes produced a fabricated count"
+        );
     }
 }

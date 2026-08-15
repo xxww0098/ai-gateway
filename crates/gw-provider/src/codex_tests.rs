@@ -5,6 +5,7 @@
 //! iteration count.
 
 use super::*;
+use bytes::Bytes;
 use gw_authcore::AuthRecord;
 use serde_json::json;
 use std::collections::HashMap;
@@ -110,13 +111,13 @@ fn a_missing_or_non_string_model_reads_as_absent() {
 #[test]
 fn the_billing_model_falls_back_to_the_router_hint() {
     let mut req = ProviderRequest {
-        payload: br#"{"model":"gpt-5-codex"}"#.to_vec(),
+        payload: Bytes::from_static(br#"{"model":"gpt-5-codex"}"#),
         model: "ignored-when-body-has-one".to_owned(),
         ..Default::default()
     };
     assert_eq!(codex_billing_model(&req), "gpt-5-codex");
 
-    req.payload = br#"{"messages":[]}"#.to_vec();
+    req.payload = Bytes::from_static(br#"{"messages":[]}"#);
     assert_eq!(codex_billing_model(&req), "ignored-when-body-has-one");
 
     req.model = String::new();
@@ -235,7 +236,7 @@ fn a_request_without_a_token_is_refused_before_it_reaches_the_wire() {
 fn streaming_requests_force_include_usage_like_the_openai_executor() {
     let provider = provider();
     let req = ProviderRequest {
-        payload: br#"{"model":"gpt-5-codex","stream":true}"#.to_vec(),
+        payload: Bytes::from_static(br#"{"model":"gpt-5-codex","stream":true}"#),
         stream: true,
         ..Default::default()
     };
@@ -251,11 +252,19 @@ fn streaming_requests_force_include_usage_like_the_openai_executor() {
     );
     assert_eq!(request.headers()[AUTHORIZATION], "Bearer tok");
     assert_eq!(request.headers()[ACCEPT], "text/event-stream");
-    let sent: Value =
-        serde_json::from_slice(request.body().and_then(reqwest::Body::as_bytes).unwrap()).unwrap();
+    // 与 openai executor 同理：插入后的 body 是两帧零拷贝流，上游看到的长度契约
+    // 是显式声明的 content-length。插入内容本身由 `common_tests` 覆盖。
+    let declared: usize = request.headers()[http::header::CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(declared > req.payload.len());
     assert_eq!(
-        sent.pointer("/stream_options/include_usage"),
-        Some(&json!(true))
+        declared,
+        crate::common::ensure_include_usage(&req.payload, Surface::OpenAiCompletions)
+            .expect("fixture must be spliceable")
+            .len()
     );
 }
 

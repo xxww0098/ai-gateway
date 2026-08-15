@@ -7,21 +7,21 @@
 //!    ([`VertexProvider::refresh`]). Signing per request would be wasteful, so
 //!    minted tokens are cached until shortly before they expire.
 //! 2. **The usage frame is unreliable.** `usageMetadata` is cumulative and may
-//!    be split across TCP reads, so the relay latches per-chunk values *and*
-//!    re-parses the retained window at finish, keeping the column-wise maximum.
-//!    Dropping either half undercharges — see `tests`.
+//!    be split across TCP reads. This used to need a Vertex-only accumulator
+//!    (per-chunk latch + a finish-time re-parse of the retained window, merged
+//!    column-wise) because parsing *per chunk* simply cannot see a frame that
+//!    straddles two reads. [`crate::streambuf::StreamUsageProbe`] now parses
+//!    *per line* and carries the straddling half-line across frames, so the
+//!    shared [`crate::common::usage_stream`] covers this case natively and the
+//!    bespoke accumulator is gone — see `tests`.
 //!
 //! OWNER: worker `provider-claude`.
 
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use futures::Stream;
-use futures_util::StreamExt;
 use gw_authcore::{AuthRecord, AuthStatus};
 use http::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
@@ -32,16 +32,14 @@ use crate::claude::shared::{
     self, append_query, default_content_negotiation, path_escape, trim_base_url, upstream_error,
 };
 use crate::common::{
-    DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_VERTEX, ProviderConfig, approximate_tokens_from_bytes,
-    nested_string, requested_model, resolve_timeout, shared_client, stream_response,
-    string_from_map, with_stream_idle_timeout,
+    DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_VERTEX, ProviderConfig, nested_string, requested_model,
+    resolve_timeout, shared_client, stream_response, string_from_map, usage_stream,
 };
-use crate::streambuf::StreamUsageBuffer;
 use crate::types::{
-    Provider, ProviderError, ProviderRequest, ProviderResponse, StreamChunk, StreamResponse,
+    Provider, ProviderError, ProviderRequest, ProviderResponse, StreamResponse,
     copy_outbound_headers,
 };
-use crate::usage::{UsageTokens, max_usage_tokens, parse_vertex_usage};
+use crate::usage::{UsageTokens, parse_vertex_usage};
 
 const VERTEX_DEFAULT_LOCATION: &str = "us-central1";
 const VERTEX_DEFAULT_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
@@ -640,147 +638,6 @@ pub fn extract_latest_vertex_usage(chunk: &[u8]) -> Option<UsageTokens> {
     latest
 }
 
-/// Running usage tally for one Vertex stream.
-///
-/// Both halves are load-bearing — see
-/// `tests::a_split_terminal_frame_is_recovered_from_the_aggregate`.
-#[derive(Debug, Default)]
-struct VertexUsageTally {
-    latest: UsageTokens,
-    found: bool,
-}
-
-impl VertexUsageTally {
-    /// Latches whatever this chunk reported. Cumulative counts mean a later
-    /// complete frame simply supersedes an earlier one.
-    fn observe(&mut self, chunk: &[u8]) {
-        if let Some(tokens) = extract_latest_vertex_usage(chunk) {
-            self.latest = tokens;
-            self.found = true;
-        }
-    }
-
-    /// Re-parses the retained window and keeps the column-wise maximum.
-    ///
-    /// Unconditional, not a fallback for "nothing latched": when the terminal
-    /// frame is split across reads, no per-chunk parse captured it, yet an
-    /// earlier smaller frame already set `found` and would otherwise have
-    /// skipped this step and undercharged.
-    fn finish(mut self, aggregate: &[u8]) -> Option<UsageTokens> {
-        if let Some(tokens) = extract_latest_vertex_usage(aggregate) {
-            self.latest = max_usage_tokens(self.latest, tokens);
-            self.found = true;
-        }
-        self.found.then_some(self.latest)
-    }
-}
-
-enum VertexStreamPhase {
-    Streaming,
-    Trailing,
-    Done,
-}
-
-/// Relays a Vertex body while teeing it into a bounded usage buffer.
-///
-/// This cannot use [`crate::common::usage_stream`] — that helper parses only
-/// the finished buffer, and Vertex additionally has to latch per-chunk usage —
-/// so it composes the shared idle watchdog with its own accumulator instead.
-fn vertex_usage_stream<S>(
-    body: S,
-    idle: Duration,
-    model: String,
-    upstream_status: u16,
-) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>>
-where
-    S: Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
-{
-    let guarded: Pin<Box<dyn Stream<Item = _> + Send>> =
-        Box::pin(with_stream_idle_timeout(body, idle));
-    let state = (
-        guarded,
-        StreamUsageBuffer::new(),
-        VertexUsageTally::default(),
-        VertexStreamPhase::Streaming,
-        model,
-        upstream_status,
-    );
-
-    Box::pin(futures_util::stream::unfold(
-        state,
-        |(mut inner, mut buf, mut tally, mut phase, model, status)| async move {
-            loop {
-                match phase {
-                    VertexStreamPhase::Done => return None,
-                    VertexStreamPhase::Trailing => {
-                        let record = tally
-                            .finish(&buf.bytes())
-                            .map(|tokens| tokens.to_record(&model, PROVIDER_VERTEX));
-                        let state = (
-                            inner,
-                            buf,
-                            VertexUsageTally::default(),
-                            VertexStreamPhase::Done,
-                            model,
-                            status,
-                        );
-                        return record.map(|rec| (StreamChunk::Usage(rec), state));
-                    }
-                    VertexStreamPhase::Streaming => match inner.next().await {
-                        Some(Ok(Ok(chunk))) => {
-                            buf.write(&chunk);
-                            tally.observe(&chunk);
-                            let state = (
-                                inner,
-                                buf,
-                                tally,
-                                VertexStreamPhase::Streaming,
-                                model,
-                                status,
-                            );
-                            return Some((StreamChunk::Payload(chunk), state));
-                        }
-                        // Mid-stream failure: surface it — stamped with the
-                        // status the relay ran under — then still bill whatever
-                        // usage the truncated body carried.
-                        Some(Ok(Err(err))) => {
-                            let chunk = StreamChunk::Error {
-                                status: Some(status),
-                                message: err.to_string(),
-                            };
-                            let state = (
-                                inner,
-                                buf,
-                                tally,
-                                VertexStreamPhase::Trailing,
-                                model,
-                                status,
-                            );
-                            return Some((chunk, state));
-                        }
-                        Some(Err(elapsed)) => {
-                            let chunk = StreamChunk::Error {
-                                status: Some(status),
-                                message: elapsed.to_string(),
-                            };
-                            let state = (
-                                inner,
-                                buf,
-                                tally,
-                                VertexStreamPhase::Trailing,
-                                model,
-                                status,
-                            );
-                            return Some((chunk, state));
-                        }
-                        None => phase = VertexStreamPhase::Trailing,
-                    },
-                }
-            }
-        },
-    ))
-}
-
 #[async_trait::async_trait]
 impl Provider for VertexProvider {
     fn name(&self) -> &'static str {
@@ -801,7 +658,7 @@ impl Provider for VertexProvider {
 
         let status = response.status().as_u16();
         let headers = response.headers().clone();
-        let body = response.bytes().await?.to_vec();
+        let body = response.bytes().await?;
         if status >= 400 {
             return Err(upstream_error(status, &body));
         }
@@ -831,10 +688,16 @@ impl Provider for VertexProvider {
             return Err(upstream_error(status, &body));
         }
         Ok(stream_response(response, move |response, status| {
-            vertex_usage_stream(
+            // 曾经这里是一个 Vertex 专用的 `vertex_usage_stream`：per-chunk latch
+            // 加收尾时对整个窗口再解析一遍再取列最大值，60 行代码只为了兜住
+            // 「终局帧被读边界切成两半」。增量行解析把跨帧半行天然接上了，
+            // 共享的 `usage_stream` 就够了 —— 见 `streambuf.rs` 模块文档。
+            usage_stream(
                 response.bytes_stream(),
                 DEFAULT_STREAM_IDLE_TIMEOUT,
                 model,
+                PROVIDER_VERTEX,
+                extract_latest_vertex_usage,
                 status,
             )
         }))
@@ -846,13 +709,24 @@ impl Provider for VertexProvider {
         Ok(refreshed)
     }
 
-    /// Estimates token count from the payload byte length.
+    /// **报错，不编数字** —— 理由与 [`crate::gemini::GeminiProvider::count_tokens`]
+    /// 逐字相同：Vertex 上游确实有 `:countTokens`，但 `count_tokens` 的唯一入口
+    /// `POST /v1/messages/count_tokens` 是 **Anthropic 方言**，body 原样送过去
+    /// Google 会因未知字段回 400。
+    ///
+    /// 这里原来返回 `payload.len() / 4` 的伪造值
+    /// （`docs/relay-surface-plan.md` §2.1 缺陷 ①），且那个数还在按 LLM 价格计费。
+    /// 接上 `gw_relay::translate::google` 转义器之前，明确报错比假数字诚实。
     async fn count_tokens(
         &self,
         _auth: &AuthRecord,
-        req: ProviderRequest,
+        _req: ProviderRequest,
     ) -> Result<i64, ProviderError> {
-        Ok(approximate_tokens_from_bytes(req.payload.len()))
+        Err(ProviderError::Other(anyhow::anyhow!(
+            "{PROVIDER_VERTEX} token counting is unavailable: the only entry point is the \
+             Anthropic-dialect POST /v1/messages/count_tokens, and reaching Vertex's \
+             :countTokens needs the anthropic->google translator wired into that path"
+        )))
     }
 }
 

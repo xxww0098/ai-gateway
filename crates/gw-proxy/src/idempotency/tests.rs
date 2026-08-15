@@ -34,7 +34,7 @@ fn the_same_client_key_never_collides_across_tenants_methods_or_paths() {
     let base = manager.scoped_key(1, "POST", "/v1/messages", "k");
     assert_ne!(base, manager.scoped_key(2, "POST", "/v1/messages", "k"));
     assert_ne!(base, manager.scoped_key(1, "PUT", "/v1/messages", "k"));
-    assert_ne!(base, manager.scoped_key(1, "POST", "/v1/embeddings", "k"));
+    assert_ne!(base, manager.scoped_key(1, "POST", "/v1/responses", "k"));
     assert_eq!(base, manager.scoped_key(1, "POST", "/v1/messages", "k"));
 }
 

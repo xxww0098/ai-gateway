@@ -340,7 +340,7 @@ async fn worker(
                 args.path,
                 args.host,
                 args.port,
-                perfkit::stubs::PERF_API_KEY,
+                perfkit::PERF_API_KEY,
                 body.len()
             )
             .as_bytes(),

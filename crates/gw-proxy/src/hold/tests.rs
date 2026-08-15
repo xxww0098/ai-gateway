@@ -19,83 +19,95 @@ use crate::testsupport::{
 // ---------------------------------------------------------------- billable paths
 
 #[test]
-fn the_v1_prefix_alone_decides_what_is_billable() {
+fn only_the_three_inference_entries_are_billable() {
     assert!(is_billable(&Method::POST, "/v1/chat/completions"));
+    assert!(is_billable(&Method::POST, "/v1/responses"));
     assert!(is_billable(&Method::POST, "/v1/messages"));
-    assert!(is_billable(
-        &Method::POST,
-        "/v1/models/gemini-2.5-pro:generateContent"
-    ));
 
-    // Everything outside /v1 keeps its own auth and its own (non-)billing.
+    // /v1 之外各管各的鉴权与计费。
     assert!(!is_billable(&Method::POST, "/api/panel/billing/topup"));
     assert!(!is_billable(&Method::GET, "/metrics/prometheus"));
+    // Gemini 原生面已硬删：它连鉴权面都不在了，更谈不上计费。
+    assert!(!is_billable(
+        &Method::POST,
+        "/v1beta/models/gemini-2.5-pro:generateContent"
+    ));
 }
 
 #[test]
-fn the_two_zero_cost_endpoints_are_billed_regardless() {
-    // Deliberate parity with a historical behaviour that looks like a product
-    // defect — see `is_billable`'s docs for the mechanism and the traced
-    // amount. The assertion is inverted from what the endpoints deserve on
-    // purpose: if someone "fixes" the predicate without the product decision
-    // behind it, this is what flags the drift.
-    assert!(is_billable(&Method::GET, "/v1/models"));
-    assert!(is_billable(&Method::POST, "/v1/messages/count_tokens"));
+fn the_zero_cost_endpoints_are_out_of_billing_scope() {
+    // 收敛前这三条按 LLM 价格收钱：两条 catalogue 读是纯 DB 读、不出网，
+    // count_tokens 在 Anthropic 那边收 0。都已移出计费范围。
+    assert!(!is_billable(&Method::GET, "/v1/models"));
+    assert!(!is_billable(&Method::GET, "/v1/models/gpt-4o"));
+    assert!(!is_billable(&Method::POST, "/v1/messages/count_tokens"));
+}
+
+#[test]
+fn a_safe_method_is_never_billable_whatever_the_path() {
+    // 排除的是「方法」这条轴，不是某几条写死的路径：任何只读方法都不该预扣。
+    for method in [Method::GET, Method::HEAD, Method::OPTIONS] {
+        for path in ["/v1/chat/completions", "/v1/messages", "/v1/anything"] {
+            assert!(
+                !is_billable(&method, path),
+                "{method} {path} 会为一个只读请求预扣余额",
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------- body peek
 
-#[test]
-fn the_peek_reads_model_and_stream_from_a_json_body() {
-    let peek = parse_body_peek(
-        Some("application/json"),
-        br#"{"model":" gpt-4o ","stream":true}"#,
-    );
-    assert_eq!(peek.model, "gpt-4o", "the model name must be trimmed");
-    assert!(peek.stream);
-    assert!(peek.parsed);
+/// 计费侧看到的 peek，走的是与生产同一条路径：`gw-relay` 的唯一一次解析
+/// → [`BillingPeek::from_spec`]。
+fn billing_peek(body: &[u8]) -> BillingPeek {
+    let spec = RequestSpec::parse(gw_relay::Surface::OpenAiCompletions, Some(body));
+    BillingPeek::from_spec(&spec, body.len())
 }
 
 #[test]
-fn the_output_cap_resolves_max_tokens_before_max_completion_tokens() {
-    let both = parse_body_peek(
-        Some("application/json"),
-        br#"{"max_tokens":100,"max_completion_tokens":200}"#,
-    );
-    assert_eq!(both.max_tokens, 100);
+fn the_peek_reads_model_and_stream_from_a_json_body() {
+    let peek = billing_peek(br#"{"model":" gpt-4o ","stream":true}"#);
+    assert_eq!(peek.model, "gpt-4o", "the model name must be trimmed");
+    assert!(peek.stream);
+}
 
-    let fallback = parse_body_peek(
-        Some("application/json"),
-        br#"{"max_completion_tokens":200}"#,
-    );
-    assert_eq!(fallback.max_tokens, 200);
-
-    let neither = parse_body_peek(Some("application/json"), br#"{}"#);
+#[test]
+fn the_output_cap_falls_back_across_the_three_dialect_spellings() {
+    // `max_tokens`（A、C）→ `max_completion_tokens`（A 的新拼法）→
+    // `max_output_tokens`（B）。收敛前最后一级不存在，于是**每一个**
+    // `/v1/responses` 请求的 max_tokens 都是 0，预扣退化成保守估算、过度冻结余额。
     assert_eq!(
-        neither.max_tokens, 0,
+        billing_peek(br#"{"max_tokens":100,"max_completion_tokens":200}"#).max_tokens,
+        100
+    );
+    assert_eq!(
+        billing_peek(br#"{"max_completion_tokens":200,"max_output_tokens":300}"#).max_tokens,
+        200
+    );
+    assert_eq!(
+        billing_peek(br#"{"max_output_tokens":300}"#).max_tokens,
+        300,
+        "入口 B 的输出上限必须被读到",
+    );
+
+    assert_eq!(
+        billing_peek(br#"{}"#).max_tokens,
+        0,
         "an absent cap means 'unbounded', which the estimator reads as 0",
     );
-
-    let negative = parse_body_peek(Some("application/json"), br#"{"max_tokens":-5}"#);
-    assert_eq!(negative.max_tokens, 0);
+    assert_eq!(billing_peek(br#"{"max_tokens":-5}"#).max_tokens, 0);
 }
 
 #[test]
 fn an_unparsable_body_never_rejects_the_request() {
     // Billing must not be the layer that decides a payload is malformed.
-    let peek = parse_body_peek(Some("application/json"), b"{not json");
-    assert!(!peek.parsed);
+    let peek = billing_peek(b"{not json");
     assert_eq!(peek.model, "");
     assert!(
         peek.input_tokens > 0,
         "the reservation still scales with the bytes we were asked to forward",
     );
-}
-
-#[test]
-fn a_non_json_body_is_not_peeked_at_all() {
-    let peek = parse_body_peek(Some("multipart/form-data"), b"whatever");
-    assert_eq!(peek, BodyPeek::default());
 }
 
 #[test]

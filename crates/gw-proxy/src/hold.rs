@@ -27,6 +27,7 @@ use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use gw_relay::endpoint::spec::{RequestSpec, SurfaceError, validate};
 
 use crate::ProxyState;
 use crate::access::is_proxy_path;
@@ -56,18 +57,36 @@ pub const DEFAULT_HOLD_TTL: Duration = Duration::from_secs(300);
 /// Detached-operation budget for release / rate-limiter cleanup (2 seconds).
 const DETACHED_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The request body peeked for billing inputs.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct BodyPeek {
+/// 计费侧从 [`RequestSpec`] 派生出来的两个量。
+///
+/// [`RequestSpec`] 是 `gw-relay` 那一次**全链路唯一**的 body 解析的产物
+/// （根除审计缺陷 #15：今天同一个 body 被 `hold.rs` 与 `routes.rs` 各解析一遍，
+/// 流式还有第三遍）。这个结构只补上中继层不关心、而计费必需的东西。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BillingPeek {
+    /// 已 trim 的模型名。`RequestSpec::model` 按合同保留原样字节，
+    /// 而计费要拿它当缓存键与价格表键，必须先归一。
     pub model: String,
-    pub stream: bool,
-    /// `max_tokens` -> `max_completion_tokens` -> 0. Zero means "no cap".
-    pub max_tokens: i64,
-    /// Approximated from the raw body size; over-counts slightly, which is the
-    /// safe direction for a reservation.
+    /// 由原始 body 长度近似而来；略微高估，对预扣而言是安全方向。
     pub input_tokens: i64,
-    /// True when a JSON payload was parsed successfully.
-    pub parsed: bool,
+    /// 输出上限。`None`（客户端没说）在这里塌缩成 0 = 「无上限」，
+    /// 这是 [`PricingCalculator::estimate_with_max_tokens`] 一直以来的约定。
+    pub max_tokens: i64,
+    pub stream: bool,
+}
+
+impl BillingPeek {
+    /// 从唯一一次解析的结果派生。**不再解析 body**。
+    #[must_use]
+    pub fn from_spec(spec: &RequestSpec, body_len: usize) -> Self {
+        Self {
+            model: spec.model().unwrap_or_default().trim().to_owned(),
+            input_tokens: approximate_tokens_from_bytes(body_len),
+            // 负数与缺失同义：都表示「客户端没有给出可用的上限」。
+            max_tokens: spec.max_tokens.unwrap_or(0).max(0),
+            stream: spec.stream,
+        }
+    }
 }
 
 /// The peeked request body, republished as an extension so the dispatcher does
@@ -180,12 +199,42 @@ impl HoldMiddleware {
         let method = req.method().clone();
         let path = req.uri().path().to_owned();
 
+        // --- 入口校验（`gw-relay` 的三面规范）---
+        //
+        // `UnknownPath` / `MethodNotAllowed` 一律放行给 axum 自己回 404 / 405：
+        // 路由表是 `crate::router` 的，这里不复制第二份。**连带收益**：
+        // `/v1/` 下的未注册路径不再先创建一个 Redis hold 再被 404 掉。
+        //
+        // `UnsupportedMediaType` 则必须在这里 400。今天 `parse_body_peek` 在
+        // content-type 不含 `json` 时**静默返回全零 peek**，于是请求带着
+        // `model=""` / `stream=false` / `max_tokens=0` 走完整个计费与派发链
+        // （`docs/relay-surface-plan.md` §3.0）。
+        let surface = match validate(&method, &path, req.headers()) {
+            Ok(surface) => surface,
+            Err(SurfaceError::UnknownPath | SurfaceError::MethodNotAllowed) => {
+                return next.run(req).await;
+            }
+            Err(err @ SurfaceError::UnsupportedMediaType) => {
+                return (
+                    err.status(),
+                    axum::Json(serde_json::json!({
+                        "error": "Bad Request",
+                        "message": "content-type must be application/json",
+                    })),
+                )
+                    .into_response();
+            }
+        };
+
         // --- body peek (body is restored so the handler sees it unchanged) ---
-        let (peek, body_bytes) = match peek_request_body(&mut req).await {
+        let (spec, body_bytes) = match peek_request_body(&mut req, surface).await {
             Ok(v) => v,
             Err(resp) => return resp,
         };
+        let peek = BillingPeek::from_spec(&spec, body_bytes.len());
         req.extensions_mut().insert(PeekedBody(body_bytes));
+        // 唯一一次解析的结果原样交给 handler，`routes::inbound` 直接复用。
+        req.extensions_mut().insert(spec);
 
         // --- rate limiter (fail-open on infrastructure error) ---
         let identity = meta.user_id.to_string();
@@ -542,7 +591,7 @@ impl HoldMiddleware {
 struct ReservationInput {
     meta: AccessMetadata,
     rate_mult: f64,
-    peek: BodyPeek,
+    peek: BillingPeek,
     request_id: String,
     ip_address: String,
     idempotency_key: String,
@@ -558,49 +607,42 @@ pub async fn layer(State(state): State<ProxyState>, req: Request, next: Next) ->
 
 // ---------------------------------------------------------------- pure logic
 
-/// Whether a request must go through billing pre-flight.
+/// 一个请求要不要走计费 preflight。
 ///
-/// The whole proxy surface is — the prefix is the only test applied. The set
-/// of prefixes is [`crate::access::is_proxy_path`], shared with the auth
-/// layer so a route can never be billed without being authenticated first. The
-/// `method` argument is unused for that decision and kept so the seam below
-/// stays a one-line change.
+/// 路径集合来自 [`crate::access::is_proxy_path`]，与鉴权层共用，
+/// 所以一条路由**不可能**在没被鉴权的情况下被计费。
 ///
-/// # This charges for two endpoints that cost the upstream nothing
+/// # 三个零成本端点已被移出计费范围（本轮修复，用户已批准）
 ///
-/// `GET /v1/models` (and its Gemini twin `GET /v1beta/models`) and
-/// `POST /v1/messages/count_tokens` are billed here, and that is a faithful
-/// reproduction of a historical behaviour that looks like a product defect.
-/// All reach the settlement with no usage envelope:
+/// `GET /v1/models`、`GET /v1/models/{model}`、`POST /v1/messages/count_tokens`
+/// 此前是**按 LLM 价格收钱的**。三者都会带着「没有 usage 信封」抵达结算：
 ///
-/// * the catalogue reads fall to the default arm of usage parsing;
-/// * `/v1/messages/count_tokens` matches its `/messages` arm, but Anthropic's
-///   reply is a bare `{"input_tokens": N}` with no `usage` wrapper, so the
-///   usage parser finds nothing and reports `present = false`.
+/// * 两条 catalogue 读落到 usage 解析的默认分支；
+/// * `count_tokens` 命中它的 `/messages` 分支，但 Anthropic 的回复是裸
+///   `{"input_tokens": N}`，没有 `usage` 包装，所以 usage 解析器什么也找不到，
+///   报 `present = false`。
 ///
-/// Absent usage plus non-strict mode is the fallback settle, so each call is
-/// charged `max(ActiveHoldAmount, Estimate(model, stream = true, rate_mult))`.
-/// With the shipped config (`default_price_per_1k_tokens: 0.001`,
-/// `estimatedTokens = 1000`) a catalogue read costs the tenant about $0.004;
-/// `count_tokens` carries a real model name, so it is priced at that model's
-/// rate and can cost considerably more. Neither endpoint bills anything
-/// upstream — Anthropic charges nothing for token counting — and the amount
-/// tracks a knob meant for *unknown models*, not a tariff anyone chose.
+/// 「usage 缺失 + 非 strict」= fallback 结算，于是每次调用被收
+/// `max(ActiveHoldAmount, Estimate(model, stream = true, rate_mult))`。
+/// 按发布配置（`default_price_per_1k_tokens: 0.001`、`estimatedTokens = 1000`），
+/// 一次 catalogue 读要收租户约 $0.004；`count_tokens` 带着真实模型名，
+/// 按那个模型的费率计价，**可能贵得多**。而上游对这三者都收 0
+/// —— Anthropic 的 token 计数是免费的，catalogue 读根本不出网（纯 DB 读）。
 ///
-/// It is reproduced anyway because billing semantics are a hard constraint
-/// (`AGENTS.md`) and a divergence here would surface as drift that nobody
-/// could distinguish from a porting bug. Changing it is a product decision,
-/// not a porting one.
+/// 此前不敢改的理由是「Go parity：改了会漂移成没人能与移植 bug 区分的差异」。
+/// **这个理由已经被证伪**：`docs/relay-surface-plan.md` 证据 C 显示 Go 侧 149 条
+/// 路由里 `/v1` 与 `/v1beta` 的匹配数为 **0** —— 整个 `/v1` 面来自 CPA SDK 的
+/// Builder，根本不在 Go 权威参照内，不存在 A/B 对账时被误判的风险。
 ///
-/// **To adopt the fix**, once that decision is made, this becomes:
+/// # 这改的是「计费范围」，不是「计费语义」
 ///
-/// ```ignore
-/// is_proxy_path(path)
-///     && !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
-///     && !path.ends_with("/count_tokens")
-/// ```
-pub fn is_billable(_method: &Method, path: &str) -> bool {
+/// Hold / Settle / Release 三段式、partial-debit shortfall、strict-usage-metadata
+/// 模式 —— 签名与语义一行未动。变的只是**哪些路径进入这条管线**。
+/// 这是 `CONTRACT.md` 硬约束「计费语义不变」允许的那一半。
+pub fn is_billable(method: &Method, path: &str) -> bool {
     is_proxy_path(path)
+        && !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+        && !path.ends_with("/count_tokens")
 }
 
 /// Conservative worst case used by the balance gate:
@@ -715,7 +757,8 @@ pub fn next_monthly_reset_after(t: DateTime<Utc>) -> DateTime<Utc> {
 }
 
 /// Maps a model name onto the circuit-breaker key (NOT the dispatch registry —
-/// see [`crate::routes::route_provider`] for that).
+/// 派发用的是 `gw_relay::endpoint::upstream::select` 的四级链，见
+/// [`crate::routes::select_upstreams`]).
 pub fn infer_provider(model: &str) -> Option<&'static str> {
     let lower = model.to_ascii_lowercase();
     if lower.starts_with("gpt-")
@@ -743,53 +786,21 @@ pub fn approximate_tokens_from_bytes(size: usize) -> i64 {
     size.div_ceil(4) as i64
 }
 
-/// Extracts `model` / `stream` / output cap from a JSON payload.
-///
-/// Permissive failure semantics: the billing layer must never reject a request
-/// merely because the payload could not be peeked.
-pub fn parse_body_peek(content_type: Option<&str>, body: &[u8]) -> BodyPeek {
-    let mut peek = BodyPeek::default();
-    if body.is_empty() {
-        return peek;
-    }
-    if let Some(ct) = content_type
-        && !ct.is_empty()
-        && !ct.to_ascii_lowercase().contains("json")
-    {
-        return peek;
-    }
-    peek.input_tokens = approximate_tokens_from_bytes(body.len());
-
-    #[derive(serde::Deserialize)]
-    struct Payload {
-        #[serde(default)]
-        model: String,
-        #[serde(default)]
-        stream: bool,
-        #[serde(default)]
-        max_tokens: i64,
-        #[serde(default)]
-        max_completion_tokens: i64,
-    }
-    let Ok(payload) = serde_json::from_slice::<Payload>(body) else {
-        return peek;
-    };
-
-    // max_tokens -> max_completion_tokens -> 0. A non-positive value means
-    // "unset", so callers fall back to the default streaming estimate.
-    let mut resolved = payload.max_tokens;
-    if resolved <= 0 {
-        resolved = payload.max_completion_tokens;
-    }
-    peek.model = payload.model.trim().to_owned();
-    peek.stream = payload.stream;
-    peek.max_tokens = resolved.max(0);
-    peek.parsed = true;
-    peek
-}
-
 /// Stable request id used as the ledger hold key: an inbound `X-Trace-ID`, else
-/// a fresh UUID.
+/// a freshly minted one.
+///
+/// # 为什么不是 `Uuid::new_v4()`
+///
+/// 基线实测（`docs/relay-perf-baseline.md` 热点 #6）：`Uuid::new_v4()` 每请求
+/// 一次 `getentropy` 系统调用，占有效 CPU **1.93%**。trace id 不是密码学材料
+/// —— 它只需要在**这个进程的生命周期内**不重复，供账本 hold 键与日志关联。
+///
+/// 所以换成「**进程随机前缀 + 单调原子计数**」：前缀在进程启动时取一次熵
+/// （整个进程一次，不是每请求一次），计数器保证同进程内唯一，
+/// 前缀保证跨进程/跨副本不碰撞。`getentropy` 的每请求调用次数归 **0**（验收目标 T12）。
+///
+/// 形状仍是十六进制文本，长度固定，对既有的 `usage_logs.request_id`
+/// / Redis hold 键完全兼容（列是文本，没有 UUID 约束）。
 pub fn trace_id_from(headers: &HeaderMap) -> String {
     headers
         .get(TRACE_HEADER)
@@ -797,7 +808,21 @@ pub fn trace_id_from(headers: &HeaderMap) -> String {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+        .unwrap_or_else(new_trace_id)
+}
+
+/// 进程级随机前缀。`LazyLock` 保证整个进程**只取一次**熵；
+/// 复用 `uuid` 的 v4 生成器只是为了不多引一个熵源，那一次 `getentropy`
+/// 摊到进程生命周期上等于零。
+static TRACE_PREFIX: std::sync::LazyLock<u64> =
+    std::sync::LazyLock::new(|| uuid::Uuid::new_v4().as_u64_pair().0);
+
+/// 同进程内的单调计数器。`Relaxed` 足够：这里只要求**唯一**，不要求跨线程有序。
+static TRACE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn new_trace_id() -> String {
+    let n = TRACE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{:016x}{n:016x}", *TRACE_PREFIX)
 }
 
 /// Client IP: `X-Forwarded-For` (first entry) -> `X-Real-IP` -> nothing.
@@ -836,13 +861,10 @@ pub fn extract_idempotency_key(headers: &HeaderMap) -> String {
 /// Buffers the body for peeking and puts it back so the handler sees it
 /// unchanged. A body over [`HOLD_REQUEST_BODY_LIMIT`] is rejected with 413
 /// rather than silently corrupting the payload forwarded upstream.
-async fn peek_request_body(req: &mut Request) -> Result<(BodyPeek, Bytes), Response> {
-    let content_type = req
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-
+async fn peek_request_body(
+    req: &mut Request,
+    surface: gw_relay::Surface,
+) -> Result<(RequestSpec, Bytes), Response> {
     let body = std::mem::replace(req.body_mut(), Body::empty());
     let bytes = match axum::body::to_bytes(body, HOLD_REQUEST_BODY_LIMIT).await {
         Ok(b) => b,
@@ -858,9 +880,15 @@ async fn peek_request_body(req: &mut Request) -> Result<(BodyPeek, Bytes), Respo
         }
     };
 
-    let peek = parse_body_peek(content_type.as_deref(), &bytes);
+    // **全链路唯一一次** JSON 解析（根除缺陷 #15）。结果作为扩展下发，
+    // `routes::inbound` 直接复用，不再解第二遍。
+    let spec = RequestSpec::parse(surface, Some(&bytes));
+    // 规则 S3：`Accept` 与 body 的 `stream` 冲突时**以 body 为准**，只告警不改行为
+    // （告警由被调用方自己打，返回值这里不需要）。
+    let _conflicted =
+        gw_relay::endpoint::accept_conflicts_with_body(&spec, req.headers(), req.uri().path());
     *req.body_mut() = Body::from(bytes.clone());
-    Ok((peek, bytes))
+    Ok((spec, bytes))
 }
 
 /// Buffers a response body for idempotent replay when it is small enough and

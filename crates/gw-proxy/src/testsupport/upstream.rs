@@ -17,19 +17,28 @@ use crate::ports::{ModelCatalog, ModelEntry};
 #[derive(Default)]
 pub(crate) struct FakeAuthStore {
     pub(crate) records: Mutex<Vec<AuthRecord>>,
+    /// `list()` 被调用了多少次。真实后端上这一次是「全表 SELECT + 每行一次
+    /// AES-GCM 解密」，所以「每请求几次」是热点 #5 的可量化代理指标。
+    list_calls: AtomicUsize,
 }
 
 impl FakeAuthStore {
     pub(crate) fn with(records: Vec<AuthRecord>) -> Arc<Self> {
         Arc::new(Self {
             records: Mutex::new(records),
+            list_calls: AtomicUsize::new(0),
         })
+    }
+
+    pub(crate) fn list_calls(&self) -> usize {
+        self.list_calls.load(Ordering::SeqCst)
     }
 }
 
 #[async_trait]
 impl AuthStore for FakeAuthStore {
     async fn list(&self) -> anyhow::Result<Vec<AuthRecord>> {
+        self.list_calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.records.lock().clone())
     }
 
@@ -112,7 +121,7 @@ pub(crate) fn ok_response(input: i64, output: i64) -> ProviderResponse {
     ProviderResponse {
         status: 200,
         headers: http::HeaderMap::new(),
-        body: br#"{"ok":true}"#.to_vec(),
+        body: bytes::Bytes::from_static(br#"{"ok":true}"#),
         usage: Some(UsageRecord {
             model: "test-model".to_owned(),
             provider: "openai".to_owned(),
@@ -129,7 +138,7 @@ pub(crate) fn ok_response_without_usage() -> ProviderResponse {
     ProviderResponse {
         status: 200,
         headers: http::HeaderMap::new(),
-        body: br#"{"ok":true}"#.to_vec(),
+        body: bytes::Bytes::from_static(br#"{"ok":true}"#),
         usage: None,
     }
 }

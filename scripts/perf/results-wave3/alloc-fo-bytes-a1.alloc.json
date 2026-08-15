@@ -1,0 +1,11 @@
+{
+  "label": "alloc-fo-bytes-a1",
+  "requests": 300,
+  "wall_seconds": 0.06956005096435547,
+  "alloc_count": 35034,
+  "alloc_bytes": 238985067,
+  "dealloc_count": 31726,
+  "realloc_count": 3306,
+  "alloc_per_req": 116.78,
+  "bytes_per_req": 796616.89
+}

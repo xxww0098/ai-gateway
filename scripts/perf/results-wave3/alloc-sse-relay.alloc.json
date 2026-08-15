@@ -1,0 +1,11 @@
+{
+  "label": "alloc-sse-relay",
+  "requests": 20,
+  "wall_seconds": 23.90747594833374,
+  "alloc_count": 32105,
+  "alloc_bytes": 1249480,
+  "dealloc_count": 31923,
+  "realloc_count": 182,
+  "alloc_per_req": 1605.25,
+  "bytes_per_req": 62474.0
+}

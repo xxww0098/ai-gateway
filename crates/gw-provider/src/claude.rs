@@ -15,9 +15,8 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::common::{
-    DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_CLAUDE, ProviderConfig, approximate_tokens_from_bytes,
-    nested_string, requested_model, resolve_timeout, shared_client, stream_response,
-    string_from_map, usage_stream,
+    DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_CLAUDE, ProviderConfig, nested_string, requested_model,
+    resolve_timeout, shared_client, stream_response, string_from_map, usage_stream,
 };
 use crate::types::{
     Provider, ProviderError, ProviderRequest, ProviderResponse, StreamResponse,
@@ -223,6 +222,21 @@ impl ClaudeProvider {
         Ok(parsed)
     }
 
+    /// Anthropic 的计数端点：Messages 端点再拼一段 `/count_tokens`。
+    ///
+    /// 刻意复用 [`Self::messages_endpoint`] 而不是再写一遍 base 归一化 ——
+    /// 三种 base 形态（全路径 / `/v1` / 裸 origin）的收敛规则只该有一处。
+    fn count_tokens_endpoint(
+        query: &[(String, String)],
+        base_url: &str,
+    ) -> Result<Url, ProviderError> {
+        let mut parsed = Self::messages_endpoint(&[], base_url)?;
+        let path = format!("{}/count_tokens", parsed.path().trim_end_matches('/'));
+        parsed.set_path(&path);
+        append_query(&mut parsed, query);
+        Ok(parsed)
+    }
+
     /// Stamps the credential onto an outbound header map.
     ///
     /// `x-api-key` replaces whatever the caller sent — an inbound key is about
@@ -353,7 +367,7 @@ impl Provider for ClaudeProvider {
 
         let status = response.status().as_u16();
         let headers = response.headers().clone();
-        let body = response.bytes().await?.to_vec();
+        let body = response.bytes().await?;
         if status >= 400 {
             return Err(upstream_error(status, &body));
         }
@@ -441,14 +455,70 @@ impl Provider for ClaudeProvider {
         Ok(refreshed)
     }
 
-    /// Estimates token count from the payload byte length.
+    /// **真的去问 Anthropic**：`POST {base}/v1/messages/count_tokens`。
+    ///
+    /// 这里原来返回 `payload.len() / 4` —— 一个和真实 tokenizer 毫无关系的
+    /// **伪造值**（`docs/relay-surface-plan.md` §2.1 缺陷 ①：五个 provider 的实现
+    /// 全是同一句 `approximate_tokens_from_bytes`，没有任何一个真的去问上游）。
+    /// 更糟的是那个假数还在按 LLM 价格计费（同节缺陷 ②，计费范围的修复归 `gw-proxy`）。
+    ///
+    /// 五个 provider 里只有 Anthropic 这一家的上游真的有计数端点，而
+    /// `POST /v1/messages/count_tokens` 本来就是 Anthropic 方言的入口，
+    /// 所以这条路是**恒等转发**：请求体原样送上去，`anthropic-version` 与
+    /// `x-api-key` 走与 [`Self::build_request`] 同一套注入。
+    ///
+    /// 计数请求永远不是流式的，所以走非流式的 content negotiation 与整体超时。
     async fn count_tokens(
         &self,
-        _auth: &AuthRecord,
+        auth: &AuthRecord,
         req: ProviderRequest,
     ) -> Result<i64, ProviderError> {
-        Ok(approximate_tokens_from_bytes(req.payload.len()))
+        let (credential, base_url) = self.resolve_credentials(Some(auth));
+        if credential.value.is_empty() {
+            return Err(ProviderError::Credential(
+                "claude credential is required".to_owned(),
+            ));
+        }
+        let endpoint = Self::count_tokens_endpoint(&req.query, &base_url)?;
+
+        let mut headers = HeaderMap::new();
+        copy_outbound_headers(&mut headers, &req.headers);
+        default_content_negotiation(&mut headers, false);
+        Self::inject_credential_headers(&mut headers, &credential)?;
+
+        let response = self
+            .client
+            .post(endpoint)
+            .headers(headers)
+            .timeout(self.timeout)
+            .body(req.payload.clone())
+            .send()
+            .await?;
+        let status = response.status().as_u16();
+        let body = response.bytes().await?;
+        if status >= 400 {
+            return Err(upstream_error(status, &body));
+        }
+        parse_count_tokens(&body)
     }
+}
+
+/// Anthropic 的计数响应信封：`{"input_tokens": N}`。
+#[derive(Debug, Deserialize)]
+struct ClaudeCountTokens {
+    input_tokens: i64,
+}
+
+/// 解析计数响应。**上游给不出数就报错，绝不回落到估算** ——
+/// 回落等于把伪造值又请回来了，而调用方无从分辨真假。
+fn parse_count_tokens(body: &[u8]) -> Result<i64, ProviderError> {
+    serde_json::from_slice::<ClaudeCountTokens>(body)
+        .map(|counted| counted.input_tokens)
+        .map_err(|err| {
+            ProviderError::Other(anyhow::anyhow!(
+                "parsing claude count_tokens response: {err}"
+            ))
+        })
 }
 
 pub(crate) mod shared {

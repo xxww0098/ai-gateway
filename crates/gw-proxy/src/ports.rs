@@ -418,6 +418,32 @@ pub struct ModelEntry {
 #[async_trait]
 pub trait ModelCatalog: Send + Sync {
     async fn list_models(&self) -> anyhow::Result<Vec<ModelEntry>>;
+
+    /// **路由用**的 `model_id → channel_key[]`，顺序即优先级。
+    ///
+    /// 这是 `gw_relay::endpoint::upstream` 四级链 L2 的数据源，喂给
+    /// [`crate::adapters::catalog::CatalogChannelResolver`]。
+    ///
+    /// # 为什么不能复用 [`Self::list_models`]
+    ///
+    /// 那条查询带 `WHERE visible = TRUE`，而 `visible` 是**「对租户展示」**开关，
+    /// 不是**「允许调用」**开关 —— 今天一个 `visible = false` 的模型照样能被调用
+    /// （前缀猜测根本不看这张表）。路由查询若继承了它，会**静默地**把所有隐藏模型
+    /// 变成不可调用，表现为「某些模型突然 503」，极难归因。
+    /// 所以这是**独立的一条 SQL**，不是给 `list_models` 加参数。
+    ///
+    /// 默认实现返回空 —— 对不提供路由数据的实现，四级链直接落 L4 兜底，
+    /// 行为与收敛前逐字节相同。
+    async fn resolve_channels(&self, _model_id: &str) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    /// 全量的 `model_id → channel_key[]`，供快照式缓存一次拉完。
+    ///
+    /// 默认实现返回空，理由同 [`Self::resolve_channels`]。
+    async fn model_routes(&self) -> anyhow::Result<Vec<(String, Vec<String>)>> {
+        Ok(Vec::new())
+    }
 }
 
 /// Access metadata handed from [`crate::access`] to [`crate::hold`].

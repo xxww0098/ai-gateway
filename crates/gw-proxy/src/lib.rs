@@ -1,17 +1,35 @@
 //! The proxy kernel: tenant auth, pre-flight hold, upstream dispatch, streaming
 //! relay, settlement. The kernel is implemented here end to end.
 //!
-//! Two client-facing prefixes, both metered identically
-//! ([`access::is_proxy_path`]): `/v1/*` for the OpenAI and Anthropic dialects,
-//! and `/v1beta/*` for Gemini's, because that is the version segment Google's
-//! Generative Language API uses and the dashboard advertises it verbatim.
+//! # 三个客户端入口（收敛结论，`docs/relay-surface-plan.md` §2：12 条路由删 6 留 6）
 //!
-//! What `/v1beta` does **not** cover: Google's non-generation actions
-//! (`:countTokens`, `:embedContent`, `:batchEmbedContents`). [`gw_provider`]'s
-//! Gemini executor only builds `:generateContent` / `:streamGenerateContent`
-//! endpoints, so those actions would be dispatched — and billed — as a
-//! generation. Serving them means teaching the provider the other endpoints
-//! first; until then they are as absent as they were under the SDK.
+//! | 入口 | 路径 | 方言 |
+//! | --- | --- | --- |
+//! | A | `POST /v1/chat/completions` | OpenAI Chat Completions |
+//! | B | `POST /v1/responses` | OpenAI Responses |
+//! | C | `POST /v1/messages` | Anthropic Messages |
+//!
+//! 另有三条**非推理**路由随入口一起留下，且**全部不计费**
+//! （`hold::is_billable`）：`POST /v1/messages/count_tokens`（入口 C 的附属端点）、
+//! `GET /v1/models`、`GET /v1/models/{model}`。
+//!
+//! 只有一个前缀：`/v1/`（[`access::is_proxy_path`]）。
+//!
+//! # 已知缺口（已接受，不要试图去修）
+//!
+//! 面板 `frontend/src/features/user-dashboard/components/QuickIntegrationPanel.tsx:80`
+//! 的 Anthropic tab 仍然把 `${origin}/v1beta` 印给用户，而 `/v1beta/**` 已被硬删，
+//! 照着面板配的用户会拿到 404。前端冻结，改不了。
+//!
+//! 补充事实：**那行文案今天本来就是错的** —— `/v1beta` 是 Google 的版本段，
+//! 给 Anthropic 客户端本来就 404（`@anthropic-ai/sdk` 自己会拼 `/v1/messages`，
+//! 它需要的 base 是裸 `${origin}`）。收敛只是把「错但碰巧有个路由在」
+//! 变成「错且路由也没了」。这是已知且已接受的代价。
+//!
+//! 反过来，`GET /v1/models` **必须保留**，理由不是「前端在调」（前端对 `/v1` 的
+//! HTTP 调用数是 0），而是面板 `QuickIntegrationPanel.tsx:79` 把 `${origin}/v1`
+//! 作为 Base URL 印给用户 —— 所有 OpenAI 兼容客户端拿到 base 之后的第一个请求
+//! 就是 `GET {base}/models`。删了它，照面板指引配置的客户端在**连接测试阶段**就失败。
 //!
 //! Request order (must match the B1 fix):
 //!   access-auth -> hold -> execute -> parse usage -> settle | release
@@ -152,8 +170,14 @@ impl ProxyState {
     }
 }
 
-/// Builds the metered proxy routes — `/v1/*` and `/v1beta/*` — with the
-/// billing middleware stack attached.
+/// Builds the metered proxy routes — 只有 `/v1/*` —— with the billing
+/// middleware stack attached.
+///
+/// 六条路由，一条不多：三个推理入口 + `count_tokens` + 两条 catalogue 读。
+/// 被删掉的六条（`POST /v1/completions`、`POST /v1/embeddings`、
+/// `POST /v1/models/{model}`、`GET /v1beta/models`、`GET /v1beta/models/{model}`、
+/// `POST /v1beta/models/{model}`）是**硬删**，不是 410 过渡 —— 判定表见
+/// `docs/relay-surface-plan.md` §2，已知代价见 crate 级 doc。
 ///
 /// **The layer order is the whole point.** axum applies `.layer()` outermost-
 /// last, so the calls below read bottom-up as the execution order:
@@ -171,25 +195,13 @@ impl ProxyState {
 pub fn router(state: ProxyState) -> Router {
     Router::new()
         .route("/v1/chat/completions", post(routes::chat_completions))
-        .route("/v1/completions", post(routes::completions))
         .route("/v1/responses", post(routes::responses))
-        .route("/v1/embeddings", post(routes::embeddings))
         .route("/v1/messages", post(routes::messages))
         .route("/v1/messages/count_tokens", post(routes::count_tokens))
         .route("/v1/models", get(routes::models))
-        .route(
-            "/v1/models/{model}",
-            get(routes::model_detail).post(routes::gemini_generate),
-        )
-        // The Gemini native surface. Google versions its Generative Language
-        // API at `v1beta`, so this is a sibling prefix rather than a `/v1`
-        // sub-path — which is exactly why the two middleware gates key on
-        // `access::is_proxy_path` and not on `"/v1/"`.
-        .route("/v1beta/models", get(routes::gemini_models))
-        .route(
-            "/v1beta/models/{model}",
-            get(routes::gemini_model_detail).post(routes::gemini_generate),
-        )
+        // 只挂 `.get()`。历史上这条路径还挂了 `.post(gemini_generate)`
+        // —— Google Generative Language API 的 GA 别名 —— 它随 `/v1beta` 一起删了。
+        .route("/v1/models/{model}", get(routes::model_detail))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             hold::layer,

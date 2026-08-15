@@ -18,9 +18,8 @@ use crate::claude::shared::{
     upstream_error,
 };
 use crate::common::{
-    DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_GEMINI, ProviderConfig, approximate_tokens_from_bytes,
-    nested_string, requested_model, resolve_timeout, shared_client, stream_response,
-    string_from_map, usage_stream,
+    DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_GEMINI, ProviderConfig, nested_string, requested_model,
+    resolve_timeout, shared_client, stream_response, string_from_map, usage_stream,
 };
 use crate::types::{
     Provider, ProviderError, ProviderRequest, ProviderResponse, StreamResponse,
@@ -256,7 +255,7 @@ impl Provider for GeminiProvider {
 
         let status = response.status().as_u16();
         let headers = response.headers().clone();
-        let body = response.bytes().await?.to_vec();
+        let body = response.bytes().await?;
         if status >= 400 {
             return Err(upstream_error(status, &body));
         }
@@ -309,12 +308,32 @@ impl Provider for GeminiProvider {
     }
 
     /// Estimates token count from the payload byte length.
+    /// **报错，不编数字** —— 尽管 Google 上游确实有 `:countTokens`。
+    ///
+    /// 这里原来返回 `payload.len() / 4` 的伪造值
+    /// （`docs/relay-surface-plan.md` §2.1 缺陷 ①），且那个数还在按 LLM 价格计费。
+    ///
+    /// 那为什么不直接去打 `:countTokens`？因为**入口方言对不上**：`count_tokens`
+    /// 的唯一入口是 `POST /v1/messages/count_tokens`（`gw-proxy/src/routes.rs`），
+    /// 那是 **Anthropic 方言**。把 Anthropic 形状的 body 原样送给 Google 的
+    /// `:countTokens`，Google 会因未知字段回 400 —— 那就造出了一条「看起来在打
+    /// 真实端点、实际每次都 400」的路径，客户端拿到一个它无法理解的错误。
+    /// 那正是 `docs/relay-passthrough-audit.md` 反复点名的那类**静默失败**。
+    ///
+    /// 要真正可用，需要把 anthropic→google 转义器接进这条短路径。转义器本身已在
+    /// `gw_relay::translate::google` 就绪，缺的只是 `gw-proxy` 侧的接线 ——
+    /// 那不在本 crate 里。在那之前，一个明确的「这个组合暂不支持」比一个假数字
+    /// 和一个看不懂的 400 都诚实。
     async fn count_tokens(
         &self,
         _auth: &AuthRecord,
-        req: ProviderRequest,
+        _req: ProviderRequest,
     ) -> Result<i64, ProviderError> {
-        Ok(approximate_tokens_from_bytes(req.payload.len()))
+        Err(ProviderError::Other(anyhow::anyhow!(
+            "{PROVIDER_GEMINI} token counting is unavailable: the only entry point is the \
+             Anthropic-dialect POST /v1/messages/count_tokens, and reaching Google's \
+             :countTokens needs the anthropic->google translator wired into that path"
+        )))
     }
 }
 

@@ -6,14 +6,16 @@
 //! Header forwarding lives in [`crate::types`] (`copy_outbound_headers` /
 //! `is_skipped_proxy_header`), next to the trait it serves.
 
-use crate::streambuf::StreamUsageBuffer;
+use crate::streambuf::StreamUsageProbe;
 use crate::types::{ProviderError, ProviderRequest, StreamChunk, StreamResponse};
 use crate::usage::UsageTokens;
 use bytes::Bytes;
 use futures::Stream;
 use futures_util::StreamExt;
+use gw_relay::endpoint::include_usage::Spliced;
+use gw_relay::endpoint::{IncludeUsagePolicy, RequestSpec, splice_include_usage};
+use gw_relay::{Surface, UpstreamDialect};
 use serde_json::Value;
-use std::borrow::Cow;
 use std::pin::Pin;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -41,6 +43,39 @@ pub const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 ///
 /// `gw-proxy` is the only writer.
 pub const REQUESTED_MODEL_METADATA_KEY: &str = "requested_model";
+
+/// [`ProviderRequest::metadata`] key holding the **inbound path** this request
+/// arrived on（`/v1/chat/completions` / `/v1/responses` / `/v1/messages`）。
+///
+/// # 为什么需要它：根除缺陷 #1（S1）的另一半
+///
+/// `docs/relay-passthrough-audit.md` 的缺陷 #1 是「端点由 provider 猜，而不是由
+/// 入口决定」。`gw-proxy` 侧已经改成按入口派发，但 executor 这一侧此前**只会**
+/// 构造 `{base}/v1/chat/completions` —— 于是 `POST /v1/responses` 的 Responses
+/// 形状 body 被发到 Chat Completions 端点，上游必 400，三个保留入口之一 100% 不可用。
+///
+/// 端点**不许由 provider 名或 model 名猜**（那正是缺陷 #1 的成因），所以入口必须
+/// 从上面带下来。这里沿用既有约定：`gw-proxy` 是唯一写入方，与
+/// [`REQUESTED_MODEL_METADATA_KEY`] 同一条通路。
+///
+/// 存的是**路径本身**而不是一个新造的枚举字符串：路径 → 入口的映射
+/// [`Surface::from_path`] 已经在 `gw-relay` 里声明过一次了，再造一套词汇就是
+/// 第二处声明（规范：一个概念只声明一处）。
+pub const SURFACE_PATH_METADATA_KEY: &str = "surface_path";
+
+/// 这个请求走的是哪个入口。
+///
+/// 键缺失或路径不认识时回落到 [`Surface::OpenAiCompletions`] —— 那正是本键存在
+/// 之前的既有行为，所以对还没开始写这个键的调用方，本函数是**严格加性**的、
+/// 不改变任何现有行为。
+#[must_use]
+pub fn request_surface(req: &ProviderRequest) -> Surface {
+    req.metadata
+        .get(SURFACE_PATH_METADATA_KEY)
+        .map(|path| path.trim())
+        .and_then(Surface::from_path)
+        .unwrap_or(Surface::OpenAiCompletions)
+}
 
 /// Provider-specific upstream settings.
 ///
@@ -195,53 +230,104 @@ pub fn nested_string(values: &Value, parent: &str, key: &str) -> Option<String> 
 
 // --- include_usage rewrite ---------------------------------------------------
 
-/// Ensures an OpenAI-compatible `chat.completions` payload requests the
-/// terminal usage envelope on streaming responses.
+/// 让 OpenAI 兼容的流式请求带上终局 usage 信封 —— **定点字节插入**，
+/// 根除审计缺陷 #4（`docs/relay-passthrough-audit.md`）。
 ///
-/// Behaviour (idempotent, additive):
+/// # 这里原来错在哪
 ///
-/// - If `payload` is not a JSON **object**, it is returned unchanged.
-///   `UsagePlugin`'s fallback path compensates when upstream usage cannot be
-///   observed, so silently falling through keeps malformed-but-accepted
-///   payloads working end-to-end.
-/// - If the body does not set `stream` to literal `true`, it is returned
-///   unchanged. Non-streaming requests always carry a top-level `usage`
-///   envelope in their response, so no hint is necessary.
-/// - Otherwise `stream_options.include_usage = true` is set while every other
-///   key already under `stream_options` (e.g. `include_input_tokens`) is
-///   preserved.
+/// 老实现把整个 body `from_slice::<Value>` 再 `to_vec` 回去，三个后果都是实测的：
 ///
-/// Defense in depth: even when the caller guarantees
-/// [`ProviderRequest::stream`], this helper still verifies the JSON body
-/// carries `stream: true` before mutating, so a mis-set flag can never force
-/// `include_usage` onto a non-streaming payload.
+/// | 后果 | 成因 |
+/// | --- | --- |
+/// | **递归重排所有键序** | `serde_json` 未开 `preserve_order`，`Map` 就是 `BTreeMap` |
+/// | 客户端显式写的 `include_usage: false` 被**静默翻成 `true`** | 无条件 `insert` |
+/// | `"seed": 12345678901234567890` → `1.2345678901234568e+22` | 大整数落进 `f64`，可复现性没了 |
+/// | 256 KiB 流式请求 **+104.8 µs**（0.409 µs/KiB） | 建整棵 `Value` 树再重新序列化 |
 ///
-/// A second invocation on the same bytes is a byte-level no-op: `serde_json`'s
-/// object representation is a `BTreeMap`, so re-serialising is stable.
+/// # 现在怎么做
+///
+/// 直接调 [`gw_relay::endpoint::splice_include_usage`]（wave 2 已交付、自带测试）。
+/// 它在最外层 `{` 之后插入一小段字节，其余字节 **100% 原样**，返回的第二段是原
+/// [`Bytes`] 的零拷贝切片。**不反序列化、不重序列化、不重排键、不动数字格式。**
+///
+/// 返回 `None` = **一个字节都不动**。四个条件任一不满足即返回 `None`：
+/// 顶层不是 JSON 对象、body 没写 `stream: true`、客户端已经写了 `stream_options`
+/// （写了就尊重它 —— 上面那条 `false` 被翻成 `true` 的缺陷在这里自然消失）、
+/// 或者 body 空。
+///
+/// 纵深防御保留：即使调用方的 [`ProviderRequest::stream`] 为真，仍然要求 body 自己
+/// 写了 `stream: true`，所以一个设错的标志位不可能把 `include_usage` 塞进非流式请求。
+///
+/// # 策略
+///
+/// 这里钉死 [`IncludeUsagePolicy::Force`]，即今天的行为。
+/// [`IncludeUsagePolicy::RespectClient`]（一个字节都不碰，接受 usage 缺失并落
+/// fallback 计费）是部署方的选择，开关该挂在 `gw-proxy` 的配置上而不是这里 ——
+/// executor 拿不到部署策略。
 #[must_use]
-pub fn ensure_include_usage(payload: &[u8]) -> Cow<'_, [u8]> {
-    if payload.is_empty() {
-        return Cow::Borrowed(payload);
-    }
-    let Ok(Value::Object(mut body)) = serde_json::from_slice::<Value>(payload) else {
-        return Cow::Borrowed(payload);
-    };
-    if body.get("stream") != Some(&Value::Bool(true)) {
-        return Cow::Borrowed(payload);
-    }
-    let mut opts = match body.remove("stream_options") {
-        Some(Value::Object(map)) => map,
-        _ => serde_json::Map::new(),
-    };
-    opts.insert("include_usage".to_owned(), Value::Bool(true));
-    body.insert("stream_options".to_owned(), Value::Object(opts));
-    match serde_json::to_vec(&Value::Object(body)) {
-        Ok(out) => Cow::Owned(out),
-        Err(_) => Cow::Borrowed(payload),
+pub fn ensure_include_usage(payload: &Bytes, surface: Surface) -> Option<Spliced> {
+    let spec = RequestSpec::parse(surface, Some(payload));
+    splice_include_usage(
+        payload,
+        &spec,
+        upstream_dialect(surface),
+        IncludeUsagePolicy::Force,
+    )
+}
+
+/// 入口 → 上游方言。**入口 B 绝不能被插 `stream_options`**：Responses API 不认识
+/// 这个键，塞进去上游直接 400。今天正是这么坏的 —— 缺陷 #1（打错端点）叠加缺陷 #4
+/// （还塞 `stream_options`），入口 B 双重不可用。
+///
+/// 这里只需要区分本 crate 的 OpenAI 兼容两支；Anthropic 入口不走这条路
+/// （`claude.rs` 从不调 [`ensure_include_usage`]），映射到它自己的方言即可。
+fn upstream_dialect(surface: Surface) -> UpstreamDialect {
+    match surface {
+        Surface::OpenAiCompletions => UpstreamDialect::OpenAiChat,
+        Surface::OpenAiResponses => UpstreamDialect::OpenAiResponses,
+        Surface::AnthropicMessages => UpstreamDialect::AnthropicMessages,
     }
 }
 
+/// 把请求体挂到 reqwest 请求上，**零全量拷贝**。
+///
+/// 两条路都不复制 body：
+///
+/// - 没有插入（`spliced` 为 `None`）：`reqwest::Body::from(Bytes)` 是接管，不是复制。
+/// - 有插入：两段 [`Bytes`] 作为一个两帧的流交出去，并**显式写死
+///   `content-length`**。hyper 对用户自己设过的 `content-length` 是尊重的
+///   （`proto/h1/role.rs` 的 `Client::set_length`：`existing_con_len` 优先），
+///   所以框架仍然是 `Content-Length`，**不会退化成 `Transfer-Encoding: chunked`** ——
+///   透传优先，不该因为要计费就改掉发给上游的报文框架。
+///
+/// `content-length` 由网关重算是既定事实：入站的那一个在
+/// [`crate::types::is_skipped_proxy_header`] 的黑名单里，本来就不会被转发
+/// （`docs/relay-passthrough-audit.md` §4.1 条 6）。
+pub fn attach_body(
+    builder: reqwest::RequestBuilder,
+    payload: &Bytes,
+    spliced: Option<Spliced>,
+) -> reqwest::RequestBuilder {
+    let Some(spliced) = spliced else {
+        return builder.body(payload.clone());
+    };
+    let length = spliced.len();
+    let frames = futures_util::stream::iter([
+        Ok::<Bytes, std::io::Error>(spliced.prefix),
+        Ok(spliced.rest),
+    ]);
+    builder
+        .header(http::header::CONTENT_LENGTH, length)
+        .body(reqwest::Body::wrap_stream(frames))
+}
+
 // --- endpoint construction ---------------------------------------------------
+
+/// The two endpoint leaves an OpenAI-compatible upstream exposes, in the order
+/// [`openai_compatible_endpoint`] strips them off a configured base URL.
+const OPENAI_LEAVES: [&str; 2] = [OPENAI_CHAT_LEAF, OPENAI_RESPONSES_LEAF];
+const OPENAI_CHAT_LEAF: &str = "chat/completions";
+const OPENAI_RESPONSES_LEAF: &str = "responses";
 
 /// Builds the `chat/completions` endpoint for an OpenAI-compatible base URL and
 /// appends the inbound query parameters.
@@ -250,6 +336,42 @@ pub fn ensure_include_usage(payload: &[u8]) -> Cow<'_, [u8]> {
 /// origin; all three converge on the same endpoint.
 pub fn chat_completions_endpoint(
     base_url: &str,
+    query: &[(String, String)],
+) -> Result<String, ProviderError> {
+    openai_compatible_endpoint(base_url, OPENAI_CHAT_LEAF, query)
+}
+
+/// Builds the `responses` endpoint for an OpenAI-compatible base URL.
+///
+/// # 根除缺陷 #1（S1）的另一半
+///
+/// `docs/relay-passthrough-audit.md` 的缺陷 #1 是「上游端点由 provider 猜」。
+/// 在此之前 executor **只会**构造 `chat/completions`，于是入口 B
+/// （`POST /v1/responses`）的 Responses 形状 body 被发到 Chat Completions 端点，
+/// 上游必 400 —— 三个保留入口之一 100% 不可用。
+///
+/// `docs/relay-surface-plan.md` §3.6 的 B×openai / B×codex 两格是**直通**格：
+/// Responses 是 Codex 的原生协议，不需要任何转义，缺的只是把端点拼对。
+///
+/// 打哪个端点由**入口**决定（[`request_surface`]），不由 provider 名或 model 名猜。
+pub fn responses_endpoint(
+    base_url: &str,
+    query: &[(String, String)],
+) -> Result<String, ProviderError> {
+    openai_compatible_endpoint(base_url, OPENAI_RESPONSES_LEAF, query)
+}
+
+/// Shared body of the two endpoint builders.
+///
+/// 一份 base 归一化规则，两个端点共用 —— 分成两份抄的话，下次改 base 容错
+/// （比如再多认一种形态）就只会改到其中一份。
+///
+/// 归一化分两步：先把 base 已经带上的端点尾巴剥掉，再按 `/v1` 边界拼。
+/// 剥这一步是新加的：一个配置成 `…/v1/chat/completions` 的 base 此前只能服务
+/// chat，现在同一个 base 也能拼出 `…/v1/responses`，而 chat 的结果逐字不变。
+fn openai_compatible_endpoint(
+    base_url: &str,
+    leaf: &str,
     query: &[(String, String)],
 ) -> Result<String, ProviderError> {
     let base = base_url.trim().trim_end_matches('/');
@@ -264,12 +386,16 @@ pub fn chat_completions_endpoint(
         )));
     }
 
-    let endpoint = if base.ends_with("/v1/chat/completions") {
-        base.to_owned()
-    } else if base.ends_with("/v1") {
-        format!("{base}/chat/completions")
+    // 只剥 `/v1/`-锚定的形态：一个恰好叫 `…/responses` 的 origin 不该被误伤。
+    let base = OPENAI_LEAVES
+        .iter()
+        .find_map(|known| base.strip_suffix(&format!("/v1/{known}")))
+        .map_or(base, |origin| origin.trim_end_matches('/'));
+
+    let endpoint = if base.ends_with("/v1") {
+        format!("{base}/{leaf}")
     } else {
-        format!("{base}/v1/chat/completions")
+        format!("{base}/v1/{leaf}")
     };
     let mut parsed = url::Url::parse(&endpoint)
         .map_err(|err| ProviderError::Other(anyhow::anyhow!("invalid base_url: {err}")))?;
@@ -365,7 +491,6 @@ enum UsagePhase {
 struct UsageStreamMeta {
     model: String,
     provider: &'static str,
-    parse: fn(&[u8]) -> Option<UsageTokens>,
     /// Status of the response being relayed, stamped onto any error chunk.
     upstream_status: u16,
 }
@@ -380,7 +505,12 @@ struct UsageStreamMeta {
 /// - The *absence* of a `StreamChunk::Usage` carries the "nothing parsed"
 ///   signal, so `strict_usage_metadata_mode` still has its "absent, not zero"
 ///   input.
-/// - Memory stays bounded by [`StreamUsageBuffer`] regardless of body length.
+/// - Memory stays at `O(one line)` regardless of body length, and no stream
+///   byte is copied — see [`StreamUsageProbe`] (perf hotspot #2).
+///
+/// `parse` is handed **one line at a time**, not the whole body. The four
+/// provider scanners behave identically on a single line, so none of them
+/// changed when the head/tail window was replaced.
 pub fn usage_stream<S>(
     body: S,
     idle: Duration,
@@ -396,12 +526,11 @@ where
         Box::pin(with_stream_idle_timeout(body, idle));
     let state = (
         guarded,
-        StreamUsageBuffer::new(),
+        StreamUsageProbe::new(parse),
         UsagePhase::Streaming,
         UsageStreamMeta {
             model,
             provider,
-            parse,
             upstream_status,
         },
     );
@@ -413,14 +542,15 @@ where
                 match phase {
                     UsagePhase::Done => return None,
                     UsagePhase::Trailing => {
-                        let record = (meta.parse)(&buf.bytes())
+                        let record = buf
+                            .finish()
                             .map(|t| t.to_record(&meta.model, meta.provider));
                         let state = (inner, buf, UsagePhase::Done, meta);
                         return record.map(|rec| (StreamChunk::Usage(rec), state));
                     }
                     UsagePhase::Streaming => match inner.next().await {
                         Some(Ok(Ok(chunk))) => {
-                            buf.write(&chunk);
+                            buf.observe(&chunk);
                             let state = (inner, buf, UsagePhase::Streaming, meta);
                             return Some((StreamChunk::Payload(chunk), state));
                         }

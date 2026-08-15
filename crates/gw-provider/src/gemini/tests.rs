@@ -4,6 +4,8 @@ use gw_authcore::AuthRecord;
 use serde_json::json;
 
 use super::*;
+use crate::streambuf::StreamUsageProbe;
+use bytes::Bytes;
 
 fn auth_with(metadata: serde_json::Value) -> AuthRecord {
     AuthRecord {
@@ -253,6 +255,42 @@ fn a_stream_with_no_usage_metadata_yields_no_tally() {
     assert!(parse_gemini_stream_usage(b"").is_none());
 }
 
+/// 增量探测器与整 body 扫描器必须给出同一个结论 —— 三种 framing 都是。
+///
+/// 这条把「按行喂」与「一次喂完」对账：Gemini 会对不同调用方分别用 SSE 帧与
+/// 空行分隔的 JSON chunk 作答，两种都得走通。
+#[test]
+fn the_incremental_probe_agrees_with_the_whole_body_scanner() {
+    let bodies = [
+        concat!(
+            "data: {\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":5}}\n",
+            "\n",
+            "data: {\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":42}}\n",
+            "\n",
+            "data: [DONE]\n",
+        ),
+        concat!(
+            "{\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":5}}\n",
+            "\n",
+            "{\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":42}}\n",
+        ),
+    ];
+    for body in bodies {
+        let whole = parse_gemini_stream_usage(body.as_bytes());
+        for chunk in [1, 11, body.len()] {
+            let mut probe = StreamUsageProbe::new(parse_gemini_stream_usage);
+            for part in body.as_bytes().chunks(chunk) {
+                probe.observe(part);
+            }
+            assert_eq!(
+                probe.finish(),
+                whole,
+                "chunk={chunk} 的增量结论与整 body 扫描不一致：{body}"
+            );
+        }
+    }
+}
+
 // --- provider surface -------------------------------------------------------
 
 /// An API-key provider has nothing to rotate, but refusing the record would
@@ -269,24 +307,27 @@ async fn refresh_reactivates_a_record_without_touching_its_metadata() {
     assert!(refreshed.updated_at >= auth.updated_at);
 }
 
+/// Google 上游确实有 `:countTokens`，但 `count_tokens` 的唯一入口是 Anthropic
+/// 方言的 `POST /v1/messages/count_tokens` —— 方言对不上，所以这里**报错**，
+/// 而不是回到 `payload.len() / 4` 的伪造值
+/// （`docs/relay-surface-plan.md` §2.1 缺陷 ①）。
 #[tokio::test]
-async fn token_counting_grows_with_the_payload_and_never_goes_negative() {
+async fn token_counting_refuses_rather_than_fabricating_a_number() {
     let provider = provider("https://gl.example.com", "k");
     let auth = auth_with(json!({}));
-    let mut previous = -1;
     for len in [0, 4, 400, 4000] {
-        let count = provider
-            .count_tokens(
-                &auth,
-                ProviderRequest {
-                    payload: vec![b'x'; len],
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("count");
-        assert!(count >= 0);
-        assert!(count > previous, "{len} bytes should cost more than fewer");
-        previous = count;
+        assert!(
+            provider
+                .count_tokens(
+                    &auth,
+                    ProviderRequest {
+                        payload: Bytes::from(vec![b'x'; len]),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .is_err(),
+            "{len} bytes produced a fabricated count"
+        );
     }
 }

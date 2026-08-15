@@ -68,35 +68,54 @@ fn malformed_authorization_headers_are_rejected_outright() {
 // ---------------------------------------------------------------- surface gate
 
 #[test]
-fn both_dialect_prefixes_are_on_the_metered_surface() {
-    // `/v1beta` is a sibling of `/v1`, not a child: a `starts_with("/v1/")`
-    // gate lets the entire Gemini surface through unauthenticated and unbilled.
-    for path in [
-        "/v1/chat/completions",
-        "/v1/models",
-        "/v1beta/models",
-        "/v1beta/models/gemini-2.5-pro:streamGenerateContent",
-    ] {
+fn one_prefix_covers_the_whole_metered_surface() {
+    // 收敛后只剩一个前缀。`/v1beta` 曾经是 `/v1` 的**兄弟**而不是子路径，
+    // 所以它需要自己的一条判据；那个面删掉之后判据也回到一条。
+    for path in ["/v1/chat/completions", "/v1/messages", "/v1/models"] {
         assert!(is_proxy_path(path), "{path} escaped the gate");
+    }
+    for path in ["/v1beta/models", "/v1beta/models/gemini-2.5-pro"] {
+        assert!(!is_proxy_path(path), "{path} 属于已被硬删的 Gemini 原生面");
     }
 }
 
 #[test]
-fn the_gate_matches_what_the_billing_layer_reserves_for() {
-    // Authentication and reservation must cover the same set, or a route ends
-    // up billed but anonymous — or authenticated but free.
+fn everything_billed_is_authenticated_first() {
+    // 单向蕴含，不是等价：计费面**必须**是鉴权面的子集，否则会出现
+    // 「计费但匿名」的路由。反向不成立是本轮有意为之 ——
+    // `GET /v1/models` 与 `count_tokens` 鉴权但不计费。
     for path in [
         "/v1/messages",
-        "/v1beta/models/gemini-2.5-pro:generateContent",
+        "/v1/messages/count_tokens",
+        "/v1/models",
         "/api/panel/user/profile",
         "/healthz",
         "/v1betaX/models",
         "/v1",
     ] {
-        assert_eq!(
-            is_proxy_path(path),
-            crate::hold::is_billable(&axum::http::Method::POST, path),
-            "the two gates disagree about {path}",
+        for method in [axum::http::Method::POST, axum::http::Method::GET] {
+            if crate::hold::is_billable(&method, path) {
+                assert!(
+                    is_proxy_path(path),
+                    "{method} {path} 会被计费，却不在鉴权面上",
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_zero_cost_endpoints_are_authenticated_but_not_billed() {
+    // 移出计费范围的三条：两条 catalogue 读 + count_tokens。
+    for (method, path) in [
+        (axum::http::Method::GET, "/v1/models"),
+        (axum::http::Method::GET, "/v1/models/gpt-4o"),
+        (axum::http::Method::POST, "/v1/messages/count_tokens"),
+    ] {
+        assert!(is_proxy_path(path), "{path} 必须仍然要鉴权");
+        assert!(
+            !crate::hold::is_billable(&method, path),
+            "{method} {path} 仍然在按 LLM 价格收钱",
         );
     }
 }
@@ -382,7 +401,7 @@ async fn a_missing_subscription_is_not_an_error() {
     assert!(meta.subscription.is_none());
 }
 
-// ---------------------------------------------------------------- credential carriers
+// ---------------------------------------------------------------- 凭证载体
 
 fn headers_with(pairs: &[(&str, &str)]) -> axum::http::HeaderMap {
     let mut headers = axum::http::HeaderMap::new();
@@ -396,124 +415,26 @@ fn headers_with(pairs: &[(&str, &str)]) -> axum::http::HeaderMap {
 }
 
 #[test]
-fn the_v1_surface_reads_a_credential_from_authorization_alone() {
-    // Exactly one header is read. `/v1` is implemented by this repo's own
-    // code, so it stays that way.
-    let headers = headers_with(&[("x-goog-api-key", KEY), ("x-api-key", KEY)]);
-    assert_eq!(
-        credential_from("/v1/chat/completions", &headers, Some("key=leaked")),
-        None,
-    );
+fn a_credential_is_read_from_authorization_and_from_nowhere_else() {
+    // 三面收敛之前，`/v1beta` 还接受 `x-goog-api-key` / `x-api-key` / `?key=`
+    // 三种载体。那个面已经不存在，三种载体一并下线：带着它们来的请求
+    // 就是「没有凭据」。
+    let carriers = headers_with(&[("x-goog-api-key", KEY), ("x-api-key", KEY)]);
+    assert_eq!(credential_from(&carriers), None);
+
     let authed = headers_with(&[("authorization", &format!("Bearer {KEY}"))]);
+    assert_eq!(credential_from(&authed), Some(KEY));
+}
+
+#[test]
+fn the_anthropic_key_header_is_not_a_tenant_credential() {
+    // 这条不是「载体少了一个」，而是 `x-api-key` 回到了它在 `/v1` 上一直以来的
+    // 身份：**Anthropic 自己的上游头**。把它当租户凭据读，等于让任何一个照着
+    // Anthropic 文档配置的客户端用它自己的上游 key 冒充租户。
+    let headers = headers_with(&[("x-api-key", KEY), ("authorization", "Bearer other-token")]);
     assert_eq!(
-        credential_from("/v1/chat/completions", &authed, None),
-        Some(KEY)
+        credential_from(&headers),
+        Some("other-token"),
+        "Authorization 是唯一被读的载体",
     );
-}
-
-#[test]
-fn the_gemini_surface_reads_the_carriers_google_sdks_actually_use() {
-    for carrier in ["x-goog-api-key", "x-api-key"] {
-        let headers = headers_with(&[(carrier, KEY)]);
-        assert_eq!(
-            credential_from("/v1beta/models/m:generateContent", &headers, None),
-            Some(KEY),
-            "{carrier} was not read",
-        );
-    }
-    assert_eq!(
-        credential_from(
-            "/v1beta/models/m:generateContent",
-            &axum::http::HeaderMap::new(),
-            Some(&format!("alt=sse&key={KEY}")),
-        ),
-        Some(KEY),
-    );
-}
-
-#[test]
-fn the_carrier_priority_is_fixed_so_a_request_with_several_has_one_outcome() {
-    let headers = headers_with(&[
-        ("authorization", "Bearer from-authorization"),
-        ("x-goog-api-key", "from-goog"),
-        ("x-api-key", "from-api-key"),
-    ]);
-    let query = Some("key=from-query");
-    let path = "/v1beta/models/m:generateContent";
-
-    assert_eq!(
-        credential_from(path, &headers, query),
-        Some("from-authorization")
-    );
-
-    let mut headers = headers;
-    headers.remove("authorization");
-    assert_eq!(credential_from(path, &headers, query), Some("from-goog"));
-    headers.remove("x-goog-api-key");
-    assert_eq!(credential_from(path, &headers, query), Some("from-api-key"));
-    headers.remove("x-api-key");
-    assert_eq!(credential_from(path, &headers, query), Some("from-query"));
-}
-
-#[test]
-fn a_blank_carrier_is_no_credential_at_all() {
-    let path = "/v1beta/models/m:generateContent";
-    let headers = headers_with(&[("x-goog-api-key", "   "), ("x-api-key", "")]);
-    assert_eq!(credential_from(path, &headers, Some("key=")), None);
-    assert_eq!(credential_from(path, &headers, Some("alt=sse")), None);
-}
-
-#[test]
-fn a_consumed_credential_is_removed_from_what_gets_relayed() {
-    let mut headers = headers_with(&[
-        ("x-goog-api-key", KEY),
-        ("x-api-key", KEY),
-        ("accept", "*/*"),
-    ]);
-    let mut query = vec![
-        ("alt".to_owned(), "sse".to_owned()),
-        ("key".to_owned(), KEY.to_owned()),
-    ];
-
-    strip_consumed_credentials("/v1beta/models/m:generateContent", &mut headers, &mut query);
-
-    assert!(headers.get("x-goog-api-key").is_none());
-    assert!(headers.get("x-api-key").is_none());
-    assert!(
-        headers.get("accept").is_some(),
-        "unrelated headers must survive"
-    );
-    assert_eq!(query, vec![("alt".to_owned(), "sse".to_owned())]);
-}
-
-#[test]
-fn the_v1_surface_relays_its_headers_untouched() {
-    // `x-api-key` there is Anthropic's own credential header, and `/v1` never
-    // read a tenant credential from it — stripping it would break the executor.
-    let mut headers = headers_with(&[("x-api-key", "anthropic-key")]);
-    let mut query = vec![("key".to_owned(), "caller-supplied".to_owned())];
-
-    strip_consumed_credentials("/v1/messages", &mut headers, &mut query);
-
-    assert!(headers.get("x-api-key").is_some());
-    assert_eq!(query.len(), 1);
-}
-
-#[test]
-fn a_credential_in_a_query_string_is_masked_before_anything_can_log_it() {
-    // A query string is the one part of a URI that access logs and tracing
-    // spans record by default, and on this surface it is credential material.
-    let redacted = redact_query(&format!("alt=sse&key={KEY}&pageSize=5"));
-    assert!(
-        !redacted.contains(KEY),
-        "the credential survived: {redacted}"
-    );
-    assert!(redacted.contains("alt=sse") && redacted.contains("pageSize=5"));
-}
-
-#[test]
-fn redaction_leaves_a_query_without_a_credential_alone() {
-    // So a caller can apply it unconditionally to every URI it renders.
-    assert_eq!(redact_query("alt=sse&pageSize=5"), "alt=sse&pageSize=5");
-    assert_eq!(redact_query(""), "");
 }

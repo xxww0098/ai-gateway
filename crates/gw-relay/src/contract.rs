@@ -61,6 +61,24 @@ impl Surface {
         }
     }
 
+    /// [`Self::from_path`] 的反函数。
+    ///
+    /// 存在的理由是**不对称会逼调用方硬编码路径字符串**：`gw-proxy` 要把入口
+    /// 写进 `ProviderRequest.metadata` 交给 executor（`gw_provider::common::
+    /// SURFACE_PATH_METADATA_KEY`），没有这个方法它就只能自己写一份
+    /// `match surface { OpenAiResponses => "/v1/responses", .. }` —— 那就是
+    /// 路径↔入口这一个概念的第二处声明，下次加入口时必然漏掉一处。
+    ///
+    /// 与 [`Self::from_path`] 的往返是本类型的不变量，见 `contract/tests.rs`。
+    #[must_use]
+    pub fn path(self) -> &'static str {
+        match self {
+            Self::OpenAiCompletions => "/v1/chat/completions",
+            Self::OpenAiResponses => "/v1/responses",
+            Self::AnthropicMessages => "/v1/messages",
+        }
+    }
+
     /// 入口自身的方言。P3 的 400 必须用**入口方言**的错误信封回，
     /// 因为客户端 SDK 只会解析它自己那套结构；回一个陌生结构，
     /// 客户端会把它渲染成一个无字的红叉。

@@ -473,3 +473,112 @@ fn strict_mode_can_be_toggled_at_runtime() {
     fixture.settlement.set_strict_usage_metadata(false);
     assert!(!fixture.settlement.strict_usage_metadata());
 }
+
+// ------------------------------------------------- Google 的思考 token 计费
+
+/// 一个只给 `output` 列定价、`reasoning` 列定价为 **0** 的计价器。
+///
+/// 这不是随手编的：`model_prices.reasoning_price_per1_m` 的**建表默认值就是 0**
+/// （`migrations/0001_init.sql`），绝大多数部署从没填过这一列。
+struct OutputOnlyCalculator;
+
+impl PricingCalculator for OutputOnlyCalculator {
+    fn estimate(&self, _model: &str, _stream: bool, _rate_mult: f64) -> f64 {
+        0.0
+    }
+    fn estimate_with_max_tokens(
+        &self,
+        _model: &str,
+        _max_output_tokens: i64,
+        _stream: bool,
+        _rate_mult: f64,
+    ) -> f64 {
+        0.0
+    }
+    fn estimate_with_tokens(
+        &self,
+        _model: &str,
+        _input_tokens: i64,
+        _max_output_tokens: i64,
+        _stream: bool,
+        _rate_mult: f64,
+    ) -> f64 {
+        0.0
+    }
+    fn compute(&self, _model: &str, tokens: TokenUsage, rate_mult: f64) -> f64 {
+        // reasoning 列不计价 —— 这正是建表默认值下的真实行为。
+        (tokens.input + tokens.output + tokens.cached) as f64 * rate_mult
+    }
+}
+
+fn google_usage(candidates: i64, thoughts: i64) -> UsageRecord {
+    UsageRecord {
+        model: "a-thinking-model".to_owned(),
+        provider: "gemini".to_owned(),
+        input_tokens: Some(10),
+        output_tokens: Some(candidates),
+        cached_tokens: None,
+        reasoning_tokens: Some(thoughts),
+    }
+}
+
+#[tokio::test]
+async fn google_thinking_tokens_are_not_free() {
+    // Google 的 `candidatesTokenCount` **不含** `thoughtsTokenCount`
+    // （OpenAI 的 `completion_tokens` 是含的），而 reasoning 列默认不计价。
+    // 两件事叠起来，思考型模型的每一个思考 token 都是免费的 ——
+    // 而思考 token 在推理模型上经常是输出的数倍。
+    let quiet = settle_google(google_usage(100, 0)).await;
+    let thinking = settle_google(google_usage(100, 400)).await;
+
+    assert!(
+        thinking > quiet,
+        "同样的输出、多了 400 个思考 token，收的钱却没变：{thinking} vs {quiet}",
+    );
+}
+
+#[test]
+fn only_googles_output_field_needs_the_fold() {
+    let raw = TokenUsage {
+        input: 10,
+        output: 100,
+        cached: 0,
+        reasoning: 400,
+    };
+    for google in ["gemini", "vertex"] {
+        let folded = billable_tokens(google, raw);
+        assert_eq!(
+            folded.output,
+            raw.output + raw.reasoning,
+            "{google} 的输出字段不含思考 token，必须折进来",
+        );
+        assert_eq!(folded.reasoning, 0, "折进来之后不能再按 reasoning 计一次");
+        assert_eq!(folded.input, raw.input);
+    }
+    for other in ["openai", "codex", "claude"] {
+        assert_eq!(
+            billable_tokens(other, raw),
+            raw,
+            "{other} 的输出字段本来就含思考 token，再折一次就是重复计费",
+        );
+    }
+}
+
+/// 跑一次完整结算，返回落账的金额。
+async fn settle_google(usage: UsageRecord) -> f64 {
+    let ledger = FakeLedger::with_balance(1_000.0);
+    let store = FakeUsageStore::shared();
+    let settlement = Settlement::new(ledger, Arc::new(OutputOnlyCalculator), store.clone());
+    settlement
+        .settle(
+            &ctx(),
+            UsageOutcome {
+                provider: "gemini".to_owned(),
+                ..UsageOutcome::precise(usage)
+            },
+        )
+        .await;
+    let costs = store.settled_costs();
+    assert_eq!(costs.len(), 1, "一次请求恰好结算一次");
+    costs[0]
+}

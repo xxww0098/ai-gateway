@@ -8,9 +8,10 @@
 //! only, with [`gw_authcore::AuthRecord`] as the record.
 
 use crate::common::{
-    DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_CODEX, ProviderConfig, approximate_tokens_from_bytes,
-    chat_completions_endpoint, ensure_include_usage, nested_string, requested_model,
-    resolve_timeout, shared_client, stream_response, string_from_map, usage_stream,
+    DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_CODEX, ProviderConfig, attach_body,
+    chat_completions_endpoint, ensure_include_usage, nested_string, request_surface,
+    requested_model, resolve_timeout, responses_endpoint, shared_client, stream_response,
+    string_from_map, usage_stream,
 };
 use crate::openai::bearer;
 use crate::types::{
@@ -20,11 +21,11 @@ use crate::types::{
 use crate::usage::{parse_codex_stream_usage, parse_codex_usage};
 use chrono::{SecondsFormat, Utc};
 use gw_authcore::{AuthRecord, AuthStatus};
+use gw_relay::Surface;
 use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use http::{HeaderMap, HeaderValue};
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use std::borrow::Cow;
 use std::time::Duration;
 
 pub const CODEX_DEFAULT_BASE_URL: &str = "https://api.openai.com";
@@ -175,13 +176,23 @@ impl CodexProvider {
                 "codex access token is required".to_owned(),
             ));
         }
-        let endpoint = chat_completions_endpoint(base_url, &req.query)?;
+        // 与 openai executor 同一条规则：端点由**入口**决定（缺陷 #1）。
+        // Responses 本来就是 Codex 的原生协议（`docs/relay-surface-plan.md` §3.6
+        // 的 B×codex 是直通格），缺的只是把端点拼对。
+        let surface = request_surface(req);
+        let endpoint = match surface {
+            Surface::OpenAiResponses => responses_endpoint(base_url, &req.query)?,
+            Surface::OpenAiCompletions | Surface::AnthropicMessages => {
+                chat_completions_endpoint(base_url, &req.query)?
+            }
+        };
         // Like the OpenAI executor: force the terminal usage envelope on
         // streams, but only after re-verifying `stream: true` in the body.
-        let payload: Cow<'_, [u8]> = if stream {
-            ensure_include_usage(&req.payload)
+        // `None` 表示一个字节都不动。
+        let spliced = if stream {
+            ensure_include_usage(&req.payload, surface)
         } else {
-            Cow::Borrowed(&req.payload)
+            None
         };
 
         let mut headers = HeaderMap::new();
@@ -196,11 +207,11 @@ impl CodexProvider {
         }
         headers.insert(AUTHORIZATION, bearer(access_token)?);
 
-        let mut builder = self
-            .client
-            .post(endpoint)
-            .headers(headers)
-            .body(payload.into_owned());
+        let mut builder = attach_body(
+            self.client.post(endpoint).headers(headers),
+            &req.payload,
+            spliced,
+        );
         if !stream {
             builder = builder.timeout(self.timeout);
         }
@@ -351,7 +362,7 @@ impl Provider for CodexProvider {
 
         let status = response.status().as_u16();
         let headers = response.headers().clone();
-        let body = response.bytes().await?.to_vec();
+        let body = response.bytes().await?;
         if status >= 400 {
             return Err(ProviderError::Upstream {
                 status,
@@ -478,13 +489,22 @@ impl Provider for CodexProvider {
         Ok(refreshed)
     }
 
-    /// Estimates token count from the payload byte length.
+    /// **上游没有这个端点，所以这里报错，不编数字。**
+    ///
+    /// Codex 走的是 OpenAI 的 Chat Completions 兼容面，而 OpenAI 的 REST API
+    /// 没有 token 计数端点 —— 分词在客户端（`tiktoken`）做。
+    ///
+    /// 这里原来返回 `payload.len() / 4` 的伪造值
+    /// （`docs/relay-surface-plan.md` §2.1），且那个数还在按 LLM 价格计费。
+    /// 理由与 [`crate::openai::OpenAiCompatibleProvider::count_tokens`] 逐字相同。
     async fn count_tokens(
         &self,
         _auth: &AuthRecord,
-        req: ProviderRequest,
+        _req: ProviderRequest,
     ) -> Result<i64, ProviderError> {
-        Ok(approximate_tokens_from_bytes(req.payload.len()))
+        Err(ProviderError::Other(anyhow::anyhow!(
+            "{PROVIDER_CODEX} upstream exposes no token-counting endpoint"
+        )))
     }
 }
 

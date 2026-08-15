@@ -24,6 +24,7 @@
 //! 路径上会被 `ensure_include_usage` 重写，拿它当控制通道不可靠。
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::body::{Body, Bytes};
@@ -48,6 +49,12 @@ struct MockParams {
     chunk_bytes: usize,
     #[serde(default = "default_interval_us")]
     interval_us: u64,
+    /// 跨账号 failover 档：前 `fail_first` 次尝试一律回 429，之后才回 200。
+    ///
+    /// 判据是被测端每次尝试自己打上的 `x-perf-attempt` 头，**不是进程内计数器** ——
+    /// 计数器会让并发和预热互相污染，而且重跑不可复现。0 = 从不失败（默认）。
+    #[serde(default)]
+    fail_first: u32,
 }
 
 fn default_resp_bytes() -> usize {
@@ -100,10 +107,52 @@ fn sse_tail() -> Bytes {
     )
 }
 
-async fn chat_completions(Query(p): Query<MockParams>, body: Bytes) -> Response {
+/// 上游 429 的错误体：带 `retry-after` 与 `x-ratelimit-*`，因为审计缺陷 #3 的
+/// 判据就是"这些头有没有活着到客户端手里"。
+fn rate_limited() -> Response {
+    Response::builder()
+        .status(StatusCode::TOO_MANY_REQUESTS)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::RETRY_AFTER, "12")
+        .header("x-ratelimit-remaining-requests", "0")
+        .body(Body::from(
+            br#"{"error":{"message":"perf: simulated upstream rate limit","type":"rate_limit_error"}}"#
+                .as_slice(),
+        ))
+        .expect("429 response builds")
+}
+
+/// 第一发请求到达时把 HTTP 版本打出来，**只打一次**。
+///
+/// TLS + h2 档唯一的自检：`PERF_TLS_CERT` 设了、证书也装上了、连接也建起来了，
+/// 都**不**保证 ALPN 真的协商到了 h2 —— 任何一环退化成 http/1.1，这一档量的就是
+/// "TLS over h1"，而结论会被写成 "h2 下差值不失真"。那是编数字。
+/// 看 `/tmp/perf-mock-tls.log` 的这一行，写着 `HTTP/2.0` 才算数。
+static VERSION_LOGGED: AtomicBool = AtomicBool::new(false);
+
+async fn chat_completions(
+    Query(p): Query<MockParams>,
+    version: axum::http::Version,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !VERSION_LOGGED.swap(true, Ordering::Relaxed) {
+        eprintln!("mock-upstream: first request arrived over {version:?}");
+    }
     // 真的把请求体读完（`body: Bytes` 已经做到了），这是上游必须付的成本，
     // 让 floor 与 gateway 两侧对称。
     let _ = body.len();
+
+    if p.fail_first > 0 {
+        let attempt: u32 = headers
+            .get("x-perf-attempt")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        if attempt < p.fail_first {
+            return rate_limited();
+        }
+    }
 
     if p.stream == 1 {
         let chunk_bytes = p.chunk_bytes;
@@ -151,6 +200,25 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/v1/chat/completions", post(chat_completions))
         .route("/health", axum::routing::get(|| async { "ok" }));
+
+    // TLS + h2 档：`PERF_TLS_CERT` / `PERF_TLS_KEY` 都设了才走 https。
+    // 基线全程明文 HTTP/1.1（§1.4），生产上游走 h2 —— 这条分支就是
+    // §5.2「上线前必须补一档 TLS+h2 的对照」的落点。ALPN 由 axum-server
+    // 设成 `["h2", "http/1.1"]`，所以 reqwest 会协商到 h2。
+    if let (Ok(cert), Ok(key)) = (
+        std::env::var("PERF_TLS_CERT"),
+        std::env::var("PERF_TLS_KEY"),
+    ) {
+        // rustls 0.23 要求进程显式选一个 crypto provider（reqwest 平时自己装，
+        // 这里是我们自己起服务端，得自己来）。
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key).await?;
+        eprintln!("mock-upstream listening on https://{addr} (ALPN h2/http1.1)");
+        axum_server::bind_rustls(addr, config)
+            .serve(app.into_make_service())
+            .await?;
+        return Ok(());
+    }
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     eprintln!("mock-upstream listening on http://{addr}");

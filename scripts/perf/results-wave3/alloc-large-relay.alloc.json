@@ -1,0 +1,11 @@
+{
+  "label": "alloc-large-relay",
+  "requests": 500,
+  "wall_seconds": 0.3922281265258789,
+  "alloc_count": 67731,
+  "alloc_bytes": 1866381070,
+  "dealloc_count": 62678,
+  "realloc_count": 5053,
+  "alloc_per_req": 135.462,
+  "bytes_per_req": 3732762.14
+}

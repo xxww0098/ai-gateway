@@ -1,21 +1,23 @@
-# scripts/perf —— gw-relay 性能基线装置
+# scripts/perf —— gw-relay 性能基线与验收装置
 
 一条命令跑完全部测量：
 
 ```bash
-./scripts/perf/run-baseline.sh            # 全量（七档），约 20 分钟
-python3 scripts/perf/summarize.py         # results/*.json → markdown 表
-python3 scripts/perf/profile-summary.py   # CPU 热点按类别归因
+./scripts/perf/run-baseline.sh                  # 全量（七档），约 20~40 分钟
+python3 scripts/perf/summarize.py               # results/*.json → markdown 表
+python3 scripts/perf/summarize.py --acceptance relay   # T1–T13 逐条 达标/未达标
+python3 scripts/perf/profile-summary.py         # CPU 热点按类别归因
 ```
 
-结论与解读在 [`docs/relay-perf-baseline.md`](../../docs/relay-perf-baseline.md)。
+wave 1 的基线结论在 [`docs/relay-perf-baseline.md`](../../docs/relay-perf-baseline.md)，
+wave 3 的 T1–T13 验收结果在 [`docs/relay-perf-acceptance.md`](../../docs/relay-perf-acceptance.md)。
 本 README 只讲**怎么跑**和**装置是怎么搭的**。
 
 ---
 
 ## 1. 它测什么
 
-四个被测端同时在跑（空闲不耗 CPU），同一份 mock 上游、同一套负载：
+五个被测端同时在跑（空闲不耗 CPU），同一份 mock 上游、同一套负载：
 
 | 被测端 | 端口 | 是什么 |
 | --- | --- | --- |
@@ -23,10 +25,20 @@ python3 scripts/perf/profile-summary.py   # CPU 热点按类别归因
 | `nomw`  | 18084 | 真 `gw_proxy::routes::chat_completions`，**不挂** access / hold 两层中间件 |
 | `full`  | 18080 | 真 `gw_proxy::router()`，生产拓扑（access → hold → dispatch） |
 | `idem`  | 18086 | 同 `full`，额外挂上幂等管理器（量 `hold::capture_body` 的全量响应缓冲） |
+| `relay` | 18088 | **wave 3 新增**：`gw_relay::RelayEngine` 包成 axum handler（`perfkit/src/bin/relay.rs`） |
 | mock 上游 | 18081 | 见下 |
 
 **网关自身开销 = `full` 实测 − `floor` 实测。**
 **access+hold 净成本 = `full` − `nomw`。**
+**gw-relay 内核开销 = `relay` − `floor`** —— T1–T13 全部按这个差值验收。
+
+> `relay` 里**没有** access / hold / 幂等 / 限流 / 熔断 / 凭证池，所以结构上它可比的是
+> `nomw` 而不是 `full`。T1–T13 是照着 floor 定的，验收也照着 floor 报，
+> 但读数时要记得 `full − nomw` 那一段中间件成本它一分钱都没付。
+
+被测端列表由脚本顶部的 `TARGETS` 一处定义、每个档从它展开。加一个被测端
+只改那一行 + `port_of` / `admin_of` 两个 `case`，不会出现"某个档忘了加"这种
+只在汇总表里显示为空行的错误。
 
 负载形态：
 
@@ -37,7 +49,9 @@ python3 scripts/perf/profile-summary.py   # CPU 热点按类别归因
 | c) `sse` | 500 chunk × 1 KiB × 1 ms | 流式中继开销、TTFB、chunk 间抖动 |
 | c-0) `ssettfb` | 1 chunk，无间隔 | 只测"建流"这一步的固定成本，样本量大，p99 才可信 |
 | c-1) `sseburst` | 500 chunk × 1 KiB，**间隔 0** | 1 ms 那一档量不出每 chunk 成本（mock 定时器在本机被放大到 ~2.35 ms，把个位数 µs 埋掉了），这一档把定时器拿掉 |
-| 1c) `json*` | 同一 body 只切 `stream` 真假，响应压最小 | 隔离 `ensure_include_usage` 的 serde_json 往返 |
+| 1c) `json*` | 同一 body 只切 `stream` 真假，响应压最小 | 隔离 `ensure_include_usage` / `splice_include_usage` 的请求体重写代价 |
+| 6) `fo-*` | 256 KiB 请求，上游前 n−1 次回 429 | 跨账号 failover 的重放代价：`Bytes::clone` vs 全量拷贝 |
+| 7) `tls-*` | 同 a/b/c-0，但**上游那一跳走 https + h2** | §5.2 的第一个未覆盖项：h2 分帧下差值会不会失真 |
 
 ## 2. 为什么不用现成的东西
 
@@ -63,7 +77,14 @@ workspace 的 `Cargo.toml`，CONTRACT §3 划给协调者独占。
 
 `perfkit` 是一个**独立 workspace**（它自己的 `Cargo.toml` 里有个空
 `[workspace]` 表），通过 `path` 依赖引用 `crates/gw-proxy`、`crates/gw-provider`、
-`crates/gw-authcore`。
+`crates/gw-authcore`、`crates/gw-relay`。
+
+`gw-proxy` / `gw-provider` / `gw-authcore` 三条依赖挂在 **`gateway` feature** 下
+（默认开）。理由：`gateway` 被测端要拖进半个工作区，而 `relay` / `floor` /
+`mock-upstream` / `loadgen` 只需要 `gw-relay` 或什么都不需要。多 worker 并行改
+`crates/**` 时工作区中间态必然编不过，`PERF_NO_GATEWAY=1` 就能只构建后四个、
+照样跑 relay 对 floor 的那几档 —— 而不是干等。少了哪些被测端会写进 `env.txt`
+的 `targets:` 行，不会变成一张看起来完整的空表。
 
 * 根 `Cargo.toml` 一个字没动 —— `members = ["crates/*", "tools/xtask"]` 匹配不到
   `scripts/`，`cargo build --workspace` 也不会编到它；
@@ -96,7 +117,8 @@ scripts/perf/
         ├── stubs.rs            # gw_proxy::ports 的内存实现
         └── bin/
             ├── mock-upstream.rs  # 真 HTTP 上游，三种负载形态
-            ├── gateway.rs        # 真 gw-proxy（full / nomw / idem）
+            ├── gateway.rs        # 真 gw-proxy（full / nomw / idem），feature = "gateway"
+            ├── relay.rs          # 真 gw_relay::RelayEngine（relay），含 failover / TLS 两档
             ├── floor.rs          # 纯 Bytes 反代 = 理论下界
             └── loadgen.rs        # 裸 TCP HTTP/1.1 压测客户端
 ```
@@ -111,7 +133,9 @@ scripts/perf/
 | 2 | `alloc` | 每请求堆分配次数与字节（重启进程，`PERF_COUNT_ALLOC=1`） |
 | 3 | `throughput` | concurrency=16 的 rps（**会被本机后台负载污染**） |
 | 4 | `idempotency` | `Idempotency-Key` 触发的全量响应缓冲代价 |
-| 5 | `profile` | `/usr/bin/sample` 采 15 s CPU 调用图 |
+| 5 | `profile` | `/usr/bin/sample` 采 15 s CPU 调用图（每个被测端一份） |
+| 6 | `failover` | 跨账号重试的重放代价（**默认不跑**：它要重启 relay 进程换 handler） |
+| 7 | `tls` | TLS + HTTP/2 对照（**默认不跑**：它要重启整个栈换 https 上游） |
 
 ## 5.1 单独跑某一档
 
@@ -120,7 +144,9 @@ PHASES=latency       ./scripts/perf/run-baseline.sh
 PHASES=alloc         ./scripts/perf/run-baseline.sh
 PHASES=sseburst      ./scripts/perf/run-baseline.sh   # SSE 满速：分辨每 chunk 成本
 PHASES=jsonrewrite   ./scripts/perf/run-baseline.sh   # 隔离 ensure_include_usage
-# 默认全跑：
+PHASES=failover      ./scripts/perf/run-baseline.sh   # 跨账号 failover 的重放代价
+PHASES=tls           ./scripts/perf/run-baseline.sh   # TLS + h2 对照
+# 默认全跑（不含 failover / tls，它们要重启栈，混进来会打断"同轮交错"）：
 PHASES="latency sseburst jsonrewrite alloc throughput idempotency profile" ./scripts/perf/run-baseline.sh
 ```
 
@@ -134,6 +160,10 @@ PHASES="latency sseburst jsonrewrite alloc throughput idempotency profile" ./scr
 | `N_SMALL` / `N_LARGE` / `N_SSE` / `N_SSE_TTFB` | 10000 / 1500 / 40 / 4000 | 各场景请求数 |
 | `RESULTS` | `scripts/perf/results` | 产出目录 |
 | `CARGO_TARGET_DIR` | `/tmp/cargo-audit-perf` | 构建目录 |
+| `PERF_TARGETS` | `floor full nomw relay` | 交错跑哪几个被测端 |
+| `PERF_JSON_TARGETS` | `floor full relay` | 1c 档跑哪几个（它是 4 组 × 数千发，跑全套是浪费） |
+| `PERF_NO_GATEWAY` | 0 | 1 = 不构建也不启动 `gateway`（`gw-proxy` 编不过时照样能跑 relay 对 floor） |
+| `PERF_TLS_CERT` / `PERF_TLS_KEY` | `/tmp/perf-tls-*.pem` | TLS 档的自签证书；不存在就现生成 |
 
 ## 6. 手动起单个进程（调试用）
 

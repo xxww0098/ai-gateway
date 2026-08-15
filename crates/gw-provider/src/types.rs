@@ -11,7 +11,13 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Default)]
 pub struct ProviderRequest {
     pub model: String,
-    pub payload: Vec<u8>,
+    /// WAVE 3 接缝：`Vec<u8>` → [`bytes::Bytes`]。
+    ///
+    /// `Bytes::clone` 是 refcount，所以 failover 重试不再重复 memcpy 整个请求体。
+    /// 实测代价见 `docs/relay-perf-baseline.md` §3 第 1 条：分配字节达载荷的
+    /// **4.20 倍**（下界 1.40 倍），一个 900 KB 的请求在 3 次 failover 下要
+    /// memcpy 约 5.4 MB。
+    pub payload: bytes::Bytes,
     pub stream: bool,
     pub metadata: HashMap<String, String>,
 
@@ -68,7 +74,12 @@ pub fn copy_outbound_headers(dst: &mut http::HeaderMap, src: &http::HeaderMap) {
 pub struct ProviderResponse {
     pub status: u16,
     pub headers: http::HeaderMap,
-    pub body: Vec<u8>,
+    /// WAVE 3 接缝：`Vec<u8>` → [`bytes::Bytes`]。
+    ///
+    /// 回程唯一那次拷贝就是被这个字段类型逼出来的：五个 executor 都写
+    /// `response.bytes().await?.to_vec()`，把 reqwest 已经持有的 `Bytes`
+    /// 复制进 `Vec`。末端 `Body::from(Vec<u8>)` 反而是零拷贝的。
+    pub body: bytes::Bytes,
     pub usage: Option<UsageRecord>,
 }
 

@@ -113,6 +113,50 @@ pub struct SettlementInputs {
     pub streaming_estimate: f64,
 }
 
+/// 上游按 Google GenerateContent 语义报 usage 的 executor。
+///
+/// `gemini` 与 `vertex` 是两套鉴权与端点前缀，但 wire 协议是**同一个**
+/// GenerateContent，`usageMetadata` 的字段语义因此完全一致。
+const GOOGLE_SHAPED_PROVIDERS: [&str; 2] = ["gemini", "vertex"];
+
+/// 把上游原话的 token 计数归一成**可计价**的视图。
+///
+/// # Google 的 usage 会让网关每次都少收钱
+///
+/// | 上游 | 「输出」字段 | 含不含思考 token |
+/// | --- | --- | --- |
+/// | OpenAI / Codex | `usage.completion_tokens` | **含**（`completion_tokens_details.reasoning_tokens` 是它的一个明细） |
+/// | Anthropic | `usage.output_tokens` | **含** |
+/// | Google（gemini / vertex） | `usageMetadata.candidatesTokenCount` | **不含**（思考在 `thoughtsTokenCount` 里，是并列项） |
+///
+/// 而 `model_prices.reasoning_price_per1_m` 的建表默认值是 **0**
+/// （`migrations/0001_init.sql`）。两件事叠起来的后果是确定的：
+/// 一个 Gemini 思考型模型的**每一个思考 token 都是免费的** ——
+/// `candidatesTokenCount` 不含它，`reasoning_price` 又是 0。
+/// 思考 token 在推理型模型上经常是输出的数倍，所以这不是舍入误差，
+/// 是**每次调用都少收一大块**。
+///
+/// 修法是把 Google 的思考 token 折进 `output`，按**输出费率**计价 ——
+/// 这正是 Google 自己的计费口径（thinking token 按 output 价收）。
+/// 折进去之后 `reasoning` 清零，避免配了 `reasoning_price` 的部署被重复计价。
+///
+/// OpenAI / Anthropic **不折**：它们的输出字段本来就含思考，
+/// 折进去就是实打实的重复计费。这条不对称是上游语义的不对称，不是本函数的选择。
+///
+/// 归一只作用于**计价**。写进 `usage_logs` 的仍然是上游原话
+/// （`input/output/cached/reasoning` 四列各归各位），否则审计就对不上上游账单了。
+#[must_use]
+pub fn billable_tokens(provider: &str, tokens: TokenUsage) -> TokenUsage {
+    if !GOOGLE_SHAPED_PROVIDERS.contains(&provider) {
+        return tokens;
+    }
+    TokenUsage {
+        output: tokens.output.saturating_add(tokens.reasoning),
+        reasoning: 0,
+        ..tokens
+    }
+}
+
 /// Resolves which of the four settlement branches applies.
 ///
 /// Keeping the branching separate from the I/O is what lets the fallback and
@@ -222,7 +266,13 @@ impl Settlement {
         } else {
             usage.model.clone()
         };
-        let computed_cost = self.calc.compute(&model, tokens, ctx.rate_mult);
+        // 计价用的是**归一化后**的 token 视图，日志写的是上游原话。
+        // 两者不同的唯一一种情况见 [`billable_tokens`]。
+        let computed_cost = self.calc.compute(
+            &model,
+            billable_tokens(&outcome.provider, tokens),
+            ctx.rate_mult,
+        );
 
         // The active-hold lookup is only consulted on the fallback path, so it
         // is resolved lazily to keep the precise path at one round-trip.

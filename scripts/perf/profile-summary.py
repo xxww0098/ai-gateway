@@ -97,9 +97,17 @@ def main():
     ap.add_argument("--save", action="store_true")
     args = ap.parse_args()
 
+    # `full` 的文件名是历史遗留（profile-gateway-full.txt），其余被测端一律
+    # profile-<t>.txt。缺哪份就跳哪份并写明 —— **不出现在表里 ≠ 那一项是 0**。
+    profiles = [
+        ("profile-gateway-full.txt", "网关 全链路 (full)"),
+        ("profile-nomw.txt", "网关 无中间件 (nomw)"),
+        ("profile-relay.txt", "gw-relay 中继内核 (relay)"),
+        ("profile-floor.txt", "对照组下界 (floor)"),
+    ]
     out = [__doc__.split("\n\n", 1)[1].strip(), ""]
-    report(os.path.join(RESULTS, "profile-gateway-full.txt"), "网关 全链路 (full)", out)
-    report(os.path.join(RESULTS, "profile-floor.txt"), "对照组下界 (floor)", out)
+    for name, label in profiles:
+        report(os.path.join(RESULTS, name), label, out)
     text = "\n".join(out)
     print(text)
     if args.save:

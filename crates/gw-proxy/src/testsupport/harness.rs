@@ -41,7 +41,9 @@ pub(crate) struct Harness {
     pub(crate) breaker: Arc<FakeCircuitBreaker>,
     pub(crate) idempotency: Arc<FakeIdempotencyStore>,
     pub(crate) provider: Arc<FakeProvider>,
-    /// The Gemini upstream, for the `/v1beta` dialect tests. Separate from
+    /// 上游凭证表，用来量化它被加载了多少次（热点 #5）。
+    pub(crate) auth_store: Arc<FakeAuthStore>,
+    /// The Gemini upstream. Separate from
     /// [`Self::provider`] so a test can tell which dialect actually dispatched.
     pub(crate) gemini: Arc<FakeProvider>,
     /// The Anthropic upstream, for the `/v1/messages` dialect.
@@ -68,6 +70,15 @@ impl Harness {
     }
 
     pub(crate) fn build_with(auths: Vec<AuthRecord>) -> Self {
+        Self::build_routed(auths, None)
+    }
+
+    /// 装上四级链的 L1/L2/L3 数据源。`None` = 一键回滚到纯前缀猜测（L4），
+    /// 也就是收敛前的行为。
+    pub(crate) fn build_routed(
+        auths: Vec<AuthRecord>,
+        resolver: Option<Arc<dyn gw_relay::endpoint::upstream::ChannelResolver>>,
+    ) -> Self {
         let ledger = FakeLedger::with_balance(100.0);
         let calc = FakeCalculator::shared();
         let usage_store = FakeUsageStore::shared();
@@ -125,16 +136,19 @@ impl Harness {
             ))),
         );
 
-        let dispatch = Arc::new(
-            Dispatcher::new(
-                vec![provider.clone(), claude.clone(), gemini.clone()],
-                FakeAuthStore::with(auths),
-                channels,
-                settlement.clone(),
-            )
-            .with_circuit_breaker(breaker.clone())
-            .with_catalog(catalog.clone()),
-        );
+        let auth_store = FakeAuthStore::with(auths);
+        let dispatch = Dispatcher::new(
+            vec![provider.clone(), claude.clone(), gemini.clone()],
+            auth_store.clone(),
+            channels,
+            settlement.clone(),
+        )
+        .with_circuit_breaker(breaker.clone())
+        .with_catalog(catalog.clone());
+        let dispatch = Arc::new(match resolver {
+            Some(resolver) => dispatch.with_channel_resolver(resolver),
+            None => dispatch,
+        });
 
         let drain = TaskTracker::new();
         let metrics = Arc::new(RecordingMetrics::default());
@@ -157,6 +171,7 @@ impl Harness {
             breaker,
             idempotency,
             provider,
+            auth_store,
             gemini,
             claude,
             catalog,

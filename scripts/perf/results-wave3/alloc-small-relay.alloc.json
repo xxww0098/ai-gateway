@@ -1,0 +1,11 @@
+{
+  "label": "alloc-small-relay",
+  "requests": 5000,
+  "wall_seconds": 0.3732149600982666,
+  "alloc_count": 525053,
+  "alloc_bytes": 176622919,
+  "dealloc_count": 480049,
+  "realloc_count": 45002,
+  "alloc_per_req": 105.0106,
+  "bytes_per_req": 35324.5838
+}

@@ -7,6 +7,7 @@
 python3 scripts/perf/summarize.py               # results/*.json → markdown 表
 python3 scripts/perf/summarize.py --acceptance relay   # T1–T13 逐条 达标/未达标
 python3 scripts/perf/profile-summary.py         # CPU 热点按类别归因
+./scripts/perf/hotpath-flamegraph.sh           # 真内核 + mock 上游 → docs/hotpath-flamegraph.svg
 ```
 
 wave 1 的基线结论在 [`docs/relay-perf-baseline.md`](../../docs/relay-perf-baseline.md)，

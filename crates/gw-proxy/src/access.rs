@@ -149,41 +149,51 @@ impl AccessProvider {
             return Err(AuthError::InvalidCredential);
         }
 
-        let mut group_id = row.group_id;
-        let mut rate_mult = 1.0_f64;
-        if let Some(gid) = group_id
-            && let Ok(Some(mult)) = self.directory.group_rate_multiplier(gid).await
-            && mult > 0.0
-        {
-            rate_mult = mult;
-        }
-
-        // Fire-and-forget last_used_at bump; never blocks the request.
+        // last_used_at 是展示字段：实现里已经 detach，这里 await 只等到 spawn。
         self.directory.touch_api_key(row.id).await;
 
-        // Second-stage gate: the key may be active while its owner was
-        // suspended or deleted since the cache entry was written.
-        if !self.user_is_active(row.user_id).await {
+        // 状态 / 订阅 / 倍率互不依赖，并行拿。拒绝时仍然不回订阅内容，
+        // 所以和「先查 status 再查订阅」一样不会变成用户状态神谕。
+        let group_id = row.group_id;
+        let (active, subscription, multiplier) = tokio::join!(
+            self.user_is_active(row.user_id),
+            self.active_subscription(row.user_id),
+            async {
+                match group_id {
+                    Some(gid) => self
+                        .directory
+                        .group_rate_multiplier(gid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .filter(|m| *m > 0.0),
+                    None => None,
+                }
+            },
+        );
+        if !active {
             return Err(AuthError::InvalidCredential);
         }
 
-        // Entitlement filter: the key's bound group may point at a lapsed
-        // subscription. Re-evaluating here is what makes an expired
-        // subscription collapse the principal back to baseline immediately
-        // instead of waiting for the API-key cache TTL.
-        if let Some(gid) = group_id
-            && !self.group_entitled(row.user_id, gid).await
-        {
-            group_id = None;
-            rate_mult = 1.0;
-        }
+        // 倍率只查一次。1.0 = 基线组，人人有；其它值要现场核对订阅。
+        let (group_id, rate_mult) = match (group_id, multiplier) {
+            (Some(gid), Some(1.0)) => (Some(gid), 1.0),
+            (Some(gid), Some(mult)) => {
+                if self.group_entitled(row.user_id, gid).await {
+                    (Some(gid), mult)
+                } else {
+                    (None, 1.0)
+                }
+            }
+            _ => (None, 1.0),
+        };
 
         Ok(AccessMetadata {
             user_id: row.user_id,
             api_key_id: row.id,
             group_id,
             rate_mult,
-            subscription: self.active_subscription(row.user_id).await,
+            subscription,
         })
     }
 
@@ -201,7 +211,11 @@ impl AccessProvider {
         // re-confirms the user. Checking BEFORE loading the subscription keeps
         // quota values from leaking for a suspended user — the rejection must
         // be indistinguishable from any other invalid credential.
-        if !self.user_is_active(claims.user_id).await {
+        let (active, subscription) = tokio::join!(
+            self.user_is_active(claims.user_id),
+            self.active_subscription(claims.user_id),
+        );
+        if !active {
             return Err(AuthError::InvalidCredential);
         }
 
@@ -210,7 +224,7 @@ impl AccessProvider {
             api_key_id: 0,
             group_id: None,
             rate_mult: 1.0,
-            subscription: self.active_subscription(claims.user_id).await,
+            subscription,
         })
     }
 
@@ -236,22 +250,15 @@ impl AccessProvider {
     /// (multiplier 1.0) is implicitly held by every active user, anything else
     /// needs a live subscription bound to that group. Transient errors deny the
     /// multiplier rather than 5xx-ing a valid request.
+    /// 非基线组是否仍有有效订阅。倍率已经在上面查过一次，这里不再重查。
     async fn group_entitled(&self, user_id: Id, group_id: Id) -> bool {
         if user_id == 0 || group_id == 0 {
             return false;
         }
-        match self.directory.group_rate_multiplier(group_id).await {
-            // The baseline group is implicitly held by every active user, so
-            // there is no subscription to consult.
-            Ok(Some(1.0)) => true,
-            Ok(Some(_)) => self
-                .directory
-                .holds_group_entitlement(user_id, group_id)
-                .await
-                .unwrap_or(false),
-            // Missing group row or transient error: baseline wins.
-            _ => false,
-        }
+        self.directory
+            .holds_group_entitlement(user_id, group_id)
+            .await
+            .unwrap_or(false)
     }
 
     /// A missing or stale subscription is silently skipped, never an error.
@@ -273,8 +280,7 @@ impl AccessProvider {
 /// and the billing hot path never executes. [`crate::router`] wires the two in
 /// the correct order, and `access::tests` pins it.
 pub async fn layer(State(state): State<ProxyState>, mut req: Request, next: Next) -> Response {
-    let path = req.uri().path().to_owned();
-    if !is_proxy_path(&path) {
+    if !is_proxy_path(req.uri().path()) {
         return next.run(req).await;
     }
 

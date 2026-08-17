@@ -315,3 +315,55 @@ fn retrying_excludes_the_accounts_already_tried() {
         "an exhausted pool must report exhaustion instead of repeating",
     );
 }
+
+#[test]
+fn a_sticky_account_is_preferred_while_it_stays_healthy() {
+    let (_, pool) = pool_with(vec![]);
+    let auths = vec![auth_record("a", "openai"), auth_record("b", "openai")];
+    pool.remember(7, "gpt-4o", "b");
+    let preferred = pool.preferred(7, "gpt-4o");
+    assert_eq!(preferred.as_deref(), Some("b"));
+    for _ in 0..8 {
+        assert_eq!(
+            pool.pick_sticky(&auths, preferred.as_deref(), &[])
+                .expect("a pick")
+                .id,
+            "b",
+        );
+    }
+}
+
+#[test]
+fn a_benched_sticky_account_falls_back_to_the_weighted_pool() {
+    let (health, pool) = pool_with(vec![]);
+    let auths = vec![auth_record("a", "openai"), auth_record("b", "openai")];
+    pool.remember(7, "gpt-4o", "b");
+    health.record_result("b", false, None);
+    let preferred = pool.preferred(7, "gpt-4o");
+    for _ in 0..8 {
+        assert_eq!(
+            pool.pick_sticky(&auths, preferred.as_deref(), &[])
+                .expect("a pick")
+                .id,
+            "a",
+            "affinity must not override health",
+        );
+    }
+}
+
+#[test]
+fn excluding_the_sticky_account_does_not_clone_the_rest_of_the_pool() {
+    // 行为钉的是「排除生效」，不是实现细节。克隆凭证表是热路径上的浪费，
+    // 这条只保证排除之后还能挑到剩下的账号。
+    let (_, pool) = pool_with(vec![]);
+    let auths = vec![
+        auth_record("a", "openai"),
+        auth_record("b", "openai"),
+        auth_record("c", "openai"),
+    ];
+    pool.remember(7, "gpt-4o", "a");
+    let picked = pool
+        .pick_sticky(&auths, Some("a"), &["a".to_owned()])
+        .expect("a fallback pick");
+    assert_ne!(picked.id, "a");
+}

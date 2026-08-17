@@ -53,6 +53,7 @@ use crate::ProxyState;
 use crate::channel::ChannelPool;
 use crate::error::DispatchError;
 use crate::hold::PeekedBody;
+use crate::kernel::{Phase, RelayCtx};
 use crate::ports::{CircuitBreaker, ModelCatalog};
 use crate::settlectx::{BillingHandle, SettleCtx};
 use crate::usage::{Settlement, UsageOutcome};
@@ -274,7 +275,7 @@ async fn dispatch(
     state: &ProxyState,
     surface: Surface,
     model: String,
-    inbound: Inbound,
+    mut inbound: Inbound,
     stream: bool,
     billing: Option<BillingHandle>,
 ) -> Response {
@@ -311,6 +312,12 @@ async fn dispatch(
         return dialect_error(status, body);
     }
 
+    if let Some(ctx) = inbound.relay.as_mut() {
+        ctx.advance(Phase::Routed);
+    }
+
+    let user_id = billing.as_ref().map(|b| b.ctx.user_id).unwrap_or(0);
+    let preferred = dispatcher.channels.preferred(user_id, &model);
     let mut tried: Vec<String> = Vec::new();
     let mut last_error: Option<DispatchError> = None;
 
@@ -325,7 +332,13 @@ async fn dispatch(
         }
 
         while tried.len() < MAX_UPSTREAM_ATTEMPTS {
-            let Some(auth) = dispatcher.channels.pick_excluding(&auths, &tried) else {
+            if let Some(ctx) = inbound.relay.as_mut() {
+                ctx.advance(Phase::Attempting);
+            }
+            let Some(auth) = dispatcher
+                .channels
+                .pick_sticky(&auths, preferred.as_deref(), &tried)
+            else {
                 break; // this provider's accounts are exhausted for this request
             };
             let auth = auth.clone();
@@ -349,7 +362,10 @@ async fn dispatch(
                         // The connection stood up, so the account is working;
                         // a mid-stream failure is reported through the usage
                         // outcome instead.
-                        record_success(state, provider_name, &auth.id).await;
+                        record_success(state, provider_name, &auth.id, user_id, &model).await;
+                        if let Some(ctx) = inbound.relay.as_mut() {
+                            ctx.advance(Phase::Relaying);
+                        }
                         return stream_response(
                             state,
                             upstream,
@@ -382,7 +398,10 @@ async fn dispatch(
                         });
                     }
                     Ok(response) => {
-                        record_success(state, provider_name, &auth.id).await;
+                        record_success(state, provider_name, &auth.id, user_id, &model).await;
+                        if let Some(ctx) = inbound.relay.as_mut() {
+                            ctx.advance(Phase::Relaying);
+                        }
                         return unary_response(
                             state,
                             response,
@@ -479,12 +498,19 @@ fn request_metadata(
     meta
 }
 
-async fn record_success(state: &ProxyState, provider: &str, auth_id: &str) {
+async fn record_success(
+    state: &ProxyState,
+    provider: &str,
+    auth_id: &str,
+    user_id: i64,
+    model: &str,
+) {
     state
         .dispatch
         .channels
         .health()
         .record_result(auth_id, true, None);
+    state.dispatch.channels.remember(user_id, model, auth_id);
     if let Some(cb) = &state.dispatch.circuit_breaker {
         cb.record(provider, true).await;
     }
@@ -751,6 +777,7 @@ struct Inbound {
     /// duplicates are both significant, hence a `Vec`.
     query: Vec<(String, String)>,
     billing: Option<BillingHandle>,
+    relay: Option<RelayCtx>,
 }
 
 /// Reuses the body the hold layer already buffered, or reads it directly when
@@ -776,6 +803,7 @@ struct Inbound {
 /// Anthropic 直连会立刻全线 401。
 async fn inbound(req: Request, surface: Surface) -> Result<Inbound, Response> {
     let billing = req.extensions().get::<BillingHandle>().cloned();
+    let relay = req.extensions().get::<RelayCtx>().cloned();
     let peeked = req.extensions().get::<PeekedBody>().cloned();
     let spec = req.extensions().get::<RequestSpec>().cloned();
     let headers = req.headers().clone();
@@ -803,6 +831,7 @@ async fn inbound(req: Request, surface: Surface) -> Result<Inbound, Response> {
         headers,
         query,
         billing,
+        relay,
     })
 }
 

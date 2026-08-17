@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use dashmap::DashMap;
 use gw_authcore::AuthRecord;
 use parking_lot::{Mutex, RwLock};
 
@@ -198,6 +199,9 @@ pub struct ChannelPool {
     health: Arc<ChannelHealth>,
     policies: Option<Arc<ChannelPolicyCache>>,
     cursor: AtomicUsize,
+    /// NewAPI 风格的渠道亲和：同一租户打同一模型时粘在上次成功的账号上。
+    /// 进程内、无持久化；账号不健康或已被排除时回落到加权轮询。
+    affinity: DashMap<(i64, String), String>,
 }
 
 impl ChannelPool {
@@ -207,6 +211,7 @@ impl ChannelPool {
             health,
             policies: None,
             cursor: AtomicUsize::new(0),
+            affinity: DashMap::new(),
         }
     }
 
@@ -245,11 +250,75 @@ impl ChannelPool {
     /// nothing is healthy and enabled it **fails open** over the full set:
     /// trying a benched account beats telling the client "no auth available".
     pub fn pick<'a>(&self, auths: &'a [AuthRecord]) -> Option<&'a AuthRecord> {
-        let usable: Vec<(&AuthRecord, ChannelPolicy)> = auths
+        self.pick_from(auths.iter())
+    }
+
+    /// 加权轮询，跳过本请求已经试过的账号。**不克隆 `AuthRecord`**
+    /// （凭证解密结果在热路径上再 memcpy 一遍没有意义）。
+    pub fn pick_excluding<'a>(
+        &self,
+        auths: &'a [AuthRecord],
+        exclude: &[String],
+    ) -> Option<&'a AuthRecord> {
+        self.pick_from(
+            auths
+                .iter()
+                .filter(|a| exclude.iter().all(|id| id != &a.id)),
+        )
+    }
+
+    /// 先粘上次成功的账号（仍健康、未被排除），否则回落 [`Self::pick_excluding`]。
+    pub fn pick_sticky<'a>(
+        &self,
+        auths: &'a [AuthRecord],
+        preferred: Option<&str>,
+        exclude: &[String],
+    ) -> Option<&'a AuthRecord> {
+        if let Some(id) = preferred
+            && exclude.iter().all(|e| e != id)
+            && let Some(auth) = auths.iter().find(|a| {
+                a.id == id
+                    && a.is_usable()
+                    && self.health.is_healthy(&a.id)
+                    && self.policy(&a.id).enabled
+            })
+        {
+            return Some(auth);
+        }
+        self.pick_excluding(auths, exclude)
+    }
+
+    /// 记下这次成功的账号，供下一次同租户同模型粘住。
+    pub fn remember(&self, user_id: i64, model: &str, auth_id: &str) {
+        if user_id == 0 || model.is_empty() || auth_id.is_empty() {
+            return;
+        }
+        self.affinity
+            .insert((user_id, model.to_owned()), auth_id.to_owned());
+    }
+
+    /// 上次成功打这个 (user, model) 的账号。
+    #[must_use]
+    pub fn preferred(&self, user_id: i64, model: &str) -> Option<String> {
+        if user_id == 0 || model.is_empty() {
+            return None;
+        }
+        self.affinity
+            .get(&(user_id, model.to_owned()))
+            .map(|v| v.clone())
+    }
+
+    fn pick_from<'a, I>(&self, auths: I) -> Option<&'a AuthRecord>
+    where
+        I: IntoIterator<Item = &'a AuthRecord>,
+    {
+        let all: Vec<&AuthRecord> = auths.into_iter().collect();
+        if all.is_empty() {
+            return None;
+        }
+        let usable: Vec<(&AuthRecord, ChannelPolicy)> = all
             .iter()
-            // `is_usable` is gw-authcore's own routability rule (operator kill
-            // switch, health kill switch, disabled status); health tracked here
-            // is the transient layer on top of it.
+            .copied()
             .filter(|a| a.is_usable())
             .filter(|a| self.health.is_healthy(&a.id))
             .map(|a| (a, self.policy(&a.id)))
@@ -257,7 +326,7 @@ impl ChannelPool {
             .collect();
 
         if usable.is_empty() {
-            return self.round_robin(&auths.iter().collect::<Vec<_>>()).copied();
+            return self.round_robin(&all).copied();
         }
 
         let max_priority = usable.iter().map(|(_, p)| p.priority).max().unwrap_or(0);
@@ -267,33 +336,10 @@ impl ChannelPool {
                 continue;
             }
             for _ in 0..policy.weight {
-                expanded.push(auth);
+                expanded.push(*auth);
             }
         }
         self.round_robin(&expanded).copied()
-    }
-
-    /// Picks the next account, skipping ones already tried in this request.
-    ///
-    /// This is what makes cross-account failover work: the dispatcher retries
-    /// with a different credential while the settlement stays single (see the
-    /// module docs). The retry loop is owned here rather than by an SDK
-    /// conductor.
-    pub fn pick_excluding<'a>(
-        &self,
-        auths: &'a [AuthRecord],
-        exclude: &[String],
-    ) -> Option<&'a AuthRecord> {
-        let remaining: Vec<AuthRecord> = auths
-            .iter()
-            .filter(|a| !exclude.contains(&a.id))
-            .cloned()
-            .collect();
-        if remaining.is_empty() {
-            return None;
-        }
-        let chosen = self.pick(&remaining)?.id.clone();
-        auths.iter().find(|a| a.id == chosen)
     }
 
     fn round_robin<'a, T>(&self, items: &'a [T]) -> Option<&'a T> {

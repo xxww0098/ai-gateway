@@ -200,11 +200,7 @@ impl Harness {
             )
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
-                crate::hold::layer,
-            ))
-            .layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                crate::access::layer,
+                crate::kernel::layer,
             ))
             .with_state(state)
     }

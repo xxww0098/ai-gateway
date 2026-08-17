@@ -1,0 +1,85 @@
+# VPS stack: postgres + redis + app (no public ports) + nginx web on loopback.
+#
+#   JWT_SECRET=... CREDENTIAL_ENCRYPTION_KEY=... DB_PASSWORD=... \
+#     docker compose --env-file deploy/env.vps.example -f deploy/docker-compose.vps.yml up -d
+#
+# JWT_SECRET and CREDENTIAL_ENCRYPTION_KEY are REQUIRED and must come from the
+# environment — never bake them into the image. Generate with `make gen-secrets`.
+# Put a host reverse proxy (Caddy/nginx) in front of 127.0.0.1:${APP_PORT:-8888}.
+# Host Caddy snippet: deploy/Caddyfile.vps (agw.xxww.online).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: agw-postgres
+    environment:
+      POSTGRES_USER: ${DB_USER:-agw}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME:-ai_gateway}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-agw} -d ${DB_NAME:-ai_gateway}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    container_name: agw-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  app:
+    image: ai-gateway:vps
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: agw-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SERVER_HOST: "0.0.0.0"
+      SERVER_PORT: "8888"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-agw}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME:-ai_gateway}
+      DB_SSLMODE: ${DB_SSLMODE:-disable}
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: "0"
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?set CREDENTIAL_ENCRYPTION_KEY}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL}
+    command: ["--config", "/app/config.example.yaml"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ai-gateway", "--health-check"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+      start_period: 20s
+
+  web:
+    image: ai-gateway-web:vps
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.web
+    container_name: agw-web
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${APP_PORT:-8888}:80"
+
+volumes:
+  pgdata:

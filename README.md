@@ -106,7 +106,16 @@ make run           # 构建并以 config.yaml 启动
 ## 上线
 
 生产部署前请确认密钥注入、`sslmode=require`、反向代理 / TLS、密钥不入库自检等配置项。
-`scripts/deploy-vps.sh` 提供了一个 VPS 部署示例。
+
+Docker（vps-api，不替换现网 CPA / APS）：
+
+```bash
+cp deploy/env.vps.example /opt/ai-gateway/.env   # 填 JWT_SECRET、CREDENTIAL_ENCRYPTION_KEY、DB_PASSWORD
+docker compose --env-file /opt/ai-gateway/.env -f deploy/docker-compose.vps.yml up -d --build
+# 把 deploy/Caddyfile.vps 追加到宿主机 Caddy：agw.xxww.online
+```
+
+`scripts/deploy-vps.sh` 是 musl 二进制部署示例，和上面的 Docker 栈二选一。
 
 **支付**：订单已持久化、入账幂等，当前可通过管理员人工确认（`PUT /api/panel/admin/orders/:id/confirm`）
 收款；接入 Stripe/支付宝/微信**实时结算**需各渠道商户账号与密钥。

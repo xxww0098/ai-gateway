@@ -1,0 +1,7 @@
+# Host Caddy on vps-api. Do not replace api.xxww.online:443 (CPA)
+# or aps.xxww.online (APS). Append this block.
+
+agw.xxww.online {
+	encode gzip
+	reverse_proxy 127.0.0.1:8888
+}

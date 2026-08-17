@@ -1,0 +1,8 @@
+FROM gcr.io/distroless/cc-debian12:nonroot
+WORKDIR /app
+COPY gw-server /usr/local/bin/ai-gateway
+COPY config.example.yaml /app/config.example.yaml
+EXPOSE 8888
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/local/bin/ai-gateway"]
+CMD ["--config", "/app/config.example.yaml"]

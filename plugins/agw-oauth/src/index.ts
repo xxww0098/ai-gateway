@@ -8,6 +8,7 @@ import { AgwAdapter, PROVIDER } from './adapter.js'
 import { parseModelsPayload, type GatewayModel } from './catalog.js'
 import { Config, resolveOrigin } from './config.js'
 import { currentWatch, resetLoginWatch, startLogin, usageText, type CommandResult } from './command.js'
+import { handleHttp } from './http.js'
 import { TokenStore } from './store.js'
 
 export const name = 'agw-oauth'
@@ -17,12 +18,14 @@ export type { Config as ConfigType } from './config.js'
 export { PROVIDER, parseModelsPayload, parseGatewayModel, toResolvedModel } from './catalog.js'
 export { startDevice, pollDevice } from './oauth.js'
 export { AgwAdapter } from './adapter.js'
+export { handleHttp } from './http.js'
 
 export function apply(ctx: Context, config: { origin: string }): void {
   ctx.logger.info('[agw-oauth] plugin loaded!')
   const store = new TokenStore()
   let models: GatewayModel[] = []
   let registration: { replace(providers: string[]): void } | undefined
+  let savedOrigin: string | undefined
 
   const auth = () => {
     // filled after first read; sync snapshot for the adapter
@@ -61,16 +64,37 @@ export function apply(ctx: Context, config: { origin: string }): void {
 
   const persist = async (apiKey: string, origin: string): Promise<void> => {
     snapshot = { apiKey, origin }
+    savedOrigin = origin
     await store.write(snapshot)
     await refreshModels()
   }
 
-  void store.read().then(async (token) => {
+  const logout = async (): Promise<void> => {
+    resetLoginWatch()
+    snapshot = undefined
+    savedOrigin = undefined
+    models = []
+    await store.clear()
+    ensureAdapter()
+  }
+
+  const saveOrigin = async (origin: string): Promise<void> => {
+    await store.writeOrigin(origin)
+    savedOrigin = origin
+    if (snapshot !== undefined) snapshot = { ...snapshot, origin }
+  }
+
+  const loginOrigin = (): string => resolveOrigin(config, snapshot?.origin ?? savedOrigin)
+
+  void (async () => {
+    savedOrigin = await store.peekOrigin()
+    const token = await store.read()
     if (token === undefined) {
-      ctx.logger.info('[agw-oauth] not logged in; run /agw login')
+      ctx.logger.info('[agw-oauth] not logged in; run /agw login or Settings → AGW Oauth')
       return
     }
     snapshot = token
+    savedOrigin = token.origin
     try {
       await refreshModels()
       ctx.logger.info(`[agw-oauth] ready origin=${token.origin} models=${models.length}`)
@@ -78,7 +102,7 @@ export function apply(ctx: Context, config: { origin: string }): void {
       ctx.logger.warn(`[agw-oauth] listed no models: ${error instanceof Error ? error.message : String(error)}`)
       ensureAdapter()
     }
-  })
+  })()
 
   const commands = ctx.get('commands') as {
     register(definition: {
@@ -99,16 +123,11 @@ export function apply(ctx: Context, config: { origin: string }): void {
           return { kind: 'success', text: usageText() }
         }
         if (action === 'logout') {
-          resetLoginWatch()
-          snapshot = undefined
-          models = []
-          await store.clear()
-          ensureAdapter()
+          await logout()
           return { kind: 'success', text: 'Logged out of AI-GateWay.' }
         }
         if (action === 'login') {
-          const origin = resolveOrigin(config, snapshot?.origin)
-          return startLogin(origin, persist, invocation.signal)
+          return startLogin(loginOrigin(), persist, invocation.signal)
         }
         const watch = currentWatch()
         const login = snapshot === undefined ? 'not logged in' : `ok (${snapshot.origin})`
@@ -144,41 +163,15 @@ export function apply(ctx: Context, config: { origin: string }): void {
           setHeader(name: string, value: string): void
           end(body: string): void
           statusCode: number
-        }, config, persist, () => snapshot)
+        }, {
+          config,
+          persist,
+          token: () => snapshot,
+          savedOrigin: () => savedOrigin,
+          saveOrigin,
+          logout,
+        })
       },
     }), 'agw-oauth: http api')
   })
-}
-
-async function handleHttp(
-  req: { url?: string, method?: string },
-  res: { setHeader(name: string, value: string): void, end(body: string): void, statusCode: number },
-  config: { origin: string },
-  persist: (apiKey: string, origin: string) => Promise<void>,
-  token: () => { origin: string, apiKey: string } | undefined,
-): Promise<void> {
-  res.setHeader('content-type', 'application/json')
-  const path = (req.url ?? '').split('?')[0] ?? ''
-  try {
-    if ((req.method ?? 'GET') === 'POST' && path.endsWith('/login/start')) {
-      const result = await startLogin(resolveOrigin(config, token()?.origin), persist)
-      res.end(JSON.stringify(result))
-      return
-    }
-    if ((req.method ?? 'GET') === 'GET' && path.endsWith('/status')) {
-      const current = token()
-      const watch = currentWatch()
-      res.end(JSON.stringify({
-        loggedIn: current !== undefined,
-        origin: current?.origin,
-        watch,
-      }))
-      return
-    }
-    res.statusCode = 404
-    res.end(JSON.stringify({ error: 'not found' }))
-  } catch (error) {
-    res.statusCode = 500
-    res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
-  }
 }

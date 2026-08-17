@@ -50,7 +50,7 @@ export async function startLogin(
     }
   }
   if (origin.length === 0) {
-    return { kind: 'error', text: 'Set AGW_ORIGIN or plugin config.origin to your AI-GateWay URL.' }
+    return { kind: 'error', text: 'Set the gateway URL in Settings → AGW Oauth, or set AGW_ORIGIN.' }
   }
   let started: DeviceStart
   try {

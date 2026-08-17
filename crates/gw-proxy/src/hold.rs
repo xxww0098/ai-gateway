@@ -33,6 +33,7 @@ use crate::ProxyState;
 use crate::access::is_proxy_path;
 use crate::error::HoldRejection;
 use crate::idempotency::{CachedResponse, IdempotencyManager};
+use crate::kernel::{self, Phase, RelayCtx};
 use crate::ports::{
     AccessMetadata, BillingError, BillingLedger, CircuitBreaker, Id, PricingCalculator,
     RateLimiter, SubscriptionQuota, SubscriptionQuotaStore,
@@ -175,6 +176,7 @@ impl HoldMiddleware {
     /// The full billable-request flow.
     pub async fn handle(&self, mut req: Request, next: Next) -> Response {
         if !is_billable(req.method(), req.uri().path()) {
+            kernel::advance_ext(&mut req, Phase::Skipped);
             return next.run(req).await;
         }
 
@@ -235,6 +237,13 @@ impl HoldMiddleware {
         req.extensions_mut().insert(PeekedBody(body_bytes));
         // 唯一一次解析的结果原样交给 handler，`routes::inbound` 直接复用。
         req.extensions_mut().insert(spec);
+        kernel::advance_ext(&mut req, Phase::Inspected);
+        if let Some(ctx) = req.extensions_mut().get_mut::<RelayCtx>() {
+            ctx.peek = Some(peek.clone());
+            ctx.request_id = request_id.clone();
+            ctx.ip_address = ip_address.clone();
+            ctx.idempotency_key = idempotency_key.clone();
+        }
 
         // --- rate limiter (fail-open on infrastructure error) ---
         let identity = meta.user_id.to_string();
@@ -326,11 +335,13 @@ impl HoldMiddleware {
             return HoldRejection::CircuitOpen.into_response();
         }
 
-        // --- outstanding-debt pre-flight ---
-        // A tenant carrying an unresolved shortfall must not accumulate more
-        // billable work. A lookup error fails closed so a transient DB hiccup
-        // cannot let a debtor slip through. No Redis hold is created either way.
-        match self.ledger.has_unresolved_shortfall(meta.user_id).await {
+        // --- outstanding-debt + available balance（并行，各一次 RTT）---
+        // 拒绝优先级不变：欠款 402 先于余额 402。查失败仍然 fail-closed。
+        let (shortfall, available) = tokio::join!(
+            self.ledger.has_unresolved_shortfall(meta.user_id),
+            self.ledger.available_balance(meta.user_id),
+        );
+        match shortfall {
             Ok(false) => {}
             Ok(true) => {
                 tracing::warn!(
@@ -350,6 +361,7 @@ impl HoldMiddleware {
                 return HoldRejection::OutstandingDebt.into_response();
             }
         }
+        let available = available.unwrap_or(0.0);
 
         // The reservation scales with the real prompt size so a large request
         // reserves proportional funds instead of under-holding on a flat
@@ -399,11 +411,6 @@ impl HoldMiddleware {
         // the right posture: letting spend through during a balance-store
         // outage is how a tenant ends up owing money the ledger cannot claw
         // back.
-        let available = self
-            .ledger
-            .available_balance(meta.user_id)
-            .await
-            .unwrap_or(0.0);
         if available < upper_bound {
             tracing::warn!(
                 event = "preflight_insufficient_balance",
@@ -434,6 +441,8 @@ impl HoldMiddleware {
             return self.reject_hold_error(err, meta.user_id, hold_amount).await;
         }
 
+        kernel::advance_ext(&mut req, Phase::Gated);
+
         let billing: BillingHandle = Arc::new(RequestBilling::new(
             SettleCtx {
                 request_id: request_id.clone(),
@@ -451,6 +460,10 @@ impl HoldMiddleware {
             used_budget_token,
         ));
         req.extensions_mut().insert(billing.clone());
+        kernel::advance_ext(&mut req, Phase::Reserved);
+        if let Some(ctx) = req.extensions_mut().get_mut::<RelayCtx>() {
+            ctx.billing = Some(billing.clone());
+        }
 
         // --- idempotency claim, now that funds are reserved ---
         let mut idem_owned = false;
@@ -760,22 +773,33 @@ pub fn next_monthly_reset_after(t: DateTime<Utc>) -> DateTime<Utc> {
 /// 派发用的是 `gw_relay::endpoint::upstream::select` 的四级链，见
 /// [`crate::routes::select_upstreams`]).
 pub fn infer_provider(model: &str) -> Option<&'static str> {
-    let lower = model.to_ascii_lowercase();
-    if lower.starts_with("gpt-")
-        || lower.starts_with("o1")
-        || lower.starts_with("o3")
-        || lower.starts_with("o4")
+    // 不分配：热路径上每个请求都会走到这里，to_ascii_lowercase 只为几个前缀。
+    if starts_ignore_ascii(model, "gpt-")
+        || starts_ignore_ascii(model, "o1")
+        || starts_ignore_ascii(model, "o3")
+        || starts_ignore_ascii(model, "o4")
     {
         Some("openai")
-    } else if lower.starts_with("claude-") {
+    } else if starts_ignore_ascii(model, "claude-") {
         Some("anthropic")
-    } else if lower.starts_with("gemini-") {
+    } else if starts_ignore_ascii(model, "gemini-") {
         Some("google")
-    } else if lower.contains("codex") {
+    } else if contains_ignore_ascii(model, "codex") {
         Some("codex")
     } else {
         None
     }
+}
+
+fn starts_ignore_ascii(hay: &str, prefix: &str) -> bool {
+    hay.len() >= prefix.len()
+        && hay.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+}
+
+fn contains_ignore_ascii(hay: &str, needle: &str) -> bool {
+    hay.as_bytes()
+        .windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 /// Approximates a token count from a byte length (`ceil(size / 4)`).

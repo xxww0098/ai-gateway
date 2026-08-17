@@ -327,16 +327,29 @@ impl Ledger {
 
         // Let the hold keys self-expire once the user goes idle. Best-effort:
         // the reservation itself is already recorded, and the Lua cutoff — not
-        // this TTL — is what governs correctness.
+        // this TTL — is what governs correctness. 两条 EXPIRE 打进一条 pipeline，
+        // 少一次 RTT。
         let key_ttl = (self.hold_ttl + HOLD_KEY_TTL_MARGIN).as_secs() as i64;
-        for key in [holds_key(user_id), holds_ts_key(user_id)] {
-            if let Err(err) = conn.expire::<_, ()>(&key, key_ttl).await {
-                tracing::debug!(error = %err, key, "failed to set hold key expiry");
-            }
+        let mut pipe = redis::pipe();
+        pipe.expire(holds_key(user_id), key_ttl).ignore();
+        pipe.expire(holds_ts_key(user_id), key_ttl).ignore();
+        if let Err(err) = pipe.query_async::<()>(&mut conn).await {
+            tracing::debug!(error = %err, user_id, "failed to set hold key expiry");
         }
 
-        self.write_audit_log(user_id, amount, log_type::HOLD, request_id, None)
-            .await;
+        // 审计是 best-effort，不该挡在预扣成功之后、上游调用之前。
+        let ledger = self.clone();
+        let request_id = request_id.to_owned();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(async move {
+                ledger
+                    .write_audit_log(user_id, amount, log_type::HOLD, &request_id, None)
+                    .await;
+            });
+        } else {
+            self.write_audit_log(user_id, amount, log_type::HOLD, &request_id, None)
+                .await;
+        }
         Ok(())
     }
 

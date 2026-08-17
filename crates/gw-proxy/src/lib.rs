@@ -38,6 +38,7 @@
 //!
 //! | module | role |
 //! | --- | --- |
+//! | [`kernel`] | request state machine + single [`RelayCtx`] |
 //! | [`access`] | tenant authentication |
 //! | [`hold`] | pre-flight reservation + quota gate |
 //! | [`usage`] | usage parsing + settlement |
@@ -74,6 +75,7 @@ pub mod channel;
 pub mod error;
 pub mod hold;
 pub mod idempotency;
+pub mod kernel;
 pub mod ports;
 pub mod reconcile;
 pub mod routes;
@@ -91,6 +93,7 @@ use tokio_util::task::TaskTracker;
 
 pub use access::AccessProvider;
 pub use hold::HoldMiddleware;
+pub use kernel::{Phase, RelayCtx};
 pub use ports::{DiscardMetrics, MetricsSink};
 pub use routes::Dispatcher;
 pub use settlectx::{RequestBilling, SettleCtx};
@@ -179,13 +182,9 @@ impl ProxyState {
 /// `POST /v1beta/models/{model}`）是**硬删**，不是 410 过渡 —— 判定表见
 /// `docs/relay-surface-plan.md` §2，已知代价见 crate 级 doc。
 ///
-/// **The layer order is the whole point.** axum applies `.layer()` outermost-
-/// last, so the calls below read bottom-up as the execution order:
-/// access-auth -> hold -> handler. Getting it backwards is blocker B1 — with
-/// hold ahead of authentication, every `/v1` request aborts with a pre-auth 401
-/// and the billing path never runs. `access::tests` and `routes::tests` both
-/// pin the order so it cannot regress in one place while looking correct in the
-/// other, which is exactly why the billing middleware is a single definition.
+/// 热路径只挂 **一层** [`kernel::layer`]。鉴权→预扣的顺序写在状态机里
+/// （[`kernel::Phase`]），不再靠两个 `.layer()` 的挂载顺序维持 B1。
+/// `access::layer` / `hold::layer` 仍在，给只想测其中一层的用例用。
 ///
 /// Request counting is NOT layered here: `gw_server::metrics::track` wraps the
 /// merged router and already scopes itself to `/v1/*`. A second layer would
@@ -204,11 +203,7 @@ pub fn router(state: ProxyState) -> Router {
         .route("/v1/models/{model}", get(routes::model_detail))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            hold::layer,
-        ))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            access::layer,
+            kernel::layer,
         ))
         .with_state(state)
 }

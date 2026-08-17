@@ -11,7 +11,7 @@ dsh plugin --profile web add ./plugins/agw-oauth
 或：
 
 ```bash
-dsh plugin --profile web add github:xxww0098/ai-gateway#feat/agw-oauth-dsh
+dsh plugin --profile web add github:xxww0098/ai-gateway
 ```
 
 ## 环境变量

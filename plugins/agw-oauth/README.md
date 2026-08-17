@@ -13,7 +13,7 @@ dsh plugin --profile web add ./plugins/agw-oauth
 From GitHub (allow the package `prepare` script so `src/` builds to `lib/`):
 
 ```bash
-dsh plugin --profile web add github:xxww0098/ai-gateway#feat/agw-oauth-dsh
+dsh plugin --profile web add github:xxww0098/ai-gateway
 ```
 
 The plugin path inside the repo is `plugins/agw-oauth` (`dsh-agw-oauth`).

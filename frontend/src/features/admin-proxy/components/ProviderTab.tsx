@@ -28,6 +28,13 @@ import {
   type ProviderKind,
   type ProviderStructuredForm,
 } from '../providerConfig'
+import {
+  matchOpenAiCompatPreset,
+  openAiCompatPresetForm,
+  OPENAI_COMPAT_PRESETS,
+  type OpenAiCompatPreset,
+} from '../openaiCompatPresets'
+import { AuthProviderBrandIcon } from './AuthProviderBrandIcon'
 import { OpenAiEditDialogBody } from './OpenAiEditDialogBody'
 
 export type { BaseChannelItem } from '../providerConfig'
@@ -100,6 +107,10 @@ export function ProviderTab({ providerKind, endpoint, refreshSignal, onOpenModel
   const updateNewForm = (patch: ProviderStructuredForm) => setNewForm(prev => ({ ...prev, ...patch }))
   const updateEditForm = (patch: ProviderStructuredForm) => setEditForm(prev => ({ ...prev, ...patch }))
 
+  /** 内置平台预设：只改连接字段，已经填好的 API Key 留着。 */
+  const applyPreset = (preset: OpenAiCompatPreset) => updateNewForm(openAiCompatPresetForm(preset))
+  const activePreset = isOpenAI ? matchOpenAiCompatPreset({ name: newForm.name, baseUrl: newForm.baseUrl }) : undefined
+
   const handleAdd = async () => {
     try {
       const latest = await fetchProviderConfig(endpoint)
@@ -157,7 +168,31 @@ export function ProviderTab({ providerKind, endpoint, refreshSignal, onOpenModel
   return (
     <div className="space-y-6 mt-4">
       <div className="bg-gray-50/50 dark:bg-dark-800/30 border border-gray-100 dark:border-dark-700 p-4 pt-5 rounded-lg flex flex-col gap-5">
-        <div className={cn("grid gap-4", isOpenAI ? "grid-cols-1 md:grid-cols-3" : "grid-cols-1 md:grid-cols-2")}>
+        {isOpenAI && (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold text-gray-500 dark:text-dark-300 ml-1">内置平台</span>
+            {OPENAI_COMPAT_PRESETS.map((preset) => (
+              <Button
+                key={preset.key}
+                type="button"
+                variant="outline"
+                size="sm"
+                className={cn(
+                  "h-8 gap-1.5 shadow-sm bg-white dark:bg-dark-800",
+                  activePreset?.key === preset.key && "border-indigo-400 text-indigo-600 dark:text-indigo-300",
+                )}
+                onClick={() => applyPreset(preset)}
+                title={`${preset.label}：Base URL / 前缀 / 模型列表 URL 由预设写入，只需再填 API Key`}
+              >
+                <AuthProviderBrandIcon provider={preset.iconProvider} size={16} />
+                {preset.label}
+              </Button>
+            ))}
+            <span className="text-xs text-muted-foreground">选中后只需填 API Key，其余字段自动写入</span>
+          </div>
+        )}
+
+        <div className={cn("grid gap-4", isOpenAI ? "grid-cols-1 md:grid-cols-4" : "grid-cols-1 md:grid-cols-2")}>
           {isOpenAI && (
             <Field label="提供商名称">
               <Input className="bg-white dark:bg-dark-800 shadow-sm" placeholder="如: openrouter" value={newForm.name || ''} onChange={(e) => updateNewForm({ name: e.target.value })} />
@@ -166,6 +201,11 @@ export function ProviderTab({ providerKind, endpoint, refreshSignal, onOpenModel
           <Field label="Base URL">
             <Input className="bg-white dark:bg-dark-800 shadow-sm" placeholder="https://..." value={newForm.baseUrl || ''} onChange={(e) => updateNewForm({ baseUrl: e.target.value })} />
           </Field>
+          {isOpenAI && (
+            <Field label="模型列表 URL">
+              <Input className="bg-white dark:bg-dark-800 shadow-sm" placeholder="留空则按 Base URL 推导 /models" value={newForm.modelsUrl || ''} onChange={(e) => updateNewForm({ modelsUrl: e.target.value })} />
+            </Field>
+          )}
           <Field label="API Key">
             <Input
               className="bg-white dark:bg-dark-800 shadow-sm"
@@ -279,7 +319,14 @@ export function ProviderTab({ providerKind, endpoint, refreshSignal, onOpenModel
             ) : (
               items.map((item) => (
                 <TableRow key={item._id}>
-                  {isOpenAI && <TableCell className="font-medium text-sm">{item.name}</TableCell>}
+                  {isOpenAI && (
+                    <TableCell className="font-medium text-sm">
+                      <span className="flex items-center gap-2">
+                        <AuthProviderBrandIcon provider={matchOpenAiCompatPreset(item)?.iconProvider} size={18} />
+                        {item.name}
+                      </span>
+                    </TableCell>
+                  )}
                   <TableCell>
                     <div className="space-y-1">
                       {item.baseUrl ? (

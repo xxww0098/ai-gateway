@@ -14,6 +14,7 @@ import type { ModelCatalogItem } from '@/features/pricing/model_catalog';
 import { configuredModelToCatalogItem } from '@/features/pricing/model_catalog';
 import { toast } from 'sonner';
 import type { ProviderKind } from '@/features/admin-proxy/providerConfig';
+import { matchOpenAiCompatPreset } from '@/features/admin-proxy/openaiCompatPresets';
 import { copyTextToClipboard } from '@/shared/utils/clipboard';
 
 interface Props {
@@ -33,6 +34,10 @@ function resolveChannelProviderKey(providerKind: ProviderKind, providerLabel: st
   if (providerKind === 'claude') return 'anthropic';
   if (providerKind === 'gemini' || providerKind === 'vertex') return 'google';
   if (providerKind === 'codex') return 'openai';
+
+  // 内置平台（百炼 / dashscope）先认预设，别名表跟着预设走。
+  const preset = matchOpenAiCompatPreset({ name: providerLabel });
+  if (preset) return preset.key;
 
   const lower = providerLabel.toLowerCase();
   if (lower.includes('minimax')) return 'minimax';

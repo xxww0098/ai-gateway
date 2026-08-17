@@ -2,6 +2,7 @@ import type { ComponentType } from 'react'
 import AlibabaColor from '@lobehub/icons/es/Alibaba/components/Color'
 import AlibabaCloudColor from '@lobehub/icons/es/AlibabaCloud/components/Color'
 import AntigravityColor from '@lobehub/icons/es/Antigravity/components/Color'
+import BailianColor from '@lobehub/icons/es/Bailian/components/Color'
 import ChatGLMColor from '@lobehub/icons/es/ChatGLM/components/Color'
 import ClaudeColor from '@lobehub/icons/es/Claude/components/Color'
 import CodexColor from '@lobehub/icons/es/Codex/components/Color'
@@ -39,6 +40,9 @@ export const LOBE_BRAND_ICONS: Record<string, ComponentType<BrandIconProps>> = {
   'x-ai': XAIMono,
   grok: XAIMono,
   qwen: QwenColor,
+  // 百炼是平台（DashScope compatible-mode），Qwen 是模型家族 —— 图标各归各家。
+  bailian: BailianColor,
+  dashscope: BailianColor,
   alibaba: AlibabaColor,
   'alibaba-cloud': AlibabaCloudColor,
   iflow: IFlyTekCloudColor,

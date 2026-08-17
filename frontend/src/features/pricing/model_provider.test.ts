@@ -126,6 +126,15 @@ describe('model_provider', () => {
       expect(resolveModelProvider(model)).toBe('kimi')
     })
 
+    it('resolves dashscope-owned models to the bailian platform', () => {
+      expect(resolveModelProvider({ id: 'x', owned_by: 'dashscope' })).toBe('bailian')
+      expect(resolveModelProvider({ id: 'x', owned_by: 'BaiLian' })).toBe('bailian')
+    })
+
+    it('keeps qwen as its own provider instead of folding it into bailian', () => {
+      expect(resolveModelProvider({ id: 'x', owned_by: 'qwen' })).toBe('qwen')
+    })
+
     it('returns raw value when not in alias map', () => {
       const model: ProviderAwareModel = { id: 'test-model', owned_by: 'antigravity' }
       expect(resolveModelProvider(model)).toBe('antigravity')

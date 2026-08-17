@@ -115,6 +115,11 @@ export const PROVIDER_CONFIG: Record<string, ProviderConfigEntry> = {
     color: { bg: 'bg-violet-50 dark:bg-violet-950/20', text: 'text-violet-700 dark:text-violet-300', border: 'border-violet-200 dark:border-violet-800/40' },
     icon: 'deepseek',
   },
+  bailian: {
+    label: '百炼',
+    color: { bg: 'bg-fuchsia-50 dark:bg-fuchsia-950/20', text: 'text-fuchsia-700 dark:text-fuchsia-300', border: 'border-fuchsia-200 dark:border-fuchsia-800/40' },
+    icon: 'bailian',
+  },
   meta: {
     label: 'Meta',
     color: { bg: 'bg-sky-50 dark:bg-sky-950/20', text: 'text-sky-700 dark:text-sky-300', border: 'border-sky-200 dark:border-sky-800/40' },

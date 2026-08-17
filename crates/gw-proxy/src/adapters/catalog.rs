@@ -17,7 +17,7 @@ use gw_infra::Db;
 use gw_relay::endpoint::matrix::Provider;
 use gw_relay::endpoint::upstream::ChannelResolver;
 
-use crate::ports::{ChannelPolicy, ChannelPolicyStore, ModelCatalog, ModelEntry};
+use crate::ports::{ChannelPolicy, ChannelPolicyStore, ModelCatalog, ModelEntry, ModelReasoning, ModelReasoningEffort};
 
 /// Source of the per-account routing policy snapshot.
 #[derive(Debug, Clone)]
@@ -81,8 +81,13 @@ impl ModelCatalog for SqlModelCatalog {
         // One row per (channel_key, model_id) pair upstream, but the OpenAI
         // payload is keyed by model id alone; `DISTINCT ON` keeps the first
         // channel that offers each model instead of emitting duplicate ids.
-        let rows: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-            "SELECT DISTINCT ON (model_id) model_id, channel_key, created_at \
+        let rows: Vec<(
+            String,
+            String,
+            chrono::DateTime<chrono::Utc>,
+            Option<serde_json::Value>,
+        )> = sqlx::query_as(
+            "SELECT DISTINCT ON (model_id) model_id, channel_key, created_at, capabilities \
              FROM model_catalog_entries \
              WHERE visible = TRUE AND model_id <> $1 \
              ORDER BY model_id, channel_key",
@@ -93,10 +98,15 @@ impl ModelCatalog for SqlModelCatalog {
 
         Ok(rows
             .into_iter()
-            .map(|(model_id, channel_key, created_at)| ModelEntry {
-                id: model_id,
-                created: created_at.timestamp(),
-                owned_by: channel_key,
+            .map(|(model_id, channel_key, created_at, capabilities)| {
+                let mut entry = ModelEntry {
+                    id: model_id,
+                    created: created_at.timestamp(),
+                    owned_by: channel_key,
+                    ..ModelEntry::default()
+                };
+                apply_capabilities(&mut entry, capabilities.as_ref());
+                entry
             })
             .collect())
     }
@@ -135,6 +145,72 @@ impl ModelCatalog for SqlModelCatalog {
         }
         Ok(grouped)
     }
+}
+
+/// Copy catalog-owned capability fields onto a listing entry.
+///
+/// Unknown modality names are dropped. An empty reasoning list is treated as
+/// "this model has no thinking" rather than an empty selector.
+pub(crate) fn apply_capabilities(entry: &mut ModelEntry, raw: Option<&serde_json::Value>) {
+    let Some(value) = raw else {
+        return;
+    };
+    if let Some(n) = value.get("context_length").and_then(serde_json::Value::as_i64) {
+        if n > 0 {
+            entry.context_length = Some(n);
+        }
+    }
+    if let Some(n) = value.get("max_output_tokens").and_then(serde_json::Value::as_i64) {
+        if n > 0 {
+            entry.max_output_tokens = Some(n);
+        }
+    }
+    if let Some(arr) = value.get("input_modalities").and_then(serde_json::Value::as_array) {
+        entry.input_modalities = arr
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|m| *m == "text" || *m == "image")
+            .map(ToOwned::to_owned)
+            .collect();
+    }
+    let Some(reasoning) = value.get("reasoning") else {
+        return;
+    };
+    let Some(efforts) = reasoning.get("efforts").and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    let efforts: Vec<ModelReasoningEffort> = efforts
+        .iter()
+        .filter_map(|item| {
+            let id = item.get("id").and_then(serde_json::Value::as_str)?.trim();
+            if id.is_empty() {
+                return None;
+            }
+            let name = item
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(id);
+            Some(ModelReasoningEffort {
+                id: id.to_owned(),
+                name: name.to_owned(),
+            })
+        })
+        .collect();
+    if efforts.is_empty() {
+        return;
+    }
+    let default_effort = reasoning
+        .get("default_effort")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
+    entry.reasoning = Some(ModelReasoning {
+        efforts,
+        default_effort,
+    });
 }
 
 /// 哨兵行：面板把「上游模型列表 URL」也存进 `model_catalog_entries`，

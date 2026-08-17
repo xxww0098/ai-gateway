@@ -192,3 +192,84 @@ async fn l1_works_before_any_refresh_because_the_channel_map_is_static() {
         "没有显式映射时必须说不知道，由调用方落通配 executor，而不是在这里猜",
     );
 }
+
+#[test]
+fn vision_capabilities_keep_image_and_text_and_drop_unknown_modalities() {
+    let mut entry = ModelEntry::default();
+    apply_capabilities(
+        &mut entry,
+        Some(&serde_json::json!({
+            "context_length": 128000,
+            "max_output_tokens": 16384,
+            "input_modalities": ["text", "image", "audio"],
+            "reasoning": { "efforts": [] }
+        })),
+    );
+    assert_eq!(entry.input_modalities, ["text", "image"]);
+    assert!(
+        entry.reasoning.is_none(),
+        "an empty effort list means the model has no thinking"
+    );
+    assert_eq!(entry.context_length, Some(128000));
+    assert_eq!(entry.max_output_tokens, Some(16384));
+}
+
+#[test]
+fn text_only_capabilities_do_not_advertise_image() {
+    let mut entry = ModelEntry::default();
+    apply_capabilities(
+        &mut entry,
+        Some(&serde_json::json!({
+            "context_length": 8192,
+            "max_output_tokens": 2048,
+            "input_modalities": ["text"]
+        })),
+    );
+    assert_eq!(entry.input_modalities, ["text"]);
+    assert!(!entry.input_modalities.iter().any(|m| m == "image"));
+    assert!(entry.reasoning.is_none());
+}
+
+#[test]
+fn reasoning_is_copied_from_the_catalog_and_not_invented() {
+    let mut thinking = ModelEntry::default();
+    apply_capabilities(
+        &mut thinking,
+        Some(&serde_json::json!({
+            "reasoning": {
+                "efforts": [
+                    {"id": "low", "name": "Low"},
+                    {"id": "high", "name": "High"}
+                ],
+                "default_effort": "high"
+            }
+        })),
+    );
+    let reasoning = thinking.reasoning.expect("thinking model must expose efforts");
+    assert_eq!(
+        reasoning
+            .efforts
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>(),
+        ["low", "high"]
+    );
+    assert_eq!(reasoning.default_effort.as_deref(), Some("high"));
+
+    let mut plain = ModelEntry::default();
+    apply_capabilities(&mut plain, Some(&serde_json::json!({})));
+    assert!(plain.reasoning.is_none());
+}
+
+#[test]
+fn missing_capabilities_leave_limits_unset_instead_of_guessing() {
+    let mut entry = ModelEntry {
+        id: "plain".into(),
+        ..ModelEntry::default()
+    };
+    apply_capabilities(&mut entry, None);
+    assert_eq!(entry.context_length, None);
+    assert_eq!(entry.max_output_tokens, None);
+    assert!(entry.input_modalities.is_empty());
+    assert!(entry.reasoning.is_none());
+}

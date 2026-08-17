@@ -444,12 +444,34 @@ impl MetricsSink for DiscardMetrics {
 }
 
 /// One entry of the `GET /v1/models` catalogue.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ModelEntry {
     pub id: String,
     /// Unix seconds, as the OpenAI models payload expects.
     pub created: i64,
     pub owned_by: String,
+    /// Combined input+output context when the catalog recorded one.
+    pub context_length: Option<i64>,
+    /// Per-request output cap when the catalog recorded one.
+    pub max_output_tokens: Option<i64>,
+    /// Only `text` and `image` are accepted; unknown values are dropped.
+    pub input_modalities: Vec<String>,
+    /// Selectable reasoning efforts; absent when the model has no thinking.
+    pub reasoning: Option<ModelReasoning>,
+}
+
+/// Adapter-facing reasoning list copied from `model_catalog_entries.capabilities`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ModelReasoning {
+    pub efforts: Vec<ModelReasoningEffort>,
+    pub default_effort: Option<String>,
+}
+
+/// One opaque effort id the adapter may send back as `reasoning_effort`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelReasoningEffort {
+    pub id: String,
+    pub name: String,
 }
 
 /// Source of the model catalogue served by `GET /v1/models`.

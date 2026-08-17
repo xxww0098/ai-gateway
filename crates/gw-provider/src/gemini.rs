@@ -162,7 +162,7 @@ impl GeminiProvider {
                 "gemini model is required"
             )));
         }
-        let endpoint = Self::generate_content_endpoint(&req.query, base_url, &model, stream)?;
+        let endpoint = Self::generate_content_endpoint(&req.query, base_url, model, stream)?;
 
         let mut headers = HeaderMap::new();
         copy_outbound_headers(&mut headers, &req.headers);
@@ -273,7 +273,7 @@ impl Provider for GeminiProvider {
         req: ProviderRequest,
     ) -> Result<StreamResponse, ProviderError> {
         let (api_key, base_url) = self.resolve_credentials(Some(auth));
-        let model = requested_model(&req);
+        let model = requested_model(&req).to_owned();
         let response = self
             .build_request(&req, true, &api_key, &base_url)?
             .send()

@@ -48,6 +48,20 @@ fn openai_unusable_payloads_yield_none() {
     }
 }
 
+/// 模型回复里写的 `usage` 不能冒充顶层信封。
+///
+/// 守护的 bug：用字节搜索定位 `"usage"`，计费数字就被模型自己编的覆盖。
+#[test]
+fn usage_inside_content_is_not_the_envelope() {
+    let payload = br#"{
+        "choices":[{"message":{"content":"{\"usage\":{\"prompt_tokens\":99}}"}}],
+        "usage":{"prompt_tokens":3,"completion_tokens":1}
+    }"#;
+    let tokens = parse_openai_usage(payload).expect("top-level usage must win");
+    assert_eq!(tokens.input, Some(3));
+    assert_eq!(tokens.output, Some(1));
+}
+
 /// The o1 / o3 reasoning breakdown.
 #[test]
 fn openai_reasoning_breakdown_is_extracted() {

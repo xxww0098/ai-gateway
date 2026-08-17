@@ -304,3 +304,78 @@ fn accept_cannot_flip_the_decision_but_the_disagreement_is_reported() {
         "没有 Accept 头就没有分歧可言"
     );
 }
+
+
+/// 生产路径的顶层扫描必须与 serde 对照物逐字段一致。
+///
+/// 守护的 bug：扫描器漏掉一种合法写法（转义、重复键、空白、三种上限字段），
+/// 计费 peek 就和「唯一一次解析」的合同漂了。对照物是 cfg(test) 的
+/// `RawPeek`，生产代码不再走它。
+#[test]
+fn top_level_scan_agrees_with_serde_on_a_corpus() {
+    let corpus: &[&[u8]] = &[
+        b"{}",
+        b"   {  }  ",
+        br#"{"model":"m"}"#,
+        br#"{"model":" GPT-5 ","stream":true}"#,
+        br#"{"stream":false}"#,
+        br#"{"stream":true,"max_tokens":7}"#,
+        br#"{"max_completion_tokens":8}"#,
+        br#"{"max_output_tokens":0}"#,
+        br#"{"max_tokens":1,"max_output_tokens":9}"#,
+        br#"{"stream_options":null}"#,
+        br#"{"stream_options":{"include_usage":false}}"#,
+        br#"{"model":"outer","messages":[{"model":"nested","stream":true}]}"#,
+        br#"{"model":"a\tb"}"#,
+        b"not json",
+        b"",
+        br#"{"stream":"true"}"#,
+        br#"{"model":1}"#,
+        br#"{"max_tokens":-5}"#,
+    ];
+    for body in corpus {
+        let scanned = RequestSpec::parse(Surface::OpenAiCompletions, Some(body));
+        let oracle = match serde_json::from_slice::<super::RawPeek>(body) {
+            Ok(raw) => RequestSpec {
+                surface: Surface::OpenAiCompletions,
+                model: raw.model,
+                stream: raw.stream.unwrap_or(false),
+                max_tokens: raw
+                    .max_tokens
+                    .or(raw.max_completion_tokens)
+                    .or(raw.max_output_tokens),
+                stream_options_present: raw.stream_options.is_some(),
+                body_visible: true,
+            },
+            Err(_) => RequestSpec {
+                surface: Surface::OpenAiCompletions,
+                model: None,
+                stream: false,
+                max_tokens: None,
+                stream_options_present: false,
+                body_visible: false,
+            },
+        };
+        assert_eq!(
+            scanned,
+            oracle,
+            "scan drifted from serde on {}",
+            String::from_utf8_lossy(body)
+        );
+    }
+}
+
+
+/// 顶层数组不是请求对象。serde 会把 `[]` 当成「全是 default 的结构体」
+/// （位置反序列化 + 每个字段都有 `default`），生产路径不跟这个怪癖走：
+/// 看不见对象就 `body_visible = false`。转发不受影响（body 原样走）。
+#[test]
+fn a_json_array_is_not_a_visible_request_object() {
+    let spec = RequestSpec::parse(Surface::OpenAiCompletions, Some(b"[]"));
+    assert!(
+        !spec.body_visible,
+        "an array is not the object the gateway peeks"
+    );
+    assert!(spec.model.is_none());
+    assert!(!spec.stream);
+}

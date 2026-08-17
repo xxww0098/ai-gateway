@@ -165,9 +165,10 @@ pub async fn layer(State(state): State<ProxyState>, mut req: Request, next: Next
 
     match outcome {
         Ok(meta) => {
+            // AccessMetadata 只进 RelayCtx，hold 从那里取。再 insert 一份
+            // 是热路径上多一次 Clone（订阅配额那几个 String 也在里面）。
             req.extensions_mut()
-                .insert(RelayCtx::authenticated(meta.clone()));
-            req.extensions_mut().insert(meta);
+                .insert(RelayCtx::authenticated(meta));
             state.hold.clone().handle(req, next).await
         }
         Err(err) => err.into_response(),

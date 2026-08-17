@@ -15,6 +15,7 @@
 //!   "this one column was omitted" signal.
 
 use crate::types::UsageRecord;
+use gw_relay::endpoint::top_level_field;
 use serde::Deserialize;
 
 /// Provider-agnostic token tally extracted from an upstream response body.
@@ -115,11 +116,6 @@ fn trimmed_json(payload: &[u8]) -> Option<&[u8]> {
 // --- OpenAI -----------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct OpenAiUsageEnvelope {
-    usage: Option<OpenAiUsage>,
-}
-
-#[derive(Debug, Deserialize)]
 struct OpenAiUsage {
     prompt_tokens: Option<i64>,
     completion_tokens: Option<i64>,
@@ -151,8 +147,10 @@ struct OpenAiCompletionTokensDetails {
 #[must_use]
 pub fn parse_openai_usage(payload: &[u8]) -> Option<UsageTokens> {
     let data = trimmed_json(payload)?;
-    let env: OpenAiUsageEnvelope = serde_json::from_slice(data).ok()?;
-    let usage = env.usage?;
+    // 只把顶层 `usage` 对象交给 serde，choices/content 那些长字符串
+    // 不再进反序列化器。嵌套里的 "usage" 不会被顶层扫描认走。
+    let usage_bytes = top_level_field(data, "usage")?;
+    let usage: OpenAiUsage = serde_json::from_slice(usage_bytes).ok()?;
     let tokens = UsageTokens {
         input: usage.prompt_tokens,
         output: usage.completion_tokens,
@@ -233,12 +231,6 @@ pub fn parse_claude_usage(payload: &[u8]) -> Option<UsageTokens> {
 // --- Gemini / Vertex --------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct GeminiUsageEnvelope {
-    #[serde(rename = "usageMetadata")]
-    usage_metadata: Option<GeminiUsageMetadata>,
-}
-
-#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiUsageMetadata {
     prompt_token_count: Option<i64>,
@@ -249,8 +241,8 @@ struct GeminiUsageMetadata {
 
 fn parse_gemini_shaped_usage(payload: &[u8]) -> Option<UsageTokens> {
     let data = trimmed_json(payload)?;
-    let env: GeminiUsageEnvelope = serde_json::from_slice(data).ok()?;
-    let meta = env.usage_metadata?;
+    let meta_bytes = top_level_field(data, "usageMetadata")?;
+    let meta: GeminiUsageMetadata = serde_json::from_slice(meta_bytes).ok()?;
     let tokens = UsageTokens {
         input: meta.prompt_token_count,
         output: meta.candidates_token_count,

@@ -38,6 +38,7 @@
 //! 前端冻结，改不了。这是已知且已接受的代价。
 
 pub mod include_usage;
+pub mod json_peek;
 pub mod matrix;
 pub mod spec;
 pub mod upstream;
@@ -46,6 +47,7 @@ pub use include_usage::{IncludeUsagePolicy, splice_include_usage};
 pub use matrix::{
     Cell, Provider, RejectReason, Route, cell, reject_body, route, translator_for, upstream_dialect,
 };
+pub use json_peek::top_level_field;
 pub use spec::{RequestSpec, SurfaceError, accept_conflicts_with_body, validate};
 pub use upstream::{ChannelResolver, InMemoryChannelResolver, Selection, SelectionLevel, select};
 

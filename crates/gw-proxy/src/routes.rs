@@ -274,11 +274,11 @@ impl Dispatcher {
 async fn dispatch(
     state: &ProxyState,
     surface: Surface,
-    model: String,
     mut inbound: Inbound,
-    stream: bool,
-    billing: Option<BillingHandle>,
 ) -> Response {
+    let stream = inbound.stream;
+    let billing = inbound.billing.clone();
+    let model = std::mem::take(&mut inbound.model);
     let dispatcher = &state.dispatch;
     let selection = select_upstreams(surface, &model, dispatcher.resolver.as_deref());
     if selection.candidates.is_empty() {
@@ -298,7 +298,7 @@ async fn dispatch(
     // `codex/` 明确是给网关看的 —— 把它原样转给上游只会拿一个「模型不存在」。
     let (model, body) = match &selection.upstream_model {
         Some(stripped) => (stripped.clone(), rewrite_model(&inbound.body, stripped)),
-        None => (model, inbound.body.clone()),
+        None => (model, std::mem::take(&mut inbound.body)),
     };
 
     // 15 格显式表：直通 / 转义 / 400。挑第一个不是 `Reject` 的候选；
@@ -486,7 +486,7 @@ fn request_metadata(
     surface: Surface,
     billing: Option<&BillingHandle>,
 ) -> std::collections::HashMap<String, String> {
-    let mut meta = std::collections::HashMap::new();
+    let mut meta = std::collections::HashMap::with_capacity(3);
     meta.insert(
         gw_provider::common::SURFACE_PATH_METADATA_KEY.to_owned(),
         surface.path().to_owned(),
@@ -802,18 +802,17 @@ struct Inbound {
 /// 下一个人如果「顺手」在这里加一句 `headers.remove("x-api-key")`，
 /// Anthropic 直连会立刻全线 401。
 async fn inbound(req: Request, surface: Surface) -> Result<Inbound, Response> {
-    let billing = req.extensions().get::<BillingHandle>().cloned();
-    let relay = req.extensions().get::<RelayCtx>().cloned();
-    let peeked = req.extensions().get::<PeekedBody>().cloned();
-    let spec = req.extensions().get::<RequestSpec>().cloned();
-    let headers = req.headers().clone();
-    let query = parse_query(req.uri().query().unwrap_or_default());
+    let (mut parts, body) = req.into_parts();
+    let billing = parts.extensions.remove::<BillingHandle>();
+    let relay = parts.extensions.remove::<RelayCtx>();
+    let peeked = parts.extensions.remove::<PeekedBody>();
+    let spec = parts.extensions.remove::<RequestSpec>();
+    let headers = parts.headers;
+    let query = parse_query(parts.uri.query().unwrap_or_default());
 
     let body = match peeked {
         Some(PeekedBody(bytes)) => bytes,
-        None => match axum::body::to_bytes(req.into_body(), crate::hold::HOLD_REQUEST_BODY_LIMIT)
-            .await
-        {
+        None => match axum::body::to_bytes(body, crate::hold::HOLD_REQUEST_BODY_LIMIT).await {
             Ok(bytes) => bytes,
             Err(_) => return Err(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
         },
@@ -852,10 +851,7 @@ macro_rules! endpoint {
         $(#[$meta])*
         pub async fn $name(State(state): State<ProxyState>, req: Request) -> Response {
             match inbound(req, $surface).await {
-                Ok(i) => {
-                    let (model, stream, billing) = (i.model.clone(), i.stream, i.billing.clone());
-                    dispatch(&state, $surface, model, i, stream, billing).await
-                }
+                Ok(i) => dispatch(&state, $surface, i).await,
                 Err(response) => response,
             }
         }

@@ -38,12 +38,14 @@ cd frontend && npm ci && npm run dev
 
 ## 调用中转（用户视角）
 
-1. 在面板注册并创建 API Key（`cpa-` 前缀）。
+面板接入指南：打开 `/docs`。
+
+1. 在面板注册并创建 API Key（`agw-` 前缀）。
 2. 像调用 OpenAI 一样请求 `/v1/*`，用该 Key 作 Bearer：
 
 ```bash
 curl https://<your-host>/v1/chat/completions \
-  -H "Authorization: Bearer cpa-xxxxxxxx..." \
+  -H "Authorization: Bearer agw-xxxxxxxx..." \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
 ```

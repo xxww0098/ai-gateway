@@ -5,6 +5,7 @@ import { ConfirmModalProvider } from '@/shared/confirm-modal'
 import { ErrorBoundary } from '@/shared/components/ErrorBoundary'
 import { adminRoutes, adminBillingTab, adminCommerceTab } from '@/shared/routes/admin'
 import { userRoutes } from '@/shared/routes/user'
+import { docsRoutes } from '@/shared/routes/docs'
 import { AuthLayout } from './pages/public/AuthLayout'
 import UserLayout from './pages/user/UserLayout'
 
@@ -15,6 +16,7 @@ function RedirectWithSearch({ to }: { to: string }) {
 }
 
 const Home = lazy(() => import('./pages/public/HomePage'))
+const Docs = lazy(() => import('./pages/docs/DocsPage'))
 const Login = lazy(() => import('./pages/public/LoginPage'))
 const Register = lazy(() => import('./pages/public/RegisterPage'))
 const Dashboard = lazy(() => import('./pages/user/dashboard/DashboardPage'))
@@ -60,6 +62,9 @@ function App() {
             <Route path="/login" element={eb(<Login />)} />
             <Route path="/register" element={eb(<Register />)} />
           </Route>
+
+          <Route path={docsRoutes.root} element={eb(<Docs />)} />
+          <Route path={`${docsRoutes.root}/:slug`} element={eb(<Docs />)} />
 
           <Route element={<UserLayout />}>
             {/* ── User routes ── */}

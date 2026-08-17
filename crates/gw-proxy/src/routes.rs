@@ -39,7 +39,7 @@ use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use gw_authcore::{AuthRecord, AuthStore};
-use gw_provider::types::{Provider, ProviderError, ProviderRequest, ProviderResponse};
+use gw_provider::types::{Provider, ProviderError, ProviderRequest};
 use gw_relay::Surface;
 use gw_relay::endpoint::spec::RequestSpec;
 use gw_relay::endpoint::upstream::ChannelResolver;
@@ -51,7 +51,7 @@ use crate::hold::PeekedBody;
 use crate::kernel::{Phase, RelayCtx};
 use crate::ports::{CircuitBreaker, ModelCatalog};
 use crate::settlectx::BillingHandle;
-use crate::usage::{Settlement, UsageOutcome};
+use crate::usage::Settlement;
 
 mod routing;
 mod stream;
@@ -59,7 +59,7 @@ mod stream;
 pub(crate) use routing::{dialect_error, partition_routable, rewrite_model, select_upstreams};
 #[cfg(test)]
 pub(crate) use stream::is_hop_by_hop;
-use stream::{relay, stream_response};
+use stream::{schedule_release, stream_response, unary_response};
 
 /// How many upstream accounts one client request may burn through.
 /// Bounded so a fully-broken pool fails fast instead of walking every account.
@@ -281,8 +281,7 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
             state,
             billing.as_ref(),
             DispatchError::UnknownModel(model.clone()),
-        )
-        .await;
+        );
     }
 
     // L1 剥掉了渠道前缀时，**上游收到的模型名也必须跟着变**。
@@ -303,7 +302,7 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
         && let Some((status, body)) = reject
     {
         // 400 **不计费** —— 走释放路径而不是结算。
-        finish_billing_failed(state, billing.as_ref()).await;
+        schedule_release(state, billing.as_ref());
         return dialect_error(status, body);
     }
 
@@ -373,7 +372,7 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
                     Err(err) => {
                         record_failure(state, provider_name, &auth.id).await;
                         if !is_retryable(&err) {
-                            return finish_error(state, billing.as_ref(), map_error(err)).await;
+                            return finish_error(state, billing.as_ref(), map_error(err));
                         }
                         last_error = Some(map_error(err));
                     }
@@ -404,13 +403,12 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
                             auth.id,
                             provider_name,
                             started,
-                        )
-                        .await;
+                        );
                     }
                     Err(err) => {
                         record_failure(state, provider_name, &auth.id).await;
                         if !is_retryable(&err) {
-                            return finish_error(state, billing.as_ref(), map_error(err)).await;
+                            return finish_error(state, billing.as_ref(), map_error(err));
                         }
                         last_error = Some(map_error(err));
                     }
@@ -420,20 +418,15 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
     }
 
     let err = last_error.unwrap_or_else(|| DispatchError::NoUpstream(model));
-    finish_error(state, billing.as_ref(), err).await
+    finish_error(state, billing.as_ref(), err)
 }
 
 /// 终止一个还没到上游就被网关拒掉的请求的计费：**释放，不结算**。
-async fn finish_billing_failed(state: &ProxyState, billing: Option<&BillingHandle>) {
-    if let Some(billing) = billing
-        && billing.claim_finalize()
-    {
-        state
-            .dispatch
-            .settlement
-            .settle(&billing.ctx, UsageOutcome::failed())
-            .await;
-    }
+///
+/// 账本写入走 [`schedule_release`]（`StreamSettler` → `ProxyState::drain`），
+/// 不挡错误响应回给客户端。
+fn finish_billing_failed(state: &ProxyState, billing: Option<&BillingHandle>) {
+    schedule_release(state, billing);
 }
 
 /// Whether a failure is worth trying on a different account.
@@ -522,42 +515,13 @@ async fn record_failure(state: &ProxyState, provider: &str, auth_id: &str) {
     }
 }
 
-/// Settles a completed non-streaming request and relays the upstream response.
-async fn unary_response(
-    state: &ProxyState,
-    response: ProviderResponse,
-    billing: Option<BillingHandle>,
-    auth_id: String,
-    provider: &str,
-    started: Instant,
-) -> Response {
-    let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::OK);
-    if let Some(billing) = billing
-        && billing.claim_finalize()
-    {
-        let outcome = UsageOutcome {
-            usage: response.usage,
-            failed: !status.is_success(),
-            auth_id,
-            provider: provider.to_owned(),
-            duration_ms: started.elapsed().as_millis() as i64,
-        };
-        state
-            .dispatch
-            .settlement
-            .settle(&billing.ctx, outcome)
-            .await;
-    }
-    relay(status, response.headers, response.body)
-}
-
 /// Terminates billing for a request that never reached an upstream.
-async fn finish_error(
+fn finish_error(
     state: &ProxyState,
     billing: Option<&BillingHandle>,
     err: DispatchError,
 ) -> Response {
-    finish_billing_failed(state, billing).await;
+    finish_billing_failed(state, billing);
     err.into_response()
 }
 

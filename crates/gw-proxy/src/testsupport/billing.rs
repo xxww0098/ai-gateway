@@ -228,6 +228,9 @@ pub(crate) struct FakeUsageStore {
     pub(crate) shortfall: Mutex<f64>,
     pub(crate) balance_after: Mutex<f64>,
     pub(crate) balance_before: Mutex<f64>,
+    /// When set, the next `commit_settlement` waits until the sender fires.
+    /// Tests use this to prove a unary HTTP response is not blocked on ledger I/O.
+    pub(crate) commit_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 impl FakeUsageStore {
@@ -238,11 +241,22 @@ impl FakeUsageStore {
     pub(crate) fn settled_costs(&self) -> Vec<f64> {
         self.commits.lock().iter().map(|c| c.actual_cost).collect()
     }
+
+    /// Park the next settlement commit until the returned sender is fired.
+    pub(crate) fn hold_commits(&self) -> tokio::sync::oneshot::Sender<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *self.commit_gate.lock() = Some(rx);
+        tx
+    }
 }
 
 #[async_trait]
 impl UsageStore for FakeUsageStore {
     async fn commit_settlement(&self, commit: &SettlementCommit) -> anyhow::Result<SettleReceipt> {
+        let gate = self.commit_gate.lock().take();
+        if let Some(rx) = gate {
+            let _ = rx.await;
+        }
         if *self.commit_fails.lock() {
             anyhow::bail!("settle transaction failed");
         }

@@ -20,8 +20,8 @@ pub(crate) use billing::{
     FakeCalculator, FakeLedger, FakeQuotaStore, FakeScanner, FakeUsageStore, LedgerCall,
 };
 pub(crate) use harness::{
-    Harness, TEST_API_KEY, TEST_USER_ID, anonymous_request, chat_body, send, signed_get,
-    signed_request,
+    Harness, TEST_API_KEY, TEST_USER_ID, anonymous_request, chat_body, send, send_settled,
+    signed_get, signed_request,
 };
 pub(crate) use identity::{FakeCrypto, FakeDirectory};
 pub(crate) use infra::{

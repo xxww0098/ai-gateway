@@ -113,10 +113,12 @@ pub struct ProxyState {
     /// Tracker for detached settlement tasks.
     ///
     /// **This is load-bearing, not bookkeeping.** `StreamSettler::drop` cannot
-    /// `.await`, so a client that hangs up mid-stream is settled from a
-    /// detached task. A bare `tokio::spawn` dies silently the moment the
-    /// runtime is dropped — `serve()` returns, `main` ends, and every in-flight
-    /// `Settle` is aborted with its hold left to expire on TTL. That is free
+    /// `.await`, so a client that hangs up mid-stream — and every unary
+    /// settle, which uses the same drop path so the HTTP response is not
+    /// blocked on ledger I/O — is settled from a detached task. A bare
+    /// `tokio::spawn` dies silently the moment the runtime is dropped —
+    /// `serve()` returns, `main` ends, and every in-flight `Settle` is
+    /// aborted with its hold left to expire on TTL. That is free
     /// upstream output, i.e. a violation of the billing invariants in
     /// `AGENTS.md`.
     ///

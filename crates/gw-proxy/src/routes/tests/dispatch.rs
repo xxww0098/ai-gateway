@@ -148,8 +148,8 @@ async fn a_cell_the_gateway_cannot_serve_is_a_gateway_400_not_an_upstream_one() 
         Some(gemini_only_resolver()),
     );
 
-    let (status, body) = send(
-        harness.router(),
+    let (status, body) = send_settled(
+        &harness,
         signed_request("/v1/chat/completions", chat_body("house-model")),
     )
     .await;
@@ -177,8 +177,8 @@ async fn a_rejected_cell_releases_the_reservation_instead_of_settling_it() {
         vec![auth_record("acct-1", "gemini")],
         Some(gemini_only_resolver()),
     );
-    send(
-        harness.router(),
+    send_settled(
+        &harness,
         signed_request("/v1/chat/completions", chat_body("house-model")),
     )
     .await;
@@ -204,8 +204,8 @@ async fn a_passthrough_cell_still_reaches_its_upstream() {
     let harness = Harness::build();
     harness.provider.queue(Ok(ok_response(10, 20)));
 
-    let (status, _) = send(
-        harness.router(),
+    let (status, _) = send_settled(
+        &harness,
         signed_request("/v1/chat/completions", chat_body("gpt-4o")),
     )
     .await;
@@ -232,8 +232,8 @@ async fn the_credential_table_is_not_reloaded_once_per_request() {
     const REQUESTS: usize = 12;
     for _ in 0..REQUESTS {
         harness.provider.queue(Ok(ok_response(1, 1)));
-        send(
-            harness.router(),
+        send_settled(
+            &harness,
             signed_request("/v1/chat/completions", chat_body("gpt-4o")),
         )
         .await;
@@ -292,8 +292,8 @@ async fn authentication_runs_before_billing_so_an_anonymous_call_costs_nothing()
     // Blocker B1: with the layers the other way round every /v1 request aborts
     // with a pre-auth 401 and the billing hot path never executes.
     let harness = Harness::build();
-    let (status, _) = send(
-        harness.router(),
+    let (status, _) = send_settled(
+        &harness,
         anonymous_request("/v1/chat/completions", chat_body("gpt-4o")),
     )
     .await;
@@ -315,8 +315,8 @@ async fn an_authenticated_call_reserves_dispatches_and_settles_in_that_order() {
     let harness = Harness::build();
     harness.provider.queue(Ok(ok_response(100, 250)));
 
-    let (status, _) = send(
-        harness.router(),
+    let (status, _) = send_settled(
+        &harness,
         signed_request("/v1/chat/completions", chat_body("gpt-4o")),
     )
     .await;
@@ -338,8 +338,8 @@ async fn an_authenticated_call_reserves_dispatches_and_settles_in_that_order() {
 async fn the_reported_usage_is_what_gets_billed() {
     let harness = Harness::build();
     harness.provider.queue(Ok(ok_response(100, 250)));
-    send(
-        harness.router(),
+    send_settled(
+        &harness,
         signed_request("/v1/chat/completions", chat_body("gpt-4o")),
     )
     .await;
@@ -354,8 +354,8 @@ async fn the_reported_usage_is_what_gets_billed() {
 async fn an_upstream_without_a_usage_envelope_falls_back_instead_of_billing_zero() {
     let harness = Harness::build();
     harness.provider.queue(Ok(ok_response_without_usage()));
-    send(
-        harness.router(),
+    send_settled(
+        &harness,
         signed_request("/v1/chat/completions", chat_body("gpt-4o")),
     )
     .await;
@@ -381,8 +381,8 @@ async fn a_failing_account_is_retried_on_a_different_one_and_billed_once() {
     }));
     harness.provider.queue(Ok(ok_response(10, 20)));
 
-    let (status, _) = send(
-        harness.router(),
+    let (status, _) = send_settled(
+        &harness,
         signed_request("/v1/chat/completions", chat_body("gpt-4o")),
     )
     .await;
@@ -413,8 +413,8 @@ async fn a_client_error_is_surfaced_immediately_instead_of_burning_the_pool() {
         body: r#"{"error":"bad request"}"#.to_owned(),
     }));
 
-    let (status, _) = send(
-        harness.router(),
+    let (status, _) = send_settled(
+        &harness,
         signed_request("/v1/chat/completions", chat_body("gpt-4o")),
     )
     .await;
@@ -431,8 +431,8 @@ async fn a_failed_dispatch_releases_the_reservation() {
         body: String::new(),
     }));
 
-    send(
-        harness.router(),
+    send_settled(
+        &harness,
         signed_request("/v1/chat/completions", chat_body("gpt-4o")),
     )
     .await;
@@ -451,8 +451,8 @@ async fn a_failed_dispatch_releases_the_reservation() {
 #[tokio::test]
 async fn an_empty_credential_pool_reports_unavailability_and_charges_nothing() {
     let harness = Harness::build_with(vec![]);
-    let (status, _) = send(
-        harness.router(),
+    let (status, _) = send_settled(
+        &harness,
         signed_request("/v1/chat/completions", chat_body("gpt-4o")),
     )
     .await;
@@ -478,8 +478,8 @@ async fn an_account_that_keeps_failing_across_requests_is_benched_from_the_pool(
             status: 503,
             body: String::new(),
         }));
-        let (status, _) = send(
-            harness.router(),
+        let (status, _) = send_settled(
+            &harness,
             signed_request("/v1/chat/completions", chat_body("gpt-4o")),
         )
         .await;
@@ -516,7 +516,7 @@ async fn the_v1_surface_keeps_reading_authorization_and_nothing_else() {
         .body(axum::body::Body::from(chat_body("gpt-4o").to_string()))
         .expect("request builds");
 
-    let (status, _) = send(harness.router(), request).await;
+    let (status, _) = send_settled(&harness, request).await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(harness.ledger.calls().is_empty());
@@ -541,7 +541,7 @@ async fn an_anthropic_key_header_still_reaches_the_claude_upstream_on_v1() {
         ))
         .expect("request builds");
 
-    let (status, _) = send(harness.router(), request).await;
+    let (status, _) = send_settled(&harness, request).await;
     assert_eq!(status, StatusCode::OK);
 
     let forwarded = harness.claude.only_request();
@@ -568,7 +568,7 @@ async fn the_six_converged_routes_are_gone_not_merely_unbilled() {
             .header("authorization", format!("Bearer {TEST_API_KEY}"))
             .body(axum::body::Body::from(chat_body("gpt-4o").to_string()))
             .expect("request builds");
-        send(harness.router(), request)
+        send_settled(&harness, request)
     };
 
     for (method, path) in [
@@ -609,7 +609,7 @@ async fn the_six_converged_routes_are_gone_not_merely_unbilled() {
 #[tokio::test]
 async fn listing_models_costs_the_tenant_nothing() {
     let harness = Harness::build();
-    let (status, body) = send(harness.router(), signed_get("/v1/models")).await;
+    let (status, body) = send_settled(&harness, signed_get("/v1/models")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["object"].as_str(), Some("list"));
     let listed: Vec<&str> = body["data"]
@@ -652,7 +652,7 @@ async fn counting_tokens_costs_the_tenant_nothing() {
         ))
         .expect("request builds");
 
-    let (status, _) = send(harness.router(), request).await;
+    let (status, _) = send_settled(&harness, request).await;
     assert_eq!(status, StatusCode::OK);
 
     // Anthropic 自己对 token 计数收 0；它的回复是裸 `{"input_tokens": N}`，
@@ -680,7 +680,7 @@ async fn the_endpoints_moved_out_of_billing_are_still_behind_authentication() {
                 chat_body("claude-sonnet-5").to_string(),
             ))
             .expect("request builds");
-        let (status, _) = send(harness.router(), request).await;
+        let (status, _) = send_settled(&harness, request).await;
         assert_eq!(
             status,
             StatusCode::UNAUTHORIZED,
@@ -750,8 +750,8 @@ async fn an_error_status_relayed_in_band_fails_over_like_a_raised_one() {
     }));
     harness.provider.queue(Ok(ok_response(10, 20)));
 
-    let (status, _) = send(
-        harness.router(),
+    let (status, _) = send_settled(
+        &harness,
         signed_request("/v1/chat/completions", chat_body("gpt-4o")),
     )
     .await;

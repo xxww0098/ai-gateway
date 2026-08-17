@@ -49,3 +49,4 @@ declare const process: { env: Record<string, string | undefined>, exit(code: num
 declare module "node:fs/promises" { export function mkdir(path: string, opts?: { recursive?: boolean }): Promise<void>; export function readFile(path: string, enc: string): Promise<string>; export function writeFile(path: string, data: string): Promise<void> }
 declare module "node:path" { export function dirname(p: string): string; export function join(...p: string[]): string }
 declare module "node:os" { export function homedir(): string }
+declare class URL { constructor(input: string); protocol: string }

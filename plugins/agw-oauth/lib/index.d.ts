@@ -11,6 +11,7 @@ export type { Config as ConfigType } from './config.js';
 export { PROVIDER, parseModelsPayload, parseGatewayModel, toResolvedModel } from './catalog.js';
 export { startDevice, pollDevice } from './oauth.js';
 export { AgwAdapter } from './adapter.js';
+export { handleHttp } from './http.js';
 export declare function apply(ctx: Context, config: {
     origin: string;
 }): void;

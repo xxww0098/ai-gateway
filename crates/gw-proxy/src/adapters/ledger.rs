@@ -10,7 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use gw_ledger::{Ledger, LedgerError};
 
-use crate::ports::{BillingError, BillingLedger, Id};
+use crate::ports::{BillingError, BillingLedger, HoldAdmit, Id};
 use crate::reconcile::{StaleHold, StaleHoldScanner};
 
 /// The production ledger, shared with the panel's billing handlers.
@@ -109,6 +109,43 @@ impl BillingLedger for SharedLedger {
 
     async fn available_balance(&self, user_id: Id) -> Result<f64, BillingError> {
         self.0.get_balance(user_id).await.map_err(map_error)
+    }
+
+    async fn hold_gated(
+        &self,
+        user_id: Id,
+        amount: f64,
+        min_available: f64,
+        request_id: &str,
+        ttl: Duration,
+    ) -> Result<HoldAdmit, BillingError> {
+        match self
+            .0
+            .hold_with_floor(user_id, amount, min_available, request_id, ttl)
+            .await
+        {
+            Ok(gw_ledger::HoldOutcome::Reserved) => Ok(HoldAdmit::Reserved),
+            Ok(gw_ledger::HoldOutcome::Insufficient { available }) => {
+                Ok(HoldAdmit::Insufficient { available })
+            }
+            // Redis-less + broke: the old get_balance path quoted PG as 0 and
+            // returned a structured 402 without calling hold. Keep that shape.
+            Err(LedgerError::RedisNotConfigured) => {
+                let available = self.0.get_balance(user_id).await.unwrap_or(0.0);
+                if available < min_available {
+                    Ok(HoldAdmit::Insufficient { available })
+                } else {
+                    Err(map_error(LedgerError::RedisNotConfigured))
+                }
+            }
+            // Fail closed the way `available.unwrap_or(0.0)` used to: a
+            // missing user or a Redis blip on the peek must not become a
+            // way to spend.
+            Err(LedgerError::UserNotFound) | Err(LedgerError::Redis(_)) => {
+                Ok(HoldAdmit::Insufficient { available: 0.0 })
+            }
+            Err(err) => Err(map_error(err)),
+        }
     }
 }
 

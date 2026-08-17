@@ -459,6 +459,103 @@ async fn an_underfunded_tenant_is_refused_before_a_hold_is_created() {
     assert!(body["required_amount"].as_f64().unwrap_or(0.0) > 0.0);
 }
 
+/// The upper-bound gate is stricter than the reserved amount. A tenant who
+/// can cover the hold but not `max(hold, EstimateWithMaxTokens, Estimate
+/// (stream))` must still be refused, and that refusal must not create a
+/// reservation (otherwise the next request sees a phantom hold).
+#[tokio::test]
+async fn covering_the_hold_but_not_the_upper_bound_is_refused_without_reserving() {
+    let harness = Harness::build();
+    let body = chat_body("gpt-4o");
+    let peek = billing_peek(body.to_string().as_bytes());
+    let hold_amount = harness.calc.estimate_with_tokens(
+        &peek.model,
+        peek.input_tokens,
+        peek.max_tokens,
+        peek.stream,
+        1.0,
+    );
+    let upper_bound = preflight_upper_bound(
+        harness.calc.as_ref(),
+        &peek.model,
+        peek.max_tokens,
+        peek.stream,
+        1.0,
+        hold_amount,
+    );
+    assert!(
+        hold_amount < upper_bound,
+        "this fixture needs a gap between the reservation and the gate",
+    );
+    let mid = (hold_amount + upper_bound) / 2.0;
+    *harness.ledger.balance.lock() = mid;
+
+    let (status, body) = send(
+        harness.stub_router(StatusCode::OK),
+        signed_request("/v1/chat/completions", chat_body("gpt-4o")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+    assert_eq!(body["error"].as_str(), Some("insufficient_balance"));
+    assert!(
+        harness.ledger.calls().is_empty(),
+        "a floor refusal must not leave a hold: {calls:?}",
+        calls = harness.ledger.calls(),
+    );
+    let quoted = body["current_balance"].as_f64().expect("current_balance");
+    let required = body["required_amount"].as_f64().expect("required_amount");
+    assert!(
+        quoted < required,
+        "the 402 must quote a gap, got {quoted} vs {required}",
+    );
+}
+
+/// A funded request still reserves exactly the hold (not the upper bound)
+/// and a downstream failure still releases rather than settling.
+#[tokio::test]
+async fn settle_and_release_still_match_the_reservation() {
+    let ok = Harness::build();
+    send(
+        ok.stub_router(StatusCode::OK),
+        signed_request("/v1/chat/completions", chat_body("gpt-4o")),
+    )
+    .await;
+    let reserved = match ok.ledger.calls().first() {
+        Some(LedgerCall::Hold { amount, .. }) => *amount,
+        other => panic!("expected a hold, got {other:?}"),
+    };
+    assert!(reserved > 0.0);
+    assert_eq!(ok.usage_store.settled_costs().len(), 1);
+    assert!(
+        !ok.ledger
+            .calls()
+            .iter()
+            .any(|c| matches!(c, LedgerCall::Release { .. })),
+        "a 2xx must settle, not release",
+    );
+
+    let fail = Harness::build();
+    send(
+        fail.stub_router(StatusCode::BAD_GATEWAY),
+        signed_request("/v1/chat/completions", chat_body("gpt-4o")),
+    )
+    .await;
+    assert!(
+        fail.ledger
+            .calls()
+            .iter()
+            .any(|c| matches!(c, LedgerCall::Hold { .. })),
+    );
+    assert!(
+        fail.ledger
+            .calls()
+            .iter()
+            .any(|c| matches!(c, LedgerCall::Release { .. })),
+        "a non-2xx must give the reservation back",
+    );
+    assert!(fail.usage_store.settled_costs().is_empty());
+}
+
 #[tokio::test]
 async fn a_rate_limited_tenant_never_reaches_the_ledger() {
     let harness = Harness::build();

@@ -203,11 +203,20 @@ impl StreamUsageProbe {
 }
 
 /// 见 [`USAGE_MARKER`]。
+///
+/// 火焰图上 `windows().any()` 占到了流式路径叶子的几个点：每个 delta 行都
+/// 要建一个 Windows 迭代器。先找 `u` 再比对后四个字节，语义不变，热路径
+/// 少一层 iterator 状态机。
 fn carries_usage(line: &[u8]) -> bool {
-    line.len() >= USAGE_MARKER.len()
-        && line
-            .windows(USAGE_MARKER.len())
-            .any(|window| window == USAGE_MARKER)
+    let mut rest = line;
+    while let Some(pos) = rest.iter().position(|&b| b == b'u') {
+        rest = &rest[pos..];
+        if rest.starts_with(USAGE_MARKER) {
+            return true;
+        }
+        rest = &rest[1..];
+    }
+    false
 }
 
 #[cfg(test)]

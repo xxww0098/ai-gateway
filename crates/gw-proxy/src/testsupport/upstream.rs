@@ -68,6 +68,7 @@ pub(crate) struct FakeProvider {
     pub(crate) name: &'static str,
     pub(crate) outcomes: Mutex<Vec<Result<ProviderResponse, ProviderError>>>,
     pub(crate) stream_chunks: Mutex<Vec<StreamChunk>>,
+    pub(crate) stream_headers: Mutex<http::HeaderMap>,
     pub(crate) calls: AtomicUsize,
     pub(crate) seen_auth_ids: Mutex<Vec<String>>,
     /// Every request as the dispatcher handed it over. The Gemini dialect
@@ -83,6 +84,7 @@ impl FakeProvider {
             name,
             outcomes: Mutex::new(Vec::new()),
             stream_chunks: Mutex::new(Vec::new()),
+            stream_headers: Mutex::new(http::HeaderMap::new()),
             calls: AtomicUsize::new(0),
             seen_auth_ids: Mutex::new(Vec::new()),
             seen_requests: Mutex::new(Vec::new()),
@@ -181,9 +183,10 @@ impl Provider for FakeProvider {
             }
         }
         let chunks = self.stream_chunks.lock().clone();
+        let headers = self.stream_headers.lock().clone();
         Ok(StreamResponse {
             status: 200,
-            headers: http::HeaderMap::new(),
+            headers,
             chunks: Box::pin(futures_util::stream::iter(chunks)),
         })
     }

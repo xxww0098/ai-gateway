@@ -674,7 +674,7 @@ pub async fn layer(State(state): State<ProxyState>, req: Request, next: Next) ->
 ///
 /// 此前不敢改的理由是「Go parity：改了会漂移成没人能与移植 bug 区分的差异」。
 /// **这个理由已经被证伪**：`docs/relay-surface-plan.md` 证据 C 显示 Go 侧 149 条
-/// 路由里 `/v1` 与 `/v1beta` 的匹配数为 **0** —— 整个 `/v1` 面来自 CPA SDK 的
+/// 路由里 `/v1` 与 `/v1beta` 的匹配数为 **0** —— 整个 `/v1` 面来自先前 SDK 的
 /// Builder，根本不在 Go 权威参照内，不存在 A/B 对账时被误判的风险。
 ///
 /// # 这改的是「计费范围」，不是「计费语义」

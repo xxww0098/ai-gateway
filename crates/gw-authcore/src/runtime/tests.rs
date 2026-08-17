@@ -65,7 +65,7 @@ fn every_seeded_credential_is_runtime_only_active_and_attributed() {
         assert_eq!(auth.attribute(SOURCE_ATTRIBUTE), Some(RUNTIME_SOURCE));
         assert_eq!(auth.status, AuthStatus::Active);
         assert!(auth.is_usable());
-        assert!(auth.id.starts_with("cpa-gateway-"));
+        assert!(auth.id.starts_with("ai-gateway-"));
         assert!(!auth.label.is_empty());
     }
 }
@@ -329,28 +329,28 @@ fn record(id: &str, label: &str) -> AuthRecord {
 #[tokio::test]
 async fn config_credentials_survive_every_reload() {
     let persisted = MemoryStore::with(vec![record("db-1", "from database")]);
-    let store = RuntimeAuthStore::new(persisted, vec![record("cpa-gateway-claude", "from config")]);
+    let store = RuntimeAuthStore::new(persisted, vec![record("ai-gateway-claude", "from config")]);
 
     for _ in 0..3 {
         let listed = store.list().await.expect("listing succeeds");
 
         assert_eq!(listed.len(), 2, "the manager rebuilds its map from list()");
-        assert!(listed.iter().any(|r| r.id == "cpa-gateway-claude"));
+        assert!(listed.iter().any(|r| r.id == "ai-gateway-claude"));
         assert!(listed.iter().any(|r| r.id == "db-1"));
     }
 }
 
 #[tokio::test]
 async fn a_persisted_row_wins_over_a_config_credential_with_the_same_id() {
-    let persisted = MemoryStore::with(vec![record("cpa-gateway-claude", "from database")]);
-    let store = RuntimeAuthStore::new(persisted, vec![record("cpa-gateway-claude", "from config")]);
+    let persisted = MemoryStore::with(vec![record("ai-gateway-claude", "from database")]);
+    let store = RuntimeAuthStore::new(persisted, vec![record("ai-gateway-claude", "from config")]);
 
     let listed = store.list().await.expect("listing succeeds");
     assert_eq!(listed.len(), 1, "the id must not appear twice");
     assert_eq!(listed[0].label, "from database");
 
     let fetched = store
-        .get("cpa-gateway-claude")
+        .get("ai-gateway-claude")
         .await
         .expect("loading succeeds")
         .expect("found");
@@ -361,12 +361,12 @@ async fn a_persisted_row_wins_over_a_config_credential_with_the_same_id() {
 async fn get_falls_back_to_the_config_credentials() {
     let store = RuntimeAuthStore::new(
         MemoryStore::with(Vec::new()),
-        vec![record("cpa-gateway-codex", "from config")],
+        vec![record("ai-gateway-codex", "from config")],
     );
 
     assert_eq!(
         store
-            .get("cpa-gateway-codex")
+            .get("ai-gateway-codex")
             .await
             .expect("loading succeeds")
             .map(|r| r.label),
@@ -386,7 +386,7 @@ async fn writes_pass_straight_through_to_the_persistent_store() {
     let persisted = MemoryStore::with(Vec::new());
     let store = RuntimeAuthStore::new(
         Arc::clone(&persisted) as Arc<dyn AuthStore>,
-        vec![record("cpa-gateway-claude", "")],
+        vec![record("ai-gateway-claude", "")],
     );
 
     store

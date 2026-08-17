@@ -58,7 +58,7 @@ pub struct OperationEntry {
 
 /// Derives the audit HMAC key from the credential encryption secret.
 ///
-/// 对应 `DeriveAuditKey`：`sha256(secret + "|cpa-audit-hmac-v1")`。
+/// 对应 `DeriveAuditKey`：`sha256(secret + "|agw-audit-hmac-v1")`。
 /// An empty/blank secret disables hashing（此时返回 `nil`）。
 pub fn derive_audit_key(secret: &str) -> Option<Vec<u8>> {
     if secret.trim().is_empty() {
@@ -66,7 +66,7 @@ pub fn derive_audit_key(secret: &str) -> Option<Vec<u8>> {
     }
     let mut hasher = Sha256::new();
     hasher.update(secret.as_bytes());
-    hasher.update(b"|cpa-audit-hmac-v1");
+    hasher.update(b"|agw-audit-hmac-v1");
     Some(hasher.finalize().to_vec())
 }
 

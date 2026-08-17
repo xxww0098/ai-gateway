@@ -1,5 +1,5 @@
-/* CPA Gateway service worker — app-shell cache, network-first for API */
-const CACHE = 'cpa-shell-v1'
+/* AI-GateWay service worker — app-shell cache, network-first for API */
+const CACHE = 'agw-shell-v1'
 const PRECACHE = [
   '/',
   '/index.html',

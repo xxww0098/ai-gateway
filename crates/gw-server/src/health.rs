@@ -112,7 +112,7 @@ pub async fn liveness() -> Response {
 ///
 /// # Why this exists at all
 ///
-/// There is no handler to port: the CPA SDK's own HTTP server registered it,
+/// There is no handler to port: the previous SDK's own HTTP server registered it,
 /// and `api.RegisterPanelRoutes` says so out loud —
 /// *"`/healthz` is already registered by the SDK's internal server; only
 /// register `/api/health` to avoid a duplicate-route panic."* Dropping the SDK

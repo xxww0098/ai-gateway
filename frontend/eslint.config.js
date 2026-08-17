@@ -90,13 +90,13 @@ export default defineConfig([
           paths: [
             {
               name: '@/features/admin-proxy/api',
-              message: 'Admin user management is CPA account code and must not call SDK management APIs.',
+              message: 'Admin user management is account code and must not call SDK management APIs.',
             },
           ],
           patterns: [
             {
               group: ['**/features/admin-proxy/api'],
-              message: 'Admin user management is CPA account code and must not call SDK management APIs.',
+              message: 'Admin user management is account code and must not call SDK management APIs.',
             },
           ],
         },

@@ -8,12 +8,12 @@ use std::collections::HashSet;
 #[test]
 fn hash_matches_the_bytes_written_into_key_hash() {
     assert_eq!(
-        hash_api_key("cpa-0123456789abcdef"),
-        "3168c3b4e397d70312755b9f479fd80f5c34e96a1e89369d05a41a9805dab13d"
+        hash_api_key("agw-0123456789abcdef"),
+        "dc05fc4f6597e7de76f2f503997c2398a46f1d25ba93d5092f96995cf174e775"
     );
     assert_eq!(
-        hash_api_key("cpa-golden-fixture"),
-        "85bc6b06071317adb37626800fbcac1055f50edb6fee2cc972d317c32e877345"
+        hash_api_key("agw-golden-fixture"),
+        "34bb75cd4ef69ddd3c28fb94b4c20ebfb90924b46cb13d13ad51c16a53085cb9"
     );
     assert_eq!(
         hash_api_key(""),
@@ -23,7 +23,7 @@ fn hash_matches_the_bytes_written_into_key_hash() {
 
 #[test]
 fn hash_is_lowercase_hex_of_a_fixed_width() {
-    let hash = hash_api_key("cpa-whatever");
+    let hash = hash_api_key("agw-whatever");
 
     assert_eq!(hash.len(), 64);
     assert!(
@@ -35,11 +35,11 @@ fn hash_is_lowercase_hex_of_a_fixed_width() {
 
 #[test]
 fn prefix_takes_the_leading_window_and_short_input_whole() {
-    let key = "cpa-0123456789abcdef";
+    let key = "agw-0123456789abcdef";
 
     assert_eq!(api_key_prefix(key).len(), KEY_PREFIX_LEN);
     assert!(key.starts_with(api_key_prefix(key)));
-    assert_eq!(api_key_prefix("cpa-"), "cpa-");
+    assert_eq!(api_key_prefix("agw-"), "agw-");
     assert_eq!(api_key_prefix(""), "");
 }
 

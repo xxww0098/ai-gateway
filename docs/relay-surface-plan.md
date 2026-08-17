@@ -69,7 +69,7 @@ const origin = window.location.origin
 写成了 `/v1beta` 存在的理由：
 
 ```
-/// CPA's SDK served this surface for free and it vanished with the SDK, but the
+/// The previous SDK served this surface for free and it vanished with the SDK, but the
 /// dashboard still hands it to tenants as their integration endpoint
 /// (`QuickIntegrationPanel.tsx`, which is frozen), so a client that follows the
 /// panel's instructions must land on a real route rather than a 404.
@@ -97,7 +97,7 @@ const origin = window.location.origin
 这与 `crates/gw-proxy/src/lib.rs:34` 的自述完全吻合：
 
 ```
-//! | [`routes`] | the SDK's own `/v1` handlers, which had no CPA source |
+//! | [`routes`] | the SDK's own `/v1` handlers, which had no prior source in this repo |
 ```
 
 以及 `crates/gw-proxy/src/routes.rs:4-6`：
@@ -108,7 +108,7 @@ const origin = window.location.origin
 //! inside, not a Go file.
 ```
 
-> **结论**：整个 `/v1` 面来自 CPA SDK 的 Builder，**不在本仓库的 Go 权威参照内**。
+> **结论**：整个 `/v1` 面来自先前 SDK 的 Builder，**不在本仓库的 Go 权威参照内**。
 > 因此「与 Go 对齐」这条硬约束**只约束计费管线**（access → hold → dispatch → settle），
 > **不约束路由表本身**。这 12 条路由的去留是一个纯粹的产品/工程决定，没有任何 parity 包袱。
 >
@@ -233,7 +233,7 @@ is_proxy_path(path)
 
 | 项 | 规范 |
 | --- | --- |
-| 鉴权 | `Authorization: Bearer <token>`，**且仅此一种**。`token` 为 `cpa-<hex>`（API Key）或 HS256 JWT（`access.rs:39,100-111,229-242`）。收敛后 `credential_from` 退化为纯 `bearer_token()`，`x-goog-api-key` / `x-api-key` / `?key=` 三种 carrier 随 `/v1beta` 一起下线（`access.rs:112-126`） |
+| 鉴权 | `Authorization: Bearer <token>`，**且仅此一种**。`token` 为 `agw-<hex>`（API Key）或 HS256 JWT（`access.rs:39,100-111,229-242`）。收敛后 `credential_from` 退化为纯 `bearer_token()`，`x-goog-api-key` / `x-api-key` / `?key=` 三种 carrier 随 `/v1beta` 一起下线（`access.rs:112-126`） |
 | 请求 Content-Type | `application/json`（含 `charset` 后缀）。⚠️ 现状陷阱：`parse_body_peek`（`hold.rs:757-762`）在 Content-Type **不含 `json` 子串**时**直接放弃解析并返回全零 peek**，于是 `model=""`、`stream=false`、`max_tokens=0` —— 请求不会被拒，而是带着空模型名走完整个计费与派发链。`gw-relay` 应当把「非 JSON Content-Type」升级为 `400`，而不是静默降级 |
 | 请求体大小上限 | `HOLD_REQUEST_BODY_LIMIT = 1 MiB`（`hold.rs:45`），超限 `413`（`hold.rs:844-863`）。body 被 peek 后原样放回并挂在 `PeekedBody` 扩展上（`hold.rs:82,192`），handler 复用（`routes.rs:622-630`），**全程只读一次** |
 | 响应 Content-Type | **由上游决定，网关不改写**。非流式缺省补 `application/json`（`routes.rs:563-568`）；流式缺省补 `text/event-stream` + `Cache-Control: no-cache`（`routes.rs:451-462`） |
@@ -541,7 +541,7 @@ Anthropic 入口回 `{"type":"error","error":{"type":"invalid_request_error","me
 | 位置 | 现状 | 动作 |
 | --- | --- | --- |
 | `access.rs:51` `V1BETA_PATH_PREFIX` | `"/v1beta/"` | 删（过渡期保留给 410 handler 用） |
-| `access.rs:61-63` `is_proxy_path` | `starts_with("/v1/") \|\| starts_with("/v1beta/")` | 收敛为 `path.starts_with(V1_PATH_PREFIX)`。**连带收益**：自动消除与 `gw-server/src/metrics.rs:321`（`let v1 = path.starts_with("/v1/")`）的口径分歧 —— 今天 `/v1beta` 流量被鉴权、被计费，却**不进 `cpa_v1_requests_total`** |
+| `access.rs:61-63` `is_proxy_path` | `starts_with("/v1/") \|\| starts_with("/v1beta/")` | 收敛为 `path.starts_with(V1_PATH_PREFIX)`。**连带收益**：自动消除与 `gw-server/src/metrics.rs:321`（`let v1 = path.starts_with("/v1/")`）的口径分歧 —— 今天 `/v1beta` 流量被鉴权、被计费，却**不进 `agw_v1_requests_total`** |
 | `access.rs:72,77,82` 三个 carrier 常量 | `x-goog-api-key` / `x-api-key` / `?key=` | 删。`API_KEY_HEADER`（`x-api-key`）删除时格外小心：`/v1` 上它是 **Anthropic 上游头**，只是碰巧同名 |
 | `access.rs:100-126` `credential_from` | 四种 carrier + 固定优先级 | 退化为 `headers.get(AUTHORIZATION).and_then(bearer_token)` |
 | `access.rs:133-138` `key_query_param` | — | 删 |
@@ -743,7 +743,7 @@ L4 命中时打点计数增加。
    {"error":{"code":410,"status":"NOT_FOUND","message":
      "本网关的 /v1beta Gemini 原生入口已下线。Gemini 与 Vertex 模型仍可用，请改用 OpenAI 兼容入口 POST /v1/chat/completions 或 Anthropic 入口 POST /v1/messages，Base URL 使用 <origin>/v1。"}}
    ```
-3. **打一个专门的 metric**（`cpa_v1beta_gone_total`）。两个发布周期后看这个计数：
+3. **打一个专门的 metric**（`agw_v1beta_gone_total`）。两个发布周期后看这个计数：
    若持续为 0，硬删；若不为 0，说明真有用户在用，此时再回来重新讨论，
    而不是靠猜。**这是把「要不要删」从一次赌博变成一次测量的唯一办法。**
 

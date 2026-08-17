@@ -348,7 +348,7 @@ export default function AdminProxyAmpcodePage() {
             <div className="flex flex-col gap-4 p-4 rounded-lg border bg-card">
               <div>
                 <Label>Upstream API Keys 映射</Label>
-                <p className="text-xs text-muted-foreground mt-1">按 SDK 顶层 api-keys 将 Amp 请求路由到不同上游 API Key。CPA 用户 API Key 会先被网关改写为内部 Key，这里的映射仅适用于直接使用 SDK api-keys 的场景。</p>
+                <p className="text-xs text-muted-foreground mt-1">按 SDK 顶层 api-keys 将 Amp 请求路由到不同上游 API Key。用户 API Key 会先被网关改写为内部 Key，这里的映射仅适用于直接使用 SDK api-keys 的场景。</p>
               </div>
               <div className="flex flex-col gap-3">
                 <Input

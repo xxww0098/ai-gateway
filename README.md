@@ -42,7 +42,7 @@ cd frontend && npm ci && npm run dev
 
 面板接入指南：打开 `/docs`。
 
-1. 在面板注册并创建 API Key（`agw-` 前缀）。
+1. 在面板注册并创建 API Key（`agw-` 前缀；本版本起硬切换，旧前缀不再接受）。
 2. 像调用 OpenAI 一样请求 `/v1/*`，用该 Key 作 Bearer：
 
 ```bash

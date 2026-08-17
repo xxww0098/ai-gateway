@@ -136,7 +136,7 @@ pub mod codes {
 /// A caller authenticated on the panel surface.
 ///
 /// 对应 `AuthMiddleware`。注意这个面板接受**两种**凭证，不止 JWT：
-/// `cpa-` 前缀的 API key（经 `APIKeyCache` 再落到 DB）或一个面板
+/// `agw-` 前缀的 API key（经 `APIKeyCache` 再落到 DB）或一个面板
 /// JWT。两条路径之后都走共享的 `UserStatusCache`
 /// recheck so a suspension seen on `/v1/*` is honored here immediately, and the
 /// JWT path additionally rechecks `token_version` for global logout.

@@ -12,7 +12,7 @@
 //! # 三个渠道目前都是本地模拟
 //!
 //! 原实现没有接真实支付网关：`/payment/*/create` 只落一行 `pending` 订单并回一个
-//! 形如 `pi_000123` / `cpa-gateway://…` 的假凭据。真正会动钱的只有管理员确认和
+//! 形如 `pi_000123` / `ai-gateway://…` 的假凭据。真正会动钱的只有管理员确认和
 //! （配了签名密钥时的）Stripe 回调。这里保持原样 —— 补真实网关是另一件事。
 
 use axum::extract::{Path, Query, State};
@@ -388,7 +388,7 @@ pub async fn alipay_create(
             Err(error) => return db_failure("create_order", &error, "创建订单失败，请稍后重试"),
         };
     let public_id = public_order_id(PROVIDER_ALIPAY, order.id);
-    let pay_url = format!("cpa-gateway://payment/alipay/{public_id}");
+    let pay_url = format!("ai-gateway://payment/alipay/{public_id}");
     ok(serde_json::json!({
         "order_id": public_id,
         "pay_url": pay_url,

@@ -28,7 +28,7 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      // ── CPA Gateway API ──
+      // ── AI-GateWay API ──
       '/api': {
         target: BACKEND,
         changeOrigin: true,

@@ -1,6 +1,6 @@
-# CPA-Gateway Frontend
+# AI-GateWay Frontend
 
-React 19 + Vite frontend for the CPA-Gateway panel.
+React 19 + Vite frontend for the AI-GateWay panel.
 
 ## Development
 

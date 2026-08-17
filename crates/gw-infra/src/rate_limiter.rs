@@ -23,7 +23,7 @@ use crate::{InfraError, Redis};
 mod tests;
 
 /// Shared prefix of every key this limiter touches.
-pub const KEY_PREFIX: &str = "cpa-gateway:ratelimit";
+pub const KEY_PREFIX: &str = "ai-gateway:ratelimit";
 /// Sliding-window width, in milliseconds.
 pub const WINDOW_MS: i64 = 60_000;
 

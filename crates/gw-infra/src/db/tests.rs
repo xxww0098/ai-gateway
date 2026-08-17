@@ -120,7 +120,7 @@ fn dsn_carries_every_field_under_its_libpq_keyword() {
         port: 6543,
         user: "gateway".to_owned(),
         password: "s3cret".to_owned(),
-        dbname: "cpa".to_owned(),
+        dbname: "agw".to_owned(),
         sslmode: "require".to_owned(),
         ..DbSettings::default()
     };
@@ -150,11 +150,11 @@ fn dsn_carries_every_field_under_its_libpq_keyword() {
 /// with `cargo test -p gw-infra -- --ignored` once one is reachable at the
 /// `config.example.yaml` coordinates.
 #[tokio::test]
-#[ignore = "需要本地 PostgreSQL（config.example.yaml 的 127.0.0.1:5432/cpa_gateway）"]
+#[ignore = "需要本地 PostgreSQL（config.example.yaml 的 127.0.0.1:5432/ai_gateway）"]
 async fn init_db_opens_a_usable_pool() {
     let settings = DbSettings::default();
     let pool = init_db(&settings, SqlLogLevel::Silent).await.expect(
-        "PostgreSQL 未就绪：请启动本地 Postgres 并按 config.example.yaml 建好 cpa_gateway 库",
+        "PostgreSQL 未就绪：请启动本地 Postgres 并按 config.example.yaml 建好 ai_gateway 库",
     );
 
     let one: i32 = sqlx::query_scalar("SELECT 1")

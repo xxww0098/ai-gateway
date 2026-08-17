@@ -5,7 +5,7 @@
 //! 只接受两种凭据形态：
 //!
 //! ```text
-//! cpa-<hex>   -> api_keys 查表（L1 缓存 -> DB）
+//! agw-<hex>   -> api_keys 查表（L1 缓存 -> DB）
 //! <jwt>       -> 面板密钥签的 HS256 JWT
 //! ```
 //!
@@ -37,8 +37,8 @@ use crate::ProxyState;
 use crate::error::AuthError;
 use crate::ports::{AccessMetadata, AuthCrypto, Id, TenantDirectory};
 
-/// Prefix that marks a CPA-issued API key (as opposed to a JWT).
-const API_KEY_PREFIX: &str = "cpa-";
+/// Prefix that marks an issued API key (as opposed to a JWT).
+const API_KEY_PREFIX: &str = gw_authcore::API_KEY_PREFIX;
 
 /// 代理面的**唯一**前缀。收敛后 `/v1beta/` 不再是兄弟前缀，它根本不存在。
 pub const V1_PATH_PREFIX: &str = "/v1/";
@@ -51,7 +51,7 @@ pub const V1_PATH_PREFIX: &str = "/v1/";
 ///
 /// **收敛的连带收益**：这里只剩 `/v1/` 之后，它与
 /// `gw-server/src/metrics.rs` 的 `path.starts_with("/v1/")` 口径自动一致 ——
-/// 历史上 `/v1beta` 流量被鉴权、被计费，却不进 `cpa_v1_requests_total`。
+/// 历史上 `/v1beta` 流量被鉴权、被计费，却不进 `agw_v1_requests_total`。
 #[must_use]
 pub fn is_proxy_path(path: &str) -> bool {
     path.starts_with(V1_PATH_PREFIX)
@@ -76,9 +76,9 @@ pub fn credential_from(headers: &HeaderMap) -> Option<&str> {
         .and_then(bearer_token)
 }
 
-/// Resolves credentials to a CPA tenant.
+/// Resolves credentials to a tenant.
 ///
-/// Resolves credentials to a CPA tenant. The `UserStatusCache` / `APIKeyCache`
+/// Resolves credentials to a tenant. The `UserStatusCache` / `APIKeyCache`
 /// that were originally held as struct fields live behind [`TenantDirectory`]
 /// here, because caching is an infrastructure concern and this type only owns
 /// policy.
@@ -95,7 +95,7 @@ impl AccessProvider {
 
     /// Registry key the access manager routes on.
     pub fn identifier(&self) -> &'static str {
-        "cpa-tenant"
+        "agw-tenant"
     }
 
     /// Parses the `Authorization` header and resolves it to billing metadata.
@@ -120,7 +120,7 @@ impl AccessProvider {
             return Err(AuthError::NoCredentials);
         }
         if let Some(rest) = token.strip_prefix(API_KEY_PREFIX) {
-            // Reject "cpa-" with nothing after it before paying for a hash.
+            // Reject "agw-" with nothing after it before paying for a hash.
             if rest.is_empty() {
                 return Err(AuthError::InvalidCredential);
             }
@@ -130,7 +130,7 @@ impl AccessProvider {
         }
     }
 
-    /// Resolve a `cpa-` API key to billing metadata.
+    /// Resolve an `agw-` API key to billing metadata.
     async fn authenticate_api_key(&self, plaintext: &str) -> Result<AccessMetadata, AuthError> {
         let key_hash = self.crypto.hash_api_key(plaintext);
 

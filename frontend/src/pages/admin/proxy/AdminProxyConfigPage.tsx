@@ -324,7 +324,7 @@ export default function AdminProxyConfigPage() {
             />
             <ConfigSetting
               title="SDK 用量统计"
-              description="启用 SDK 内存和 Redis 队列层面的用量聚合；CPA 计费用量仍由本项目数据库记录。"
+              description="启用 SDK 内存和 Redis 队列层面的用量聚合；网关计费用量仍由本项目数据库记录。"
               loading={loading || togglesLoading['usageStats']}
               value={usageStatsEnabled}
               onChange={(val: boolean) => updateSetting('usageStats', '/usage-statistics-enabled', val, setUsageStatsEnabled)}

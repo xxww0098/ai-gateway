@@ -49,7 +49,7 @@ pub struct NotificationItem {
 static NOTIFICATIONS: LazyLock<Mutex<Vec<NotificationItem>>> = LazyLock::new(|| {
     Mutex::new(vec![NotificationItem {
         id: 1,
-        title: "欢迎使用 CPA Gateway".to_owned(),
+        title: "欢迎使用 AI-GateWay".to_owned(),
         content: "账户面板、API Key、计费和代理转发功能已就绪。".to_owned(),
         is_read: false,
         notification_type: "system".to_owned(),

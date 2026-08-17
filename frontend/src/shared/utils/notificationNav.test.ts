@@ -37,7 +37,7 @@ describe('pathForNotification', () => {
     expect(
       pathForNotification({
         notification_type: 'system',
-        title: '欢迎使用 CPA Gateway',
+        title: '欢迎使用 AI-GateWay',
         content: '账户面板已就绪',
       })
     ).toBe('/dashboard')

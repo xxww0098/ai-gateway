@@ -40,7 +40,7 @@
 
 `access::is_proxy_path` 收敛为 `path.starts_with("/v1/")`。
 **连带收益**：与 `gw-server/src/metrics.rs` 的 `path.starts_with("/v1/")` 口径自动一致
-（历史上 `/v1beta` 流量被鉴权、被计费，却不进 `cpa_v1_requests_total`）。
+（历史上 `/v1beta` 流量被鉴权、被计费，却不进 `agw_v1_requests_total`）。
 
 ### 关于 `redact_query` —— 我删了，与方案 §4.2 的「保留」建议不同
 

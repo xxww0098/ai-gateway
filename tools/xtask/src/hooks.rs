@@ -10,7 +10,7 @@
 
 /// The hook body, ready to paste into `.git/hooks/pre-commit`.
 pub(crate) const PRE_COMMIT: &str = r#"#!/bin/sh
-# CPA-Gateway rust/ gates — see rust/CONTRACT.md §7 and tools/xtask.
+# AI-GateWay rust/ gates — see rust/CONTRACT.md §7 and tools/xtask.
 set -e
 cd "$(git rev-parse --show-toplevel)/rust"
 cargo xtask ci

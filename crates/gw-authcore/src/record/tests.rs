@@ -3,7 +3,7 @@ use chrono::Utc;
 
 #[test]
 fn runtime_only_is_matched_the_way_go_matched_it() {
-    let mut record = AuthRecord::new("cpa-gateway-claude", "claude", Utc::now());
+    let mut record = AuthRecord::new("ai-gateway-claude", "claude", Utc::now());
     assert!(!record.is_runtime_only(), "no attribute means persistable");
 
     for spelling in ["true", "TRUE", "True", "  true  "] {
@@ -82,7 +82,7 @@ fn a_credential_is_unusable_when_any_kill_switch_is_set() {
 #[test]
 fn a_fresh_record_is_active_and_stamped() {
     let now = Utc::now();
-    let record = AuthRecord::new("cpa-gateway-codex", "codex", now);
+    let record = AuthRecord::new("ai-gateway-codex", "codex", now);
 
     assert_eq!(record.status, AuthStatus::Active);
     assert_eq!(record.created_at, now);

@@ -18,7 +18,7 @@ export function AuthLayout() {
       <div className="w-full max-w-md animate-in fade-in zoom-in-95 duration-500" style={{ willChange: 'transform, opacity' }}>
         {/* Logo or Brand */}
         <div className="flex justify-center mb-8 shrink-0">
-          <img src="/icon.svg" alt="CPA Gateway" className="w-14 h-14 rounded-2xl shadow-sm" />
+          <img src="/icon.svg" alt="AI-GateWay" className="w-14 h-14 rounded-2xl shadow-sm" />
         </div>
 
         {/* Card Content Container */}
@@ -28,7 +28,7 @@ export function AuthLayout() {
         
         {/* Footer info inside auth layout typically */}
         <div className="mt-8 text-center text-sm text-gray-500 dark:text-dark-400">
-          &copy; {new Date().getFullYear()} CPA Gateway. All rights reserved.
+          &copy; {new Date().getFullYear()} AI-GateWay. All rights reserved.
         </div>
       </div>
     </div>

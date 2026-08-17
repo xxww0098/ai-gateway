@@ -50,10 +50,10 @@ fn distinct_users_get_distinct_keys() {
 #[test]
 fn foreign_keys_are_rejected() {
     for key in [
-        "cpa-gateway:billing:holds:",
-        "cpa-gateway:billing:holds:abc",
-        "cpa-gateway:billing:holds:12x",
-        "cpa-gateway:billing:holds:ts:7",
+        "ai-gateway:billing:holds:",
+        "ai-gateway:billing:holds:abc",
+        "ai-gateway:billing:holds:12x",
+        "ai-gateway:billing:holds:ts:7",
         "some:other:key:1",
         "",
     ] {

@@ -172,7 +172,7 @@ export const Header = memo(function Header() {
 
         {/* Mobile: logo only — free space for actions */}
         <div className="lg:hidden flex items-center gap-2 min-w-0">
-          <img src="/icon.svg" alt="CPA Gateway" className="w-7 h-7 shrink-0 rounded-lg" />
+          <img src="/icon.svg" alt="AI-GateWay" className="w-7 h-7 shrink-0 rounded-lg" />
           <span className="hidden xs:inline font-semibold text-sm text-gray-900 dark:text-white truncate max-w-[8rem]">
             控制台
           </span>

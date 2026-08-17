@@ -153,15 +153,15 @@ fn v1_requests_are_bucketed_by_status_class() {
 
     let text = prometheus_text(&metrics);
     assert!(
-        text.contains("cpa_v1_requests_total{status_class=\"2xx\"} 3"),
+        text.contains("agw_v1_requests_total{status_class=\"2xx\"} 3"),
         "{text}"
     );
     assert!(
-        text.contains("cpa_v1_requests_total{status_class=\"4xx\"} 3"),
+        text.contains("agw_v1_requests_total{status_class=\"4xx\"} 3"),
         "{text}"
     );
     assert!(
-        text.contains("cpa_v1_requests_total{status_class=\"5xx\"} 3"),
+        text.contains("agw_v1_requests_total{status_class=\"5xx\"} 3"),
         "{text}"
     );
 }
@@ -174,11 +174,11 @@ fn v1_latency_is_reported_in_seconds() {
 
     let text = prometheus_text(&metrics);
     assert!(
-        text.contains("cpa_v1_request_duration_seconds_sum 2.000000"),
+        text.contains("agw_v1_request_duration_seconds_sum 2.000000"),
         "{text}"
     );
     assert!(
-        text.contains("cpa_v1_request_duration_seconds_count 2"),
+        text.contains("agw_v1_request_duration_seconds_count 2"),
         "{text}"
     );
 }
@@ -193,21 +193,21 @@ fn exposition_matches_the_established_handler_byte_for_byte() {
     metrics.set_orphaned_holds(7);
 
     let expected = "\
-# HELP cpa_v1_requests_total Total /v1 proxy requests by HTTP status class.
-# TYPE cpa_v1_requests_total counter
-cpa_v1_requests_total{status_class=\"2xx\"} 0
-cpa_v1_requests_total{status_class=\"4xx\"} 0
-cpa_v1_requests_total{status_class=\"5xx\"} 0
-# HELP cpa_v1_request_duration_seconds Cumulative /v1 request latency.
-# TYPE cpa_v1_request_duration_seconds summary
-cpa_v1_request_duration_seconds_sum 0.000000
-cpa_v1_request_duration_seconds_count 0
-# HELP cpa_channel_benched_total Upstream accounts currently benched by health checks.
-# TYPE cpa_channel_benched_total gauge
-cpa_channel_benched_total 2
-# HELP cpa_orphaned_holds Holds orphaned by a prior crash (read-only B8 detection).
-# TYPE cpa_orphaned_holds gauge
-cpa_orphaned_holds 7
+# HELP agw_v1_requests_total Total /v1 proxy requests by HTTP status class.
+# TYPE agw_v1_requests_total counter
+agw_v1_requests_total{status_class=\"2xx\"} 0
+agw_v1_requests_total{status_class=\"4xx\"} 0
+agw_v1_requests_total{status_class=\"5xx\"} 0
+# HELP agw_v1_request_duration_seconds Cumulative /v1 request latency.
+# TYPE agw_v1_request_duration_seconds summary
+agw_v1_request_duration_seconds_sum 0.000000
+agw_v1_request_duration_seconds_count 0
+# HELP agw_channel_benched_total Upstream accounts currently benched by health checks.
+# TYPE agw_channel_benched_total gauge
+agw_channel_benched_total 2
+# HELP agw_orphaned_holds Holds orphaned by a prior crash (read-only B8 detection).
+# TYPE agw_orphaned_holds gauge
+agw_orphaned_holds 7
 ";
 
     let text = prometheus_text(&metrics);
@@ -219,7 +219,7 @@ cpa_orphaned_holds 7
 
 #[test]
 fn the_rust_only_metrics_are_appended_after_the_parity_block() {
-    // cpa_abandoned_settlements has no upstream counterpart (the finalizer runs on
+    // agw_abandoned_settlements has no upstream counterpart (the finalizer runs on
     // the server's own task and cannot be dropped by a runtime teardown). It is
     // appended, never interleaved, so a dashboard matching the existing exposition
     // keeps working — Prometheus exposition is additive.
@@ -228,13 +228,13 @@ fn the_rust_only_metrics_are_appended_after_the_parity_block() {
 
     let text = prometheus_text(&metrics);
     let expected = "\
-# HELP cpa_abandoned_settlements Settlements still running when the shutdown drain timed out.
-# TYPE cpa_abandoned_settlements gauge
-cpa_abandoned_settlements 4
+# HELP agw_abandoned_settlements Settlements still running when the shutdown drain timed out.
+# TYPE agw_abandoned_settlements gauge
+agw_abandoned_settlements 4
 ";
     assert!(text.ends_with(expected), "{text}");
     assert!(
-        text.find("cpa_orphaned_holds").expect("go block") < text.find(expected).expect("suffix"),
+        text.find("agw_orphaned_holds").expect("go block") < text.find(expected).expect("suffix"),
         "the Rust-only block must not be interleaved with the parity one",
     );
 }
@@ -329,7 +329,7 @@ async fn the_layer_counts_panel_and_v1_traffic_only() {
     assert_eq!(snapshot.in_flight, 0);
     assert!(snapshot.path_counts.contains_key("/api/panel/thing"));
     assert!(
-        prometheus_text(&metrics).contains("cpa_v1_requests_total{status_class=\"2xx\"} 1"),
+        prometheus_text(&metrics).contains("agw_v1_requests_total{status_class=\"2xx\"} 1"),
         "the /v1 request was not counted"
     );
 }

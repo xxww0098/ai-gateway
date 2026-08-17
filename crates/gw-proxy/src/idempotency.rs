@@ -28,7 +28,7 @@ pub const DEFAULT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 pub const PROCESSING_TTL: Duration = Duration::from_secs(10 * 60);
 
 /// Redis key prefix.
-pub const KEY_PREFIX: &str = "cpa-gateway:idempotency:";
+pub const KEY_PREFIX: &str = "ai-gateway:idempotency:";
 
 /// A response cached for idempotent replay.
 ///

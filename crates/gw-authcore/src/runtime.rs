@@ -19,7 +19,7 @@ use std::{collections::HashSet, sync::Arc};
 mod tests;
 
 /// Value of the `source` attribute on every config-seeded credential.
-pub const RUNTIME_SOURCE: &str = "cpa-gateway-config";
+pub const RUNTIME_SOURCE: &str = "ai-gateway-config";
 
 /// Provider identifier for the OpenAI-compatible upstream.
 pub const PROVIDER_OPENAI: &str = "openai";
@@ -79,9 +79,9 @@ fn build_runtime_upstreams_at(
     if openai.complete() {
         let base_url = resolve_base_url(PROVIDER_OPENAI, &openai, "")?;
         auths.push(runtime_auth(
-            "cpa-gateway-openai-compatible",
+            "ai-gateway-openai-compatible",
             PROVIDER_OPENAI,
-            "CPA-Gateway OpenAI-compatible upstream",
+            "AI-GateWay OpenAI-compatible upstream",
             &base_url,
             now,
         ));
@@ -97,9 +97,9 @@ fn build_runtime_upstreams_at(
     let claude_base = resolve_base_url(PROVIDER_CLAUDE, &cfg.claude, CLAUDE_DEFAULT_BASE_URL)?;
     if cfg.claude.complete() {
         auths.push(runtime_auth(
-            "cpa-gateway-claude",
+            "ai-gateway-claude",
             PROVIDER_CLAUDE,
-            "CPA-Gateway Claude upstream",
+            "AI-GateWay Claude upstream",
             &claude_base,
             now,
         ));
@@ -112,9 +112,9 @@ fn build_runtime_upstreams_at(
     let gemini_base = resolve_base_url(PROVIDER_GEMINI, &cfg.gemini, GEMINI_DEFAULT_BASE_URL)?;
     if cfg.gemini.complete() {
         auths.push(runtime_auth(
-            "cpa-gateway-gemini",
+            "ai-gateway-gemini",
             PROVIDER_GEMINI,
-            "CPA-Gateway Gemini upstream",
+            "AI-GateWay Gemini upstream",
             &gemini_base,
             now,
         ));
@@ -127,9 +127,9 @@ fn build_runtime_upstreams_at(
     let codex_base = resolve_base_url(PROVIDER_CODEX, &cfg.codex, CODEX_DEFAULT_BASE_URL)?;
     if cfg.codex.configured() && !cfg.codex.api_key.trim().is_empty() {
         let mut auth = runtime_auth(
-            "cpa-gateway-codex",
+            "ai-gateway-codex",
             PROVIDER_CODEX,
-            "CPA-Gateway Codex upstream",
+            "AI-GateWay Codex upstream",
             &codex_base,
             now,
         );
@@ -148,9 +148,9 @@ fn build_runtime_upstreams_at(
     let vertex_base = resolve_base_url(PROVIDER_VERTEX, &cfg.vertex, "")?;
     if cfg.vertex.configured() && !cfg.vertex.api_key.trim().is_empty() {
         let mut auth = runtime_auth(
-            "cpa-gateway-vertex",
+            "ai-gateway-vertex",
             PROVIDER_VERTEX,
-            "CPA-Gateway Vertex upstream",
+            "AI-GateWay Vertex upstream",
             &vertex_base,
             now,
         );

@@ -121,7 +121,7 @@ export const Logo: React.FC<LogoProps> = ({
             textClassName
           )}
         >
-          CPA Gateway
+          AI-GateWay
         </span>
       )}
     </div>

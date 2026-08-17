@@ -29,7 +29,7 @@ pub const BASE_URL_ATTRIBUTE: &str = "base_url";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuthRecord {
     /// Primary key. UUID for panel-created credentials, a stable
-    /// `cpa-gateway-<provider>` string for config-seeded ones.
+    /// `ai-gateway-<provider>` string for config-seeded ones.
     pub id: String,
     /// Provider identifier: `openai` / `claude` / `gemini` / `codex` / `vertex`.
     pub provider: String,

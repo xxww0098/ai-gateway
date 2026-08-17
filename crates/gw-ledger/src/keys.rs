@@ -1,22 +1,20 @@
 //! Redis key layout and the shortfall-resolution reference format.
 //!
-//! These strings are a wire contract, not an implementation detail: an
-//! existing deployment's Redis already holds keys in this shape, and any
-//! newer binary must read that same Redis during a cutover. Do not "tidy"
-//! them.
+//! These strings are the current Redis key layout. Do not rename them
+//! casually — a running process and a later binary must agree on the prefix.
 
 /// `String` — the user's cached persistent balance.
-pub const BALANCE_KEY_PREFIX: &str = "cpa-gateway:billing:balance:";
+pub const BALANCE_KEY_PREFIX: &str = "ai-gateway:billing:balance:";
 
 /// `Sorted Set` — member = request id, score = hold amount.
-pub const HOLDS_KEY_PREFIX: &str = "cpa-gateway:billing:holds:";
+pub const HOLDS_KEY_PREFIX: &str = "ai-gateway:billing:holds:";
 
 /// `Hash` — field = request id, value = hold creation unix timestamp.
 ///
 /// Note this prefix *extends* [`HOLDS_KEY_PREFIX`], so a `SCAN` for hold sets
 /// also matches every timestamp hash. [`crate::Ledger::scan_stale_holds`]
 /// depends on [`user_id_from_holds_key`] rejecting those.
-pub const HOLDS_TS_KEY_PREFIX: &str = "cpa-gateway:billing:holds:ts:";
+pub const HOLDS_TS_KEY_PREFIX: &str = "ai-gateway:billing:holds:ts:";
 
 #[must_use]
 pub fn balance_key(user_id: i64) -> String {
@@ -36,7 +34,7 @@ pub fn holds_ts_key(user_id: i64) -> String {
 /// The glob a stale-hold scan issues. Deliberately matches the timestamp
 /// hashes too — Redis has no "prefix but not that other prefix" glob, so the
 /// filtering happens in [`user_id_from_holds_key`].
-pub(crate) const HOLDS_SCAN_PATTERN: &str = "cpa-gateway:billing:holds:*";
+pub(crate) const HOLDS_SCAN_PATTERN: &str = "ai-gateway:billing:holds:*";
 
 /// Recovers the owning user id from a hold sorted-set key, rejecting anything
 /// that is not one — most importantly the companion timestamp hashes, which

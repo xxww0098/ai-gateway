@@ -14,6 +14,7 @@ import {
   normalizeProviderItems,
   type ApiKeyUsageResponse,
 } from './providerConfig'
+import { BAILIAN_PRESET, openAiCompatPresetForm } from './openaiCompatPresets'
 
 describe('providerConfig', () => {
   it('preserves advanced fields when editing a credential', () => {
@@ -64,6 +65,39 @@ describe('providerConfig', () => {
       { 'api-key': 'sk-b', 'proxy-url': 'direct' },
     ])
     expect(updated[0].models).toEqual([{ name: 'm1', alias: 'm1' }])
+  })
+
+  it('persists name / base-url / prefix / models-url for a preset-shaped group', () => {
+    const data = { 'openai-compatibility': [] }
+
+    const updated = buildProviderAddArray('openai', data, {
+      ...openAiCompatPresetForm(BAILIAN_PRESET),
+      apiKey: 'sk-operator',
+    })
+
+    expect(updated).toHaveLength(1)
+    expect(updated[0]).toMatchObject({
+      name: BAILIAN_PRESET.name,
+      'base-url': BAILIAN_PRESET.baseUrl,
+      prefix: BAILIAN_PRESET.prefix,
+      'models-url': BAILIAN_PRESET.modelsUrl,
+      'api-key-entries': [{ 'api-key': 'sk-operator' }],
+    })
+  })
+
+  it('adds a second key to the preset group instead of a duplicate channel', () => {
+    const first = buildProviderAddArray('openai', { 'openai-compatibility': [] }, {
+      ...openAiCompatPresetForm(BAILIAN_PRESET),
+      apiKey: 'sk-a',
+    })
+    const second = buildProviderAddArray('openai', { 'openai-compatibility': first }, {
+      ...openAiCompatPresetForm(BAILIAN_PRESET),
+      apiKey: 'sk-b',
+    })
+
+    expect(second).toHaveLength(1)
+    expect(second[0]['api-key-entries']).toEqual([{ 'api-key': 'sk-a' }, { 'api-key': 'sk-b' }])
+    expect(second[0]['models-url']).toBe(BAILIAN_PRESET.modelsUrl)
   })
 
   it('matches api-key-usage by base-url and api-key with fallback provider buckets', () => {

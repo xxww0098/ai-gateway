@@ -232,7 +232,7 @@ const MODELS_URL_SENTINEL: &str = "__models_url__";
 /// 不在表里的 `channel_key` 落 [`gw_relay::endpoint::upstream::WILDCARD_PROVIDER`]
 /// （`openai`）—— 它就是那个通配的 OpenAI 兼容 executor，DeepSeek / Qwen / Kimi /
 /// 自建 vLLM 都从它出网。
-const DEFAULT_CHANNEL_PROVIDERS: [(&str, Provider); 10] = [
+const DEFAULT_CHANNEL_PROVIDERS: [(&str, Provider); 11] = [
     ("openai", Provider::OpenAi),
     ("openai_compatible", Provider::OpenAi),
     ("claude", Provider::Claude),
@@ -245,6 +245,9 @@ const DEFAULT_CHANNEL_PROVIDERS: [(&str, Provider); 10] = [
     // the OpenAI executor. Auth records stay stored as `xai`.
     ("xai", Provider::OpenAi),
     ("grok", Provider::OpenAi),
+    // 阿里云百炼（DashScope 的 compatible-mode 端点）同样是 OpenAI 兼容，
+    // L1 `bailian/<model>` 走同一个 OpenAI executor，面板里它是内置渠道。
+    ("bailian", Provider::OpenAi),
 ];
 
 /// 四级链 L2/L3 的真实数据源：`model_catalog_entries` 的**路由视图** + 快照缓存。

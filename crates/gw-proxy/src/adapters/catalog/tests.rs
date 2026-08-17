@@ -194,6 +194,24 @@ async fn l1_works_before_any_refresh_because_the_channel_map_is_static() {
 }
 
 #[test]
+fn builtin_openai_compatible_channels_share_the_openai_executor() {
+    // 内置的 OpenAI 兼容平台（xAI、百炼）不各自开 executor，
+    // 而是靠默认词表把 `<channel>/<model>` 指到同一个 OpenAI executor 上。
+    let resolver = CatalogChannelResolver::new(Arc::new(StubCatalog(Vec::new())));
+
+    assert_eq!(
+        resolver.provider_for_channel("bailian"),
+        Some(Provider::OpenAi),
+        "百炼是内置渠道，必须在默认词表里落到 OpenAI executor",
+    );
+    assert_eq!(
+        resolver.provider_for_channel("bailian"),
+        resolver.provider_for_channel("xai"),
+        "和既有的 xAI 走同一条路，不许长出第二个 executor",
+    );
+}
+
+#[test]
 fn vision_capabilities_keep_image_and_text_and_drop_unknown_modalities() {
     let mut entry = ModelEntry::default();
     apply_capabilities(

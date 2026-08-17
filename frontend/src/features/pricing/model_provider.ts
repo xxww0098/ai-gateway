@@ -23,6 +23,9 @@ const PROVIDER_ALIAS_MAP: Record<string, string> = {
   bigmodel: 'glm',
   mimo: 'mimo',
   xiaomi: 'mimo',
+  // 百炼是平台，qwen 是模型家族：owned_by=qwen 仍归 qwen，不并进 bailian。
+  bailian: 'bailian',
+  dashscope: 'bailian',
   llama: 'meta',
   meta: 'meta',
 }

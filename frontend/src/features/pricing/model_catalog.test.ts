@@ -122,6 +122,13 @@ describe('model_catalog', () => {
     expect(getProviderDisplayName('anthropic')).toBe('Anthropic')
   })
 
+  it('bailian 是本地化展示名，不是把 key 首字母大写', () => {
+    const label = getProviderDisplayName('bailian')
+    expect(label).toBe(PROVIDER_CONFIG.bailian.label)
+    expect(label.toLowerCase()).not.toBe('bailian')
+    expect(getProviderColor('bailian')).toEqual(PROVIDER_CONFIG.bailian.color)
+  })
+
   it('getProviderDisplayName capitalizes unknown hyphenated providers', () => {
     expect(getProviderDisplayName('my-custom-provider')).toBe('My-Custom-Provider')
     expect(getProviderDisplayName('unknown')).toBe('Unknown')
@@ -130,7 +137,7 @@ describe('model_catalog', () => {
   // --- PROVIDER_CONFIG completeness ---
 
   const EXPECTED_PROVIDER_KEYS = [
-    'anthropic', 'openai', 'google', 'kimi', 'minimax', 'glm', 'mimo', 'moonshot', 'antigravity', 'deepseek', 'meta', 'other',
+    'anthropic', 'openai', 'google', 'kimi', 'minimax', 'glm', 'mimo', 'moonshot', 'antigravity', 'deepseek', 'meta', 'bailian', 'other',
   ]
 
   it('PROVIDER_CONFIG contains all expected provider keys', () => {

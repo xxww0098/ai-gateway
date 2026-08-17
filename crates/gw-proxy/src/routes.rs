@@ -254,6 +254,13 @@ impl Dispatcher {
                 .or_default()
                 .push(record);
         }
+        // xAI Grok OAuth credentials are stored as provider `xai` but speak
+        // the OpenAI-compatible wire. Attach them to the openai bucket so the
+        // existing OpenAI executor can use them (with the record's base_url).
+        // Do not merge `kiro` — that API is not OpenAI-compatible.
+        if let Some(xai) = grouped.get("xai").cloned() {
+            grouped.entry("openai".to_owned()).or_default().extend(xai);
+        }
         let snapshot = Arc::new(AuthSnapshot {
             by_provider: grouped
                 .into_iter()

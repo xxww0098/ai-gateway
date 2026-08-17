@@ -1,11 +1,19 @@
 import { useEffect, useState, useCallback, useRef } from "react"
 import {
+  deleteAuthFile,
   fetchProviderConfig,
+  pollDeviceOAuth,
   postProviderConfig,
   submitGatewayOAuthCallback,
   submitSdkOAuthCallback,
 } from '@/features/admin-proxy/api'
 import { parseOAuthCallbackInput } from '@/features/admin-proxy/oauthCallbackUtils'
+import {
+  kiroStartBody,
+  parseDeviceAuthStart,
+  parseImportJson,
+  type KiroAuthMethod,
+} from '@/features/admin-proxy/oauthDeviceUtils'
 import { Input } from '@/shared/components/ui/input'
 import { toast } from "sonner"
 import {
@@ -17,18 +25,18 @@ import { adminChannelsTab } from "@/shared/routes/admin"
 import { OAuthProviderBrandIcon } from '@/features/admin-proxy/components/OAuthProviderBrandIcon'
 import { cn } from '@/shared/utils/utils'
 
-// ── OAuth 提供商定义（与 SDK TUI 保持一致）──
 type ManualCallbackMode = 'gateway' | 'sdk' | 'none'
 
 interface OAuthProvider {
   name: string
   key: string
   apiPath: string
-  /** Gateway oauth-callback/:provider path segment (gemini, claude, codex, xai). */
+  /** Gateway oauth-callback/:provider path segment (gemini, claude, codex, xai, kiro). */
   gatewayCallbackProvider?: string
   manualCallbackMode: ManualCallbackMode
   /** Body provider field for SDK redirect_url callback. */
   sdkCallbackProvider?: string
+  deviceFlow?: boolean
 }
 
 const oauthProviders: OAuthProvider[] = [
@@ -71,7 +79,16 @@ const oauthProviders: OAuthProvider[] = [
     key: "xai",
     apiPath: "xai-auth-url",
     gatewayCallbackProvider: "xai",
+    manualCallbackMode: "none",
+    deviceFlow: true,
+  },
+  {
+    name: "Kiro",
+    key: "kiro",
+    apiPath: "kiro-auth-url",
+    gatewayCallbackProvider: "kiro",
     manualCallbackMode: "gateway",
+    deviceFlow: true,
   },
 ]
 
@@ -80,8 +97,12 @@ type OAuthSessionState = "idle" | "pending" | "polling" | "success" | "error"
 interface ProviderSession {
   state: OAuthSessionState
   authURL?: string
-  oauthState?: string   // SDK OAuth state 参数
+  oauthState?: string
   message?: string
+  userCode?: string
+  verificationUri?: string
+  interval?: number
+  flow?: string
 }
 
 interface AuthFile {
@@ -103,9 +124,13 @@ export default function AdminProxyOAuthPage() {
   const [sessions, setSessions] = useState<Record<string, ProviderSession>>({})
   const [manualInputs, setManualInputs] = useState<Record<string, string>>({})
   const [manualSubmitting, setManualSubmitting] = useState<Record<string, boolean>>({})
+  const [disconnecting, setDisconnecting] = useState<Record<string, boolean>>({})
+  const [kiroMethod, setKiroMethod] = useState<KiroAuthMethod>("device")
+  const [kiroStartUrl, setKiroStartUrl] = useState("")
+  const [kiroRegion, setKiroRegion] = useState("us-east-1")
+  const [kiroImport, setKiroImport] = useState("")
   const pollTimerRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
 
-  // 清理轮询定时器
   useEffect(() => {
     const timers = pollTimerRef.current
     return () => {
@@ -113,7 +138,6 @@ export default function AdminProxyOAuthPage() {
     }
   }, [])
 
-  // 加载已有的 auth files（凭证文件），按 provider 分组展示状态
   const loadAuthFiles = useCallback(async () => {
     try {
       const res = await fetchProviderConfig<{ files?: AuthFile[] }>("/auth-files")
@@ -130,16 +154,15 @@ export default function AdminProxyOAuthPage() {
     loadAuthFiles()
   }, [loadAuthFiles])
 
-  // 获取某个 provider 的已有凭证
   const getProviderAuthFiles = (providerKey: string) => {
     return authFiles.filter(f => {
       const p = (f.provider || f.name || '').toLowerCase()
+      if (providerKey === 'xai') return p.includes('xai') || p.includes('grok')
       return p.includes(providerKey)
     })
   }
 
-  // 发起 OAuth 登录
-  const startOAuth = async (provider: OAuthProvider) => {
+  const startOAuth = async (provider: OAuthProvider, body?: unknown) => {
     setSessions(prev => ({
       ...prev,
       [provider.key]: { state: "pending" }
@@ -150,17 +173,36 @@ export default function AdminProxyOAuthPage() {
         url?: string
         auth_url?: string
         state?: string
+        status?: string
+        auth_id?: string
+        flow?: string
         data?: { url?: string; state?: string }
-      }>(`/${provider.apiPath}?is_webui=true`)
-      const authURL = data?.url || data?.auth_url || data?.data?.url
-      const oauthState = data?.state || data?.data?.state
-
-      if (!authURL) {
-        throw new Error("SDK 未返回授权 URL")
+      }>(`/${provider.apiPath}?is_webui=true`, body)
+      if (data?.status === "success" || data?.flow === "import") {
+        setSessions(prev => ({
+          ...prev,
+          [provider.key]: { state: "success", message: "OAuth 认证完成", flow: data.flow }
+        }))
+        toast.success(`${provider.name} 已连接到 AI-GateWay`)
+        loadAuthFiles()
+        return
       }
 
-      // 尝试打开浏览器
-      window.open(authURL, '_blank')
+      const device = parseDeviceAuthStart(data)
+      const authURL = device?.verificationUriComplete
+        || device?.verificationUri
+        || data?.url
+        || data?.auth_url
+        || data?.data?.url
+      const oauthState = device?.state || data?.state || data?.data?.state
+
+      if (!authURL && !device) {
+        throw new Error("AI-GateWay 未返回授权 URL")
+      }
+
+      if (authURL) {
+        window.open(authURL, '_blank')
+      }
 
       setSessions(prev => ({
         ...prev,
@@ -168,16 +210,22 @@ export default function AdminProxyOAuthPage() {
           state: "polling",
           authURL,
           oauthState,
+          userCode: device?.userCode,
+          verificationUri: device?.verificationUri,
+          interval: device?.interval,
+          flow: device ? "device" : data?.flow,
         }
       }))
 
-      toast.success(`${provider.name} 授权链接已打开，请在浏览器中完成登录`)
-
-      // 开始轮询状态
-      if (oauthState) {
-        pollOAuthStatus(provider, oauthState)
+      if (device) {
+        toast.success(`请在浏览器打开链接并输入设备码 ${device.userCode}`)
       } else {
-        // SDK 未返回 state（如 device flow），仅靠 auth-files 变化检测完成
+        toast.success(`${provider.name} 授权链接已打开，请在浏览器中完成登录`)
+      }
+
+      if (oauthState) {
+        pollOAuthStatus(provider, oauthState, Boolean(device || provider.deviceFlow))
+      } else {
         pollAuthFilesForCompletion(provider)
       }
     } catch (err: unknown) {
@@ -192,11 +240,34 @@ export default function AdminProxyOAuthPage() {
     }
   }
 
-  // 轮询 OAuth 完成状态（通过 SDK session state 参数）
-  const pollOAuthStatus = (provider: OAuthProvider, state: string) => {
-    const deadline = Date.now() + 6 * 60 * 1000 // 6 分钟超时（比 SDK 5 分钟略长）
+  const startKiro = async () => {
+    const provider = oauthProviders.find(item => item.key === "kiro")
+    if (!provider) return
+    if (kiroMethod === "import") {
+      const parsed = parseImportJson(kiroImport)
+      if (!parsed.ok) {
+        toast.error(parsed.error)
+        return
+      }
+      await startOAuth(provider, kiroStartBody({ method: "import", token: parsed.token }))
+      return
+    }
+    if (kiroMethod === "idc" && !kiroStartUrl.trim()) {
+      toast.warning("IDC 登录需要填写 AWS IAM Identity Center 起始 URL")
+      return
+    }
+    await startOAuth(provider, kiroStartBody({
+      method: kiroMethod,
+      startUrl: kiroStartUrl,
+      region: kiroRegion,
+    }))
+  }
+
+  const pollOAuthStatus = (provider: OAuthProvider, state: string, deviceFlow: boolean) => {
+    const deadline = Date.now() + (deviceFlow ? 30 : 6) * 60 * 1000
     let pollCount = 0
-    let lastSeenWait = false // 是否曾经收到过 "wait" 状态
+    let lastSeenWait = false
+    const delay = deviceFlow ? 5000 : 2000
 
     const poll = async () => {
       pollCount++
@@ -204,70 +275,82 @@ export default function AdminProxyOAuthPage() {
       if (Date.now() > deadline) {
         setSessions(prev => ({
           ...prev,
-          [provider.key]: { state: "error", message: "OAuth 登录超时（前端 6 分钟限制）" }
+          [provider.key]: { state: "error", message: deviceFlow ? "设备码登录超时（30 分钟）" : "OAuth 登录超时（前端 6 分钟限制）" }
         }))
         return
       }
 
       try {
-        const data = await fetchProviderConfig<{ status?: string; error?: string }>(`/get-auth-status?state=${encodeURIComponent(state)}`)
+        if (deviceFlow && provider.gatewayCallbackProvider) {
+          await pollDeviceOAuth(provider.gatewayCallbackProvider, { state })
+        }
+        const data = await fetchProviderConfig<{
+          status?: string
+          error?: string
+          message?: string
+          user_code?: string
+          verification_uri?: string
+        }>(`/get-auth-status?state=${encodeURIComponent(state)}`)
         const status = data?.status
 
+        if (data?.user_code) {
+          setSessions(prev => ({
+            ...prev,
+            [provider.key]: {
+              ...(prev[provider.key] || { state: "polling" }),
+              state: "polling",
+              userCode: data.user_code,
+              verificationUri: data.verification_uri,
+              oauthState: state,
+            }
+          }))
+        }
+
         if (status === "wait") {
-          // SDK session 存在且等待中，继续轮询
           lastSeenWait = true
-          pollTimerRef.current[provider.key] = setTimeout(poll, 2000)
+          pollTimerRef.current[provider.key] = setTimeout(poll, delay)
           return
         }
 
         if (status === "error") {
-          // SDK goroutine 设置了错误（超时 / 认证失败等）
           setSessions(prev => ({
             ...prev,
-            [provider.key]: { state: "error", message: data?.error || "OAuth 认证失败" }
+            [provider.key]: { state: "error", message: data?.message || data?.error || "OAuth 认证失败" }
           }))
-          toast.error(`${provider.name}: ${data?.error || "认证失败"}`)
+          toast.error(`${provider.name}: ${data?.message || data?.error || "认证失败"}`)
           loadAuthFiles()
           return
         }
 
-        // status === "ok"：session 不存在
-        // 如果我们之前收到过 "wait"，说明 session 曾经存在 → 现在被 CompleteOAuthSession 删除 → 成功
-        if (lastSeenWait) {
+        if (status === "success" || lastSeenWait) {
           setSessions(prev => ({
             ...prev,
             [provider.key]: { state: "success", message: "OAuth 认证完成" }
           }))
-          toast.success(`${provider.name} OAuth 认证成功！`)
+          toast.success(`${provider.name} 已连接到 AI-GateWay`)
           loadAuthFiles()
           return
         }
 
-        // 前几次 poll 就收到 ok，可能是 session 注册前的竞态，继续等待
         if (pollCount <= 3) {
-          pollTimerRef.current[provider.key] = setTimeout(poll, 2000)
+          pollTimerRef.current[provider.key] = setTimeout(poll, delay)
           return
         }
 
-        // 多次 poll 仍然 ok 且从未 wait → session 可能已经完成或从未创建
-        // 刷新 auth files 检查是否有新凭证
         setSessions(prev => ({
           ...prev,
           [provider.key]: { state: "success", message: "OAuth 认证完成" }
         }))
-        toast.success(`${provider.name} OAuth 认证成功！`)
+        toast.success(`${provider.name} 已连接到 AI-GateWay`)
         loadAuthFiles()
       } catch {
-        // 瞬态错误，继续轮询
-        pollTimerRef.current[provider.key] = setTimeout(poll, 3000)
+        pollTimerRef.current[provider.key] = setTimeout(poll, deviceFlow ? 5000 : 3000)
       }
     }
 
-    // 初次等 2 秒再开始轮询
-    pollTimerRef.current[provider.key] = setTimeout(poll, 2000)
+    pollTimerRef.current[provider.key] = setTimeout(poll, delay)
   }
 
-  // 对于 device flow（无 state 参数），通过轮询 auth-files 变化检测完成
   const pollAuthFilesForCompletion = (provider: OAuthProvider) => {
     const deadline = Date.now() + 6 * 60 * 1000
     const initialFiles = getProviderAuthFiles(provider.key)
@@ -286,15 +369,13 @@ export default function AdminProxyOAuthPage() {
         await loadAuthFiles()
         const currentFiles = getProviderAuthFiles(provider.key)
         if (currentFiles.length > initialCount) {
-          // 有新凭证出现 → 认证完成
           setSessions(prev => ({
             ...prev,
             [provider.key]: { state: "success", message: "OAuth 认证完成" }
           }))
-          toast.success(`${provider.name} OAuth 认证成功！`)
+          toast.success(`${provider.name} 已连接到 AI-GateWay`)
           return
         }
-        // 继续轮询
         pollTimerRef.current[provider.key] = setTimeout(poll, 3000)
       } catch {
         pollTimerRef.current[provider.key] = setTimeout(poll, 3000)
@@ -304,7 +385,6 @@ export default function AdminProxyOAuthPage() {
     pollTimerRef.current[provider.key] = setTimeout(poll, 3000)
   }
 
-  // 取消/重置某个 provider 的 session
   const submitManualCallback = async (provider: OAuthProvider) => {
     if (provider.manualCallbackMode === 'none') return
 
@@ -345,11 +425,7 @@ export default function AdminProxyOAuthPage() {
         const code = parsed.code?.trim()
         const state = (parsed.state || session?.oauthState || '').trim()
         if (!code || !state) {
-          toast.warning(
-            provider.key === 'xai'
-              ? '请粘贴含 code 的回调内容，并先发起 OAuth 以获取 state'
-              : '请粘贴包含 code 与 state 的完整回调 URL'
-          )
+          toast.warning('请粘贴包含 code 与 state 的完整回调 URL')
           return
         }
         await submitGatewayOAuthCallback(provider.gatewayCallbackProvider || provider.key, {
@@ -362,7 +438,7 @@ export default function AdminProxyOAuthPage() {
       setManualInputs((prev) => ({ ...prev, [provider.key]: '' }))
 
       if (session?.oauthState) {
-        pollOAuthStatus(provider, session.oauthState)
+        pollOAuthStatus(provider, session.oauthState, Boolean(provider.deviceFlow))
       } else {
         pollAuthFilesForCompletion(provider)
       }
@@ -371,6 +447,19 @@ export default function AdminProxyOAuthPage() {
       toast.error(err instanceof Error ? err.message : '手动回填失败')
     } finally {
       setManualSubmitting((prev) => ({ ...prev, [provider.key]: false }))
+    }
+  }
+
+  const disconnectFile = async (file: AuthFile) => {
+    setDisconnecting((prev) => ({ ...prev, [file.name]: true }))
+    try {
+      await deleteAuthFile(file.name)
+      toast.success(`已断开 ${file.label || file.email || file.name}`)
+      await loadAuthFiles()
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : '断开失败')
+    } finally {
+      setDisconnecting((prev) => ({ ...prev, [file.name]: false }))
     }
   }
 
@@ -397,17 +486,16 @@ export default function AdminProxyOAuthPage() {
   return (
     <div className="space-y-8">
 
-      {/* ── OAuth 提供商列表 ── */}
       <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
         {oauthProviders.map(provider => {
           const session = sessions[provider.key]
           const providerFiles = getProviderAuthFiles(provider.key)
           const hasCredentials = providerFiles.some(f => !f.disabled && f.status !== 'disabled')
+          const showManual = provider.manualCallbackMode !== 'none' && provider.key !== 'kiro'
 
           return (
             <div key={provider.key} className="glass-card flex flex-col group overflow-hidden">
               <div className="p-6 flex-1 flex flex-col">
-                {/* Header */}
                 <div className="flex items-center justify-between mb-4">
                   <div className="flex items-center gap-3">
                     <div
@@ -428,7 +516,6 @@ export default function AdminProxyOAuthPage() {
                   </div>
                 </div>
 
-                {/* 凭证状态 */}
                 <div className="mb-4 bg-gray-50 dark:bg-dark-900/50 p-3 rounded-lg border border-border">
                   <div className="flex justify-between items-center">
                     <span className="text-sm font-medium text-gray-500 dark:text-gray-400 flex items-center gap-1.5">
@@ -446,9 +533,77 @@ export default function AdminProxyOAuthPage() {
                       </span>
                     )}
                   </div>
+                  {providerFiles.length > 0 && (
+                    <ul className="mt-2 space-y-1.5">
+                      {providerFiles.map(file => (
+                        <li key={file.name} className="flex items-center justify-between gap-2 text-[11px] text-gray-600 dark:text-gray-400">
+                          <span className="truncate">{file.label || file.email || file.name}</span>
+                          <button
+                            type="button"
+                            onClick={() => void disconnectFile(file)}
+                            disabled={Boolean(disconnecting[file.name])}
+                            className="shrink-0 text-red-500 hover:underline disabled:opacity-50"
+                          >
+                            断开
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
 
-                {provider.manualCallbackMode !== 'none' ? (
+                {provider.key === 'xai' && (
+                  <p className="mb-4 text-[11px] leading-relaxed text-gray-500 dark:text-gray-400">
+                    xAI Grok 使用设备码登录。AI-GateWay 会显示 user code，请在浏览器打开验证链接并输入。
+                  </p>
+                )}
+
+                {provider.key === 'kiro' && (
+                  <div className="mb-4 space-y-2">
+                    <label className="text-[11px] font-medium text-gray-500 dark:text-gray-400">登录方式</label>
+                    <select
+                      value={kiroMethod}
+                      onChange={(e) => setKiroMethod(e.target.value as KiroAuthMethod)}
+                      className="w-full h-9 rounded-md border border-border bg-white dark:bg-dark-900 px-2 text-xs"
+                    >
+                      <option value="device">Builder ID 设备码</option>
+                      <option value="authcode">Builder ID 授权码</option>
+                      <option value="idc">IAM Identity Center (IDC)</option>
+                      <option value="import">导入 Kiro IDE 缓存 JSON</option>
+                    </select>
+                    {kiroMethod === 'idc' && (
+                      <>
+                        <Input
+                          value={kiroStartUrl}
+                          onChange={(e) => setKiroStartUrl(e.target.value)}
+                          placeholder="https://d-xxxxxxxxxx.awsapps.com/start"
+                          className="text-xs h-9 font-mono"
+                        />
+                        <Input
+                          value={kiroRegion}
+                          onChange={(e) => setKiroRegion(e.target.value)}
+                          placeholder="us-east-1"
+                          className="text-xs h-9 font-mono"
+                        />
+                      </>
+                    )}
+                    {kiroMethod === 'import' && (
+                      <>
+                        <textarea
+                          value={kiroImport}
+                          onChange={(e) => setKiroImport(e.target.value)}
+                          placeholder='{"access_token":"...","refresh_token":"..."}'
+                          className="w-full min-h-[88px] rounded-md border border-border bg-white dark:bg-dark-900 p-2 text-[11px] font-mono"
+                        />
+                        <p className="text-[11px] text-gray-400">
+                          从本机 Kiro IDE 的 AWS SSO 缓存（通常是 ~/.aws/sso/cache/）复制 JSON 粘贴。AI-GateWay 不会读取该路径。
+                        </p>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {showManual ? (
                   <details className="mb-4 group rounded-lg border border-dashed border-gray-200 dark:border-dark-700 bg-white/60 dark:bg-dark-900/30">
                     <summary className="cursor-pointer list-none px-3 py-2 text-xs font-medium text-gray-600 dark:text-gray-400 flex items-center gap-1.5 select-none">
                       <ClipboardPaste className="h-3.5 w-3.5 shrink-0 text-primary-500" />
@@ -458,9 +613,7 @@ export default function AdminProxyOAuthPage() {
                       <p className="text-[11px] leading-relaxed text-gray-500 dark:text-gray-400">
                         {provider.manualCallbackMode === 'sdk'
                           ? '在浏览器完成登录后，将地址栏完整回调 URL 粘贴到下方。'
-                          : provider.key === 'xai'
-                            ? '先点击「发起 OAuth 登录」，再将回调页中的 code 或完整 URL 粘贴到下方。'
-                            : '先发起 OAuth，再将浏览器跳转后的完整回调 URL（含 code 与 state）粘贴到下方。'}
+                          : '先发起 OAuth，再将浏览器跳转后的完整回调 URL（含 code 与 state）粘贴到下方。'}
                       </p>
                       <Input
                         value={manualInputs[provider.key] || ''}
@@ -470,11 +623,7 @@ export default function AdminProxyOAuthPage() {
                             [provider.key]: e.target.value,
                           }))
                         }
-                        placeholder={
-                          provider.key === 'xai'
-                            ? 'http://127.0.0.1:56121/callback?code=...&state=...'
-                            : 'https://.../callback?code=...&state=...'
-                        }
+                        placeholder="https://.../callback?code=...&state=..."
                         className="text-xs h-9 font-mono"
                         disabled={Boolean(manualSubmitting[provider.key])}
                       />
@@ -495,19 +644,26 @@ export default function AdminProxyOAuthPage() {
                       </button>
                     </div>
                   </details>
-                ) : (
+                ) : provider.key === 'kimi' ? (
                   <p className="mb-4 text-[11px] text-gray-400 dark:text-gray-500">
                     Kimi 使用设备码流程，请在弹窗中完成授权，无需手动回填。
                   </p>
-                )}
+                ) : null}
 
-                {/* Session 状态 / 操作按钮 */}
                 <div className="mt-auto">
                   {session?.state === "polling" ? (
                     <div className="space-y-3">
+                      {session.userCode && (
+                        <div className="rounded-lg border border-primary-200 dark:border-primary-800 bg-primary-50/60 dark:bg-primary-900/20 p-3 text-center">
+                          <p className="text-[11px] text-gray-500 dark:text-gray-400 mb-1">设备码</p>
+                          <p className="text-xl font-mono font-bold tracking-widest text-gray-900 dark:text-white">
+                            {session.userCode}
+                          </p>
+                        </div>
+                      )}
                       <div className="flex items-center gap-2 text-sm text-primary-600 dark:text-primary-400">
                         <Loader2 className="h-4 w-4 animate-spin" />
-                        <span>等待浏览器授权完成...</span>
+                        <span>{session.userCode ? "等待设备码授权完成..." : "等待浏览器授权完成..."}</span>
                       </div>
                       {session.authURL && (
                         <a
@@ -517,7 +673,7 @@ export default function AdminProxyOAuthPage() {
                           className="text-xs text-primary-500 hover:underline flex items-center gap-1 truncate"
                         >
                           <ExternalLink className="h-3 w-3 flex-shrink-0" />
-                          <span className="truncate">重新打开授权页面</span>
+                          <span className="truncate">打开验证页面</span>
                         </a>
                       )}
                       <button
@@ -560,11 +716,11 @@ export default function AdminProxyOAuthPage() {
                     </button>
                   ) : (
                     <button
-                      onClick={() => startOAuth(provider)}
+                      onClick={() => provider.key === 'kiro' ? void startKiro() : void startOAuth(provider)}
                       className="btn btn-sm w-full btn-primary"
                     >
                       <Globe className="h-4 w-4 mr-1.5" />
-                      发起 OAuth 登录
+                      {provider.key === 'kiro' && kiroMethod === 'import' ? '导入并连接' : '发起 OAuth 登录'}
                     </button>
                   )}
                 </div>
@@ -574,16 +730,15 @@ export default function AdminProxyOAuthPage() {
         })}
       </div>
 
-      {/* ── 底部说明 ── */}
       <div className="p-4 bg-gray-50 dark:bg-dark-900/50 rounded-xl border border-border text-sm text-gray-500 dark:text-gray-400 space-y-1">
         <p className="flex items-center gap-2">
           <Shield className="h-4 w-4 text-primary-500" />
           <span>
-            OAuth 凭证由 SDK 网关内部管理，保存在本地 auth 目录中。可在
+            OAuth 凭证由 AI-GateWay 加密保存在 auth 库中。可在
             <Link to={adminChannelsTab('credentials')} className="text-primary-500 hover:underline font-medium mx-1">
               「代理账池 (凭证管理)」
             </Link>
-            页面查看详情。
+            页面查看详情。xAI 走 OpenAI 兼容通道（模型前缀 xai/ 或 grok/）；Kiro 令牌可刷新并导出。
           </span>
         </p>
       </div>

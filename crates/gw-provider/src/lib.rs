@@ -18,9 +18,11 @@ pub mod claude;
 pub mod codex;
 pub mod common;
 pub mod gemini;
+pub mod kiro;
 pub mod openai;
 pub mod streambuf;
 pub mod usage;
 pub mod vertex;
+pub mod xai;
 
 pub use types::*;

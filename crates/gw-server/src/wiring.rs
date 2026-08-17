@@ -48,9 +48,11 @@ use gw_provider::claude::ClaudeProvider;
 use gw_provider::codex::CodexProvider;
 use gw_provider::common::ProviderConfig;
 use gw_provider::gemini::GeminiProvider;
+use gw_provider::kiro::KiroProvider;
 use gw_provider::openai::OpenAiCompatibleProvider;
 use gw_provider::types::Provider;
 use gw_provider::vertex::VertexProvider;
+use gw_provider::xai::XaiProvider;
 use gw_proxy::adapters::{
     AuthcoreCrypto, RedisIdempotencyStore, SharedCalculator, SharedCircuitBreaker, SharedLedger,
     SharedRateLimiter, SqlChannelPolicyStore, SqlModelCatalog, SqlSubscriptionQuotaStore,
@@ -425,7 +427,7 @@ fn build_providers(sdk: &gw_config::SdkConfig) -> anyhow::Result<Vec<Arc<dyn Pro
         enabled: p.enabled,
     };
 
-    let mut providers: Vec<Arc<dyn Provider>> = Vec::with_capacity(5);
+    let mut providers: Vec<Arc<dyn Provider>> = Vec::with_capacity(7);
 
     let openai = sdk.openai_provider_config();
     if openai.complete() {
@@ -450,6 +452,19 @@ fn build_providers(sdk: &gw_config::SdkConfig) -> anyhow::Result<Vec<Arc<dyn Pro
     ));
     providers.push(Arc::new(
         VertexProvider::new(&cfg(&sdk.vertex), timeout).context("building the Vertex upstream")?,
+    ));
+    // Always built: a persisted `xai` / `kiro` auth_records row supplies the
+    // credential at request time. No sdk.xai / sdk.kiro config block.
+    let oauth_only = ProviderConfig {
+        base_url: String::new(),
+        api_key: String::new(),
+        enabled: true,
+    };
+    providers.push(Arc::new(
+        XaiProvider::new(&oauth_only, timeout).context("building the xAI upstream")?,
+    ));
+    providers.push(Arc::new(
+        KiroProvider::new(&oauth_only, timeout).context("building the Kiro upstream")?,
     ));
 
     Ok(providers)

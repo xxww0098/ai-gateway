@@ -25,6 +25,7 @@
 //! endpoints have no backend anymore. 这里保留了「没接上」分支 —— `503` for the
 //! callback, `404` for the two auth-url keys —— 而不是返回一个控制台从没见过的新错误。
 
+pub mod device;
 pub mod exchange;
 pub mod flow;
 
@@ -80,6 +81,37 @@ pub struct SessionConfig {
     pub created_at: String,
     #[serde(default)]
     pub expires_at: String,
+    /// `device` | `authorization_code` | `idc` | `import`. Empty = PKCE.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub flow: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub device_code: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub user_code: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub verification_uri: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub verification_uri_complete: String,
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub interval: i64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub token_endpoint: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_secret: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub auth_method: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub start_url: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub region: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub last_poll_at: String,
+}
+
+fn is_zero_i64(value: &i64) -> bool {
+    *value == 0
 }
 
 // ---------------------------------------------------------------- sessions
@@ -241,7 +273,15 @@ pub async fn auth_status(
             "auth_id": row.auth_id,
         })),
         STATUS_FAILED => ok(json!({"status": "error", "provider": row.provider})),
-        _ => ok(json!({"status": "wait", "provider": row.provider})),
+        _ => {
+            let config = session_config_of(&row);
+            if device::is_device_flow(&config) {
+                if let Some(provider) = Provider::parse(&row.provider) {
+                    return finish_device_poll(&state, provider, &row, config, true).await;
+                }
+            }
+            ok(device_wait_payload(&row.provider, &config))
+        }
     }
 }
 
@@ -262,7 +302,15 @@ pub async fn sdk_callback(_admin: AdminUser) -> Response {
 /// `GET|POST /{provider}-auth-url`, dispatched from [`super::providers`].
 ///
 /// 对应 `sdkMgmtHandleAuthURLEndpoint` → `sdkMgmtOAuthAuthURLHandler`。
-pub async fn auth_url(state: &PanelState, headers: &HeaderMap, endpoint: &str) -> Response {
+///
+/// `body` is ignored for Gemini / Claude / Codex. xAI always starts a device
+/// flow. Kiro reads `method` (`device` / `authcode` / `idc` / `import`).
+pub async fn auth_url(
+    state: &PanelState,
+    headers: &HeaderMap,
+    endpoint: &str,
+    body: Option<&Value>,
+) -> Response {
     let Some(provider) = Provider::from_auth_url_key(endpoint) else {
         return err(
             StatusCode::NOT_FOUND,
@@ -273,7 +321,7 @@ pub async fn auth_url(state: &PanelState, headers: &HeaderMap, endpoint: &str) -
 
     let oauth_state = uuid::Uuid::new_v4().to_string();
     let now = Utc::now();
-    let expires_at = now + SESSION_TTL;
+    let mut expires_at = now + SESSION_TTL;
     let mut config = SessionConfig {
         provider: provider.as_str().to_owned(),
         endpoint_key: endpoint.trim().to_owned(),
@@ -289,6 +337,84 @@ pub async fn auth_url(state: &PanelState, headers: &HeaderMap, endpoint: &str) -
         config.provider_alias = "anthropic".to_owned();
     }
 
+    match provider {
+        Provider::Xai => {
+            let started = match device::start_xai_device(&mut config).await {
+                Ok(started) => started,
+                Err(error) => {
+                    tracing::warn!(%error, "xAI device authorization failed");
+                    return err(
+                        StatusCode::BAD_GATEWAY,
+                        ERR_EXCHANGE_FAILED,
+                        "failed to start xAI device login",
+                    );
+                }
+            };
+            expires_at = now + device::device_session_ttl(started.expires_in);
+            config.expires_at = rfc3339(expires_at);
+            if let Err(response) = persist_session(state, provider, &oauth_state, &started.verification_uri_complete, &config, now, expires_at).await {
+                return response;
+            }
+            return ok(device::device_start_payload(&oauth_state, &started));
+        }
+        Provider::Kiro => {
+            let start = device::KiroStartBody::from_value(body);
+            match start.method_key() {
+                "import" => {
+                    let tokens = match device::parse_kiro_import(&start.token) {
+                        Ok(tokens) => tokens,
+                        Err(error) => {
+                            return err(StatusCode::BAD_REQUEST, ERR_BAD_REQUEST, &error.to_string());
+                        }
+                    };
+                    return persist_imported(state, provider, tokens).await;
+                }
+                "authcode" => {
+                    let authorize_url = match device::start_kiro_authcode(&mut config, &start).await {
+                        Ok(url) => url,
+                        Err(error) => {
+                            tracing::warn!(%error, "Kiro authorization-code start failed");
+                            return err(
+                                StatusCode::BAD_GATEWAY,
+                                ERR_EXCHANGE_FAILED,
+                                "failed to start Kiro login",
+                            );
+                        }
+                    };
+                    if let Err(response) = persist_session(state, provider, &oauth_state, &authorize_url, &config, now, expires_at).await {
+                        return response;
+                    }
+                    return ok(json!({
+                        "auth_url": authorize_url,
+                        "url": authorize_url,
+                        "state": oauth_state,
+                        "flow": "authorization_code",
+                    }));
+                }
+                _ => {
+                    let started = match device::start_kiro_device(&mut config, &start).await {
+                        Ok(started) => started,
+                        Err(error) => {
+                            tracing::warn!(%error, "Kiro device authorization failed");
+                            return err(
+                                StatusCode::BAD_GATEWAY,
+                                ERR_EXCHANGE_FAILED,
+                                "failed to start Kiro device login",
+                            );
+                        }
+                    };
+                    expires_at = now + device::device_session_ttl(started.expires_in);
+                    config.expires_at = rfc3339(expires_at);
+                    if let Err(response) = persist_session(state, provider, &oauth_state, &started.verification_uri_complete, &config, now, expires_at).await {
+                        return response;
+                    }
+                    return ok(device::device_start_payload(&oauth_state, &started));
+                }
+            }
+        }
+        _ => {}
+    }
+
     let Ok(authorize_url) = build_authorize_url(provider, &oauth_state, &mut config) else {
         return err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -296,39 +422,259 @@ pub async fn auth_url(state: &PanelState, headers: &HeaderMap, endpoint: &str) -
             "failed to create OAuth URL",
         );
     };
-    let Ok(encoded) = serde_json::to_value(&config) else {
+    if let Err(response) = persist_session(state, provider, &oauth_state, &authorize_url, &config, now, expires_at).await {
+        return response;
+    }
+    // Both key spellings: the console reads `auth_url`, older callers `url`.
+    ok(json!({"auth_url": authorize_url, "url": authorize_url, "state": oauth_state}))
+}
+
+/// `POST /oauth-device-poll/{provider}` — one token poll for a device session.
+pub async fn device_poll(
+    State(state): State<PanelState>,
+    _admin: AdminUser,
+    Path(provider): Path<String>,
+    body: Option<axum::Json<Value>>,
+) -> Response {
+    let Some(provider) = Provider::parse(&provider) else {
         return err(
+            StatusCode::NOT_FOUND,
+            ERR_UNKNOWN_PROVIDER,
+            "unsupported OAuth provider",
+        );
+    };
+    if !matches!(provider, Provider::Xai | Provider::Kiro) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            ERR_BAD_REQUEST,
+            "provider does not use the device-code flow",
+        );
+    }
+    let oauth_state = body
+        .as_ref()
+        .and_then(|axum::Json(value)| value.get("state"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("")
+        .to_owned();
+    if oauth_state.is_empty() {
+        return err(StatusCode::BAD_REQUEST, ERR_BAD_REQUEST, "state is required");
+    }
+
+    let row = match load_session_by_state(&state, &oauth_state).await {
+        Ok(row) => row,
+        Err(response) => return response,
+    };
+    if row.provider != provider.as_str() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            ERR_SESSION,
+            "OAuth session provider mismatch",
+        );
+    }
+    if row.status() == STATUS_COMPLETED {
+        return ok(json!({
+            "status": "success",
+            "provider": row.provider,
+            "auth_id": row.auth_id,
+        }));
+    }
+    if row.status() == STATUS_FAILED || (row.status() == STATUS_PENDING && Utc::now() > row.expires_at) {
+        if row.status() == STATUS_PENDING {
+            mark_session(&state, row.id, STATUS_FAILED, None).await;
+        }
+        return ok(json!({"status": "error", "provider": row.provider, "message": "OAuth session expired"}));
+    }
+    let config = session_config_of(&row);
+    finish_device_poll(&state, provider, &row, config, false).await
+}
+
+async fn persist_session(
+    state: &PanelState,
+    provider: Provider,
+    oauth_state: &str,
+    auth_url: &str,
+    config: &SessionConfig,
+    now: chrono::DateTime<Utc>,
+    expires_at: chrono::DateTime<Utc>,
+) -> Result<(), Response> {
+    let encoded = serde_json::to_value(config).map_err(|_| {
+        err(
             StatusCode::INTERNAL_SERVER_ERROR,
             ERR_CREATE_FAILED,
             "failed to create OAuth session",
-        );
-    };
-
+        )
+    })?;
     let inserted = sqlx::query(
         "INSERT INTO o_auth_sessions \
            (provider, state, auth_url, status, config_data, created_at, expires_at) \
          VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(provider.as_str())
-    .bind(&oauth_state)
-    .bind(&authorize_url)
+    .bind(oauth_state)
+    .bind(auth_url)
     .bind(STATUS_PENDING)
     .bind(&encoded)
     .bind(now)
     .bind(expires_at)
     .execute(&state.pg)
     .await;
-
     if let Err(error) = inserted {
         tracing::error!(%error, "failed to store OAuth session");
-        return err(
+        return Err(err(
             StatusCode::INTERNAL_SERVER_ERROR,
             ERR_CREATE_FAILED,
             "failed to store OAuth session",
+        ));
+    }
+    Ok(())
+}
+
+async fn persist_imported(
+    state: &PanelState,
+    provider: Provider,
+    tokens: exchange::TokenResponse,
+) -> Response {
+    let record = oauth_record(provider, &tokens, Utc::now());
+    if let Err(error) = state.auth_store.save(&record).await {
+        tracing::error!(%error, "failed to persist imported OAuth credential");
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ERR_REGISTER_FAILED,
+            "failed to register OAuth auth",
         );
     }
-    // Both key spellings: the console reads `auth_url`, older callers `url`.
-    ok(json!({"auth_url": authorize_url, "url": authorize_url, "state": oauth_state}))
+    ok(json!({
+        "status": "success",
+        "message": "OAuth completed",
+        "provider": provider.as_str(),
+        "auth_id": record.id,
+        "flow": "import",
+    }))
+}
+
+fn session_config_of(row: &SessionRow) -> SessionConfig {
+    row.config_data
+        .clone()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
+fn device_wait_payload(provider: &str, config: &SessionConfig) -> Value {
+    json!({
+        "status": "wait",
+        "provider": provider,
+        "user_code": config.user_code,
+        "verification_uri": config.verification_uri,
+        "verification_uri_complete": config.verification_uri_complete,
+        "interval": config.interval,
+        "flow": if config.flow.is_empty() { "device" } else { config.flow.as_str() },
+    })
+}
+
+async fn load_session_by_state(
+    state: &PanelState,
+    oauth_state: &str,
+) -> Result<SessionRow, Response> {
+    let row: Option<SessionRow> = sqlx::query_as(&format!(
+        "SELECT {SESSION_COLUMNS} FROM o_auth_sessions WHERE state = $1"
+    ))
+    .bind(oauth_state)
+    .fetch_optional(&state.pg)
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "failed to load OAuth session");
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ERR_LOAD_FAILED,
+            "failed to load OAuth session",
+        )
+    })?;
+    row.ok_or_else(|| {
+        err(
+            StatusCode::BAD_REQUEST,
+            ERR_SESSION,
+            "OAuth session not found",
+        )
+    })
+}
+
+async fn finish_device_poll(
+    state: &PanelState,
+    provider: Provider,
+    row: &SessionRow,
+    mut config: SessionConfig,
+    skip_if_early: bool,
+) -> Response {
+    let now = Utc::now();
+    if skip_if_early && !device::interval_elapsed(&config, now) {
+        return ok(device_wait_payload(provider.as_str(), &config));
+    }
+
+    let outcome = match device::poll_provider_token(provider, &config).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            tracing::warn!(%error, provider = provider.as_str(), "device token poll failed");
+            return ok(device_wait_payload(provider.as_str(), &config));
+        }
+    };
+
+    match outcome {
+        device::DevicePollOutcome::Pending { interval } => {
+            device::mark_polled(&mut config, now, interval);
+            let _ = store_config(state, row.id, &config).await;
+            ok(device_wait_payload(provider.as_str(), &config))
+        }
+        device::DevicePollOutcome::SlowDown { interval } => {
+            device::mark_polled(&mut config, now, interval);
+            let _ = store_config(state, row.id, &config).await;
+            ok(device_wait_payload(provider.as_str(), &config))
+        }
+        device::DevicePollOutcome::Completed(tokens) => {
+            let record = oauth_record(provider, &tokens, now);
+            if let Err(error) = state.auth_store.save(&record).await {
+                tracing::error!(%error, "failed to persist OAuth credential");
+                mark_session(state, row.id, STATUS_FAILED, None).await;
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ERR_REGISTER_FAILED,
+                    "failed to register OAuth auth",
+                );
+            }
+            mark_session(state, row.id, STATUS_COMPLETED, Some(&record.id)).await;
+            ok(json!({
+                "status": "success",
+                "message": "OAuth completed",
+                "provider": provider.as_str(),
+                "auth_id": record.id,
+            }))
+        }
+        device::DevicePollOutcome::Failed { error, description } => {
+            mark_session(state, row.id, STATUS_FAILED, None).await;
+            ok(json!({
+                "status": "error",
+                "provider": provider.as_str(),
+                "message": if description.is_empty() { error } else { description },
+            }))
+        }
+    }
+}
+
+async fn store_config(state: &PanelState, id: i64, config: &SessionConfig) -> Result<(), ()> {
+    let Ok(encoded) = serde_json::to_value(config) else {
+        return Err(());
+    };
+    let result = sqlx::query("UPDATE o_auth_sessions SET config_data = $1 WHERE id = $2")
+        .bind(&encoded)
+        .bind(id)
+        .execute(&state.pg)
+        .await;
+    if let Err(error) = result {
+        tracing::warn!(%error, id, "failed to update OAuth session config");
+        return Err(());
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------- callback
@@ -490,7 +836,7 @@ async fn load_pending(
             "OAuth session expired",
         ));
     }
-    if config.redirect_uri.trim().is_empty() {
+    if config.redirect_uri.trim().is_empty() && !device::is_device_flow(&config) {
         return Err(err(
             StatusCode::BAD_REQUEST,
             ERR_SESSION,

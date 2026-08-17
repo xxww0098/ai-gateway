@@ -20,6 +20,7 @@ fn tokens() -> TokenResponse {
         raw: Map::new(),
         email: "ops@example.test".to_owned(),
         account_id: "acct-1".to_owned(),
+        extra: Map::new(),
     }
 }
 

@@ -30,6 +30,13 @@ pub const PROVIDER_GEMINI: &str = "gemini";
 pub const PROVIDER_CODEX: &str = "codex";
 /// See [`PROVIDER_OPENAI`].
 pub const PROVIDER_VERTEX: &str = "vertex";
+/// xAI Grok OAuth executor. Tokens are also usable via the OpenAI-compatible
+/// executor when the record carries `base_url=https://api.x.ai/v1`.
+pub const PROVIDER_XAI: &str = "xai";
+/// Kiro / AWS Builder ID. The 15-cell relay matrix has no Kiro cell, so this
+/// executor is registered for refresh and for an operator who routes to it
+/// explicitly; `/v1` candidates never include `"kiro"` today.
+pub const PROVIDER_KIRO: &str = "kiro";
 
 /// Whole-request cap for non-streaming calls.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);

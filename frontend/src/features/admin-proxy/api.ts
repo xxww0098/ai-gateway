@@ -54,6 +54,14 @@ export function submitGatewayOAuthCallback(
   return sdkClient.post(`/oauth-callback/${encodeURIComponent(provider)}`, body)
 }
 
+/** One device-code token poll for xAI / Kiro. */
+export function pollDeviceOAuth(
+  provider: string,
+  body: { state: string }
+): Promise<unknown> {
+  return sdkClient.post(`/oauth-device-poll/${encodeURIComponent(provider)}`, body)
+}
+
 // ── Auth Files API ──────────────────────────────────────────────────────────
 
 export function fetchAuthFiles(): Promise<AuthFilesResponse> {

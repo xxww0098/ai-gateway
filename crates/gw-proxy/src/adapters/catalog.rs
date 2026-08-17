@@ -156,7 +156,7 @@ const MODELS_URL_SENTINEL: &str = "__models_url__";
 /// 不在表里的 `channel_key` 落 [`gw_relay::endpoint::upstream::WILDCARD_PROVIDER`]
 /// （`openai`）—— 它就是那个通配的 OpenAI 兼容 executor，DeepSeek / Qwen / Kimi /
 /// 自建 vLLM 都从它出网。
-const DEFAULT_CHANNEL_PROVIDERS: [(&str, Provider); 8] = [
+const DEFAULT_CHANNEL_PROVIDERS: [(&str, Provider); 10] = [
     ("openai", Provider::OpenAi),
     ("openai_compatible", Provider::OpenAi),
     ("claude", Provider::Claude),
@@ -165,6 +165,10 @@ const DEFAULT_CHANNEL_PROVIDERS: [(&str, Provider); 8] = [
     ("aistudio", Provider::Gemini),
     ("vertex", Provider::Vertex),
     ("codex", Provider::Codex),
+    // xAI Grok is OpenAI-compatible; L1 `xai/<model>` / `grok/<model>` uses
+    // the OpenAI executor. Auth records stay stored as `xai`.
+    ("xai", Provider::OpenAi),
+    ("grok", Provider::OpenAi),
 ];
 
 /// 四级链 L2/L3 的真实数据源：`model_catalog_entries` 的**路由视图** + 快照缓存。

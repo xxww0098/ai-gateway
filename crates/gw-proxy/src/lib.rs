@@ -15,21 +15,16 @@
 //!
 //! 只有一个前缀：`/v1/`（[`access::is_proxy_path`]）。
 //!
-//! # 已知缺口（已接受，不要试图去修）
+//! # 面板接入文案
 //!
-//! 面板 `frontend/src/features/user-dashboard/components/QuickIntegrationPanel.tsx:80`
-//! 的 Anthropic tab 仍然把 `${origin}/v1beta` 印给用户，而 `/v1beta/**` 已被硬删，
-//! 照着面板配的用户会拿到 404。前端冻结，改不了。
+//! `QuickIntegrationPanel` 与公开 `/docs` 对齐：OpenAI 兼容印 `{origin}/v1`，
+//! Anthropic / Claude 印裸 `{origin}` + `Authorization: Bearer agw-…`
+//! （`@anthropic-ai/sdk` 自己会拼 `/v1/messages`）。没有 `/v1beta`。
 //!
-//! 补充事实：**那行文案今天本来就是错的** —— `/v1beta` 是 Google 的版本段，
-//! 给 Anthropic 客户端本来就 404（`@anthropic-ai/sdk` 自己会拼 `/v1/messages`，
-//! 它需要的 base 是裸 `${origin}`）。收敛只是把「错但碰巧有个路由在」
-//! 变成「错且路由也没了」。这是已知且已接受的代价。
-//!
-//! 反过来，`GET /v1/models` **必须保留**，理由不是「前端在调」（前端对 `/v1` 的
-//! HTTP 调用数是 0），而是面板 `QuickIntegrationPanel.tsx:79` 把 `${origin}/v1`
-//! 作为 Base URL 印给用户 —— 所有 OpenAI 兼容客户端拿到 base 之后的第一个请求
-//! 就是 `GET {base}/models`。删了它，照面板指引配置的客户端在**连接测试阶段**就失败。
+//! `GET /v1/models` **必须保留**，理由不是「前端在调」（前端对 `/v1` 的
+//! HTTP 调用数是 0），而是面板把 `${origin}/v1` 作为 OpenAI Base URL 印给用户
+//! —— 所有 OpenAI 兼容客户端拿到 base 之后的第一个请求就是 `GET {base}/models`。
+//! 删了它，照面板指引配置的客户端在**连接测试阶段**就失败。
 //!
 //! Request order (must match the B1 fix):
 //!   access-auth -> hold -> execute -> parse usage -> settle | release

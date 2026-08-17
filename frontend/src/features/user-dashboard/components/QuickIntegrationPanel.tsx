@@ -1,6 +1,7 @@
 import { Zap, Archive, Code2, MessageSquare, Terminal } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import type { IntegrationTab, QuickIntegrationPanelProps } from '../types'
+import { anthropicBaseUrl, openaiBaseUrl } from '@/pages/docs/guide'
 
 const integrationTabs: Array<{ id: IntegrationTab; label: string; Icon: LucideIcon }> = [
   { id: 'openai', label: 'OpenAI 兼容', Icon: Code2 },
@@ -76,18 +77,14 @@ export function QuickIntegrationPanel({
                 <label className="text-xs font-semibold text-gray-500 dark:text-dark-400 uppercase tracking-wider">Base URL 请求地址</label>
                 <div className="flex items-center justify-between bg-white dark:bg-dark-900/80 border border-border p-3 rounded-xl font-mono text-sm shadow-sm select-all cursor-text text-primary-600 dark:text-primary-400">
                   {integrationTab === 'openai'
-                    ? `${origin}/v1`
-                    : `${origin}/v1beta`}
+                    ? openaiBaseUrl(origin)
+                    : anthropicBaseUrl(origin)}
                 </div>
               </div>
               <div className="space-y-2">
                 <label className="text-xs font-semibold text-gray-500 dark:text-dark-400 uppercase tracking-wider">身份认证标头</label>
                 <div className="bg-white dark:bg-dark-900/80 border border-border p-3 rounded-xl font-mono text-sm shadow-sm overflow-x-auto text-gray-500 dark:text-dark-300">
-                  {integrationTab === 'openai' ? (
-                    <>Authorization: Bearer <span className="text-emerald-500">{"<YOUR_API_KEY>"}</span></>
-                  ) : (
-                    <>x-api-key: <span className="text-emerald-500">{"<YOUR_API_KEY>"}</span></>
-                  )}
+                  <>Authorization: Bearer <span className="text-emerald-500">{"<YOUR_API_KEY>"}</span></>
                 </div>
               </div>
               {integrationTab === 'anthropic' && (

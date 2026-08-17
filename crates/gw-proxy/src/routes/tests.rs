@@ -13,7 +13,7 @@ use gw_provider::types::{ProviderResponse, StreamChunk, UsageRecord};
 use super::*;
 use crate::testsupport::{
     Harness, LedgerCall, TEST_API_KEY, anonymous_request, auth_record, chat_body, ok_response,
-    ok_response_without_usage, send_settled, signed_get, signed_request,
+    ok_response_without_usage, send, send_settled, signed_get, signed_request,
 };
 
 mod dispatch;

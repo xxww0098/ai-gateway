@@ -13,7 +13,7 @@ pub mod stubs;
 /// 压测 API key 明文。`loadgen`（每个被测端都打）与 `stubs::StaticDirectory`
 /// （只有 `gateway` 装得起来）共用同一个值，所以它住在 crate 根而不是 `stubs`
 /// —— 否则 `--no-default-features` 下 `loadgen` 就编不出来了。
-pub const PERF_API_KEY: &str = "cpa-perfbaselinekey";
+pub const PERF_API_KEY: &str = "agw-perfbaselinekey";
 
 /// 三种负载形态的共享常量，`mock-upstream` 与 `loadgen` 都从这里读，
 /// 免得两边各写一份魔数然后悄悄漂移。

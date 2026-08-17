@@ -159,7 +159,7 @@ async fn serve_records_abandoned_settlements_for_operators() {
     let mut exposition = String::new();
     metrics.write_prometheus(&mut exposition);
     assert!(
-        exposition.contains("cpa_abandoned_settlements 1"),
+        exposition.contains("agw_abandoned_settlements 1"),
         "{exposition}"
     );
 }

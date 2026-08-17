@@ -70,7 +70,7 @@ export default function Home() {
             <div className="flex-1 text-center lg:text-left space-y-8 animate-in fade-in slide-in-from-bottom-8 duration-700" style={{ willChange: 'transform, opacity' }}>
               <div className="inline-flex items-center gap-2 rounded-full border border-primary-200 bg-primary-50/50 px-4 py-1.5 text-sm font-medium text-primary-700 dark:border-primary-800/50 dark:bg-primary-900/20 dark:text-primary-400">
                 <Activity className="h-4 w-4" />
-                CLI Proxy API 全新管理层
+                AI-GateWay 全新管理层
               </div>
               
               <h1 className="text-5xl font-extrabold tracking-tight text-gray-900 dark:text-white md:text-6xl lg:text-7xl leading-tight">

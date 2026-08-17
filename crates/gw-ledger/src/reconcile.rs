@@ -11,7 +11,7 @@ use crate::{Ledger, LedgerError};
 /// Settle and release both clear a hold promptly, so a hold still present well
 /// past its TTL means the owning request crashed (or leaked) before settling —
 /// the crash window that synchronous deferred settlement cannot itself close.
-/// Surfacing these drives the `cpa_orphaned_holds` gauge and, later,
+/// Surfacing these drives the `agw_orphaned_holds` gauge and, later,
 /// supervised remediation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StaleHold {

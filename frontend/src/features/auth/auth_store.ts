@@ -39,13 +39,19 @@ function readCachedUser(): User | null {
   }
 }
 
+function dropObsoleteAuthKeys() {
+  localStorage.removeItem('cpa_token')
+  localStorage.removeItem('cpa_user')
+  localStorage.removeItem('agw_token')
+  localStorage.removeItem('agw_user')
+}
+
 export const useAuthStore = create<AuthState>((set, get) => ({
   token: null,
   user: readCachedUser(),
   setAuth: (token, user) => {
     localStorage.setItem(USER_KEY, JSON.stringify(user))
-    localStorage.removeItem('cpa_token')
-    localStorage.removeItem('cpa_user')
+    dropObsoleteAuthKeys()
     set({ token, user })
   },
   updateUser: (userUpdate) => {
@@ -57,8 +63,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
   logout: () => {
     localStorage.removeItem(USER_KEY)
-    localStorage.removeItem('cpa_token')
-    localStorage.removeItem('cpa_user')
+    dropObsoleteAuthKeys()
     set({ token: null, user: null })
   },
 }))

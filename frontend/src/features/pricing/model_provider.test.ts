@@ -43,7 +43,7 @@ describe('model_provider', () => {
       expect(getProviderForModelId('mimo-v2.5-pro')).toBe('mimo')
     })
 
-    it('resolves providers from cpa-models-registry (minimax, deepseek)', () => {
+    it('resolves providers from agw-models-registry (minimax, deepseek)', () => {
       expect(getProviderForModelId('MiniMax-M2.7')).toBe('minimax')
       expect(getProviderForModelId('deepseek-v4-flash')).toBe('deepseek')
     })
@@ -73,7 +73,7 @@ describe('model_provider', () => {
       expect(meta?.type).toBe('gemini')
     })
 
-    it('returns metadata for cpa-models-registry models', () => {
+    it('returns metadata for agw-models-registry models', () => {
       const meta = getModelRegistryMetadata('mimo-v2.5-pro')
       expect(meta).toBeDefined()
       expect(meta?.owned_by).toBe('xiaomi')

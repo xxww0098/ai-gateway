@@ -9,7 +9,7 @@
 //! decrypt here:
 //!
 //! ```text
-//! {"__cpa_enc_v1": base64_std( nonce[12] || AES-256-GCM(metadata_json) )}
+//! {"__agw_enc_v1": base64_std( nonce[12] || AES-256-GCM(metadata_json) )}
 //! ```
 
 use crate::error::AuthError;
@@ -26,7 +26,7 @@ mod tests;
 
 /// The single JSON key wrapping the ciphertext, so an encrypted blob is still
 /// valid JSON for the `jsonb` column.
-pub const CRED_ENC_ENVELOPE_KEY: &str = "__cpa_enc_v1";
+pub const CRED_ENC_ENVELOPE_KEY: &str = "__agw_enc_v1";
 
 /// Environment variable holding the credential-encryption key.
 pub const CREDENTIAL_ENCRYPTION_KEY_ENV: &str = "CREDENTIAL_ENCRYPTION_KEY";

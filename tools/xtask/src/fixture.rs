@@ -18,7 +18,7 @@ impl Fixture {
     /// Create an empty fixture. `name` must be unique within the test binary.
     pub(crate) fn new(name: &str) -> Fixture {
         let root = std::env::temp_dir()
-            .join("cpa-xtask-fixtures")
+            .join("agw-xtask-fixtures")
             .join(format!("{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("create fixture root");

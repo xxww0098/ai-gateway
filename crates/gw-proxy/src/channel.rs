@@ -125,7 +125,7 @@ impl ChannelHealth {
     }
 
     /// How many accounts are benched right now. Feeds the
-    /// `cpa_channel_benched_total` gauge.
+    /// `agw_channel_benched_total` gauge.
     pub fn benched_count(&self) -> i64 {
         let now = (self.clock)();
         self.state

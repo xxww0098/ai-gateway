@@ -108,7 +108,7 @@ export default function Redeem({ embedded = false }: RedeemProps) {
             </CardDescription>
             <form onSubmit={handleRedeem} className="space-y-3">
               <Input
-                placeholder="例如：CPA-a1b2c3d4..."
+                placeholder="例如：AGW-a1b2c3d4..."
                 value={code}
                 onChange={(e) => setCode(e.target.value)}
                 className="font-mono text-base sm:text-sm min-h-11"

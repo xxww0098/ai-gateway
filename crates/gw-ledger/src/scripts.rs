@@ -26,9 +26,9 @@ use redis::Script;
 /// change who is admitted for a given `(balance, holds, amount)`.
 ///
 /// ```text
-/// KEYS[1] = cpa-gateway:billing:balance:{userID}   (cached balance string)
-/// KEYS[2] = cpa-gateway:billing:holds:{userID}     (sorted set)
-/// KEYS[3] = cpa-gateway:billing:holds:ts:{userID}  (hold timestamps hash)
+/// KEYS[1] = ai-gateway:billing:balance:{userID}   (cached balance string)
+/// KEYS[2] = ai-gateway:billing:holds:{userID}     (sorted set)
+/// KEYS[3] = ai-gateway:billing:holds:ts:{userID}  (hold timestamps hash)
 /// ARGV[1] = hold amount (float as string)
 /// ARGV[2] = request ID
 /// ARGV[3] = current timestamp (unix seconds)
@@ -122,9 +122,9 @@ return 'OK'
 /// `cached_balance - sum(active holds)` as a string.
 ///
 /// ```text
-/// KEYS[1] = cpa-gateway:billing:balance:{userID}   (cached balance string)
-/// KEYS[2] = cpa-gateway:billing:holds:{userID}     (sorted set)
-/// KEYS[3] = cpa-gateway:billing:holds:ts:{userID}  (hold timestamps hash)
+/// KEYS[1] = ai-gateway:billing:balance:{userID}   (cached balance string)
+/// KEYS[2] = ai-gateway:billing:holds:{userID}     (sorted set)
+/// KEYS[3] = ai-gateway:billing:holds:ts:{userID}  (hold timestamps hash)
 /// ARGV[1] = current timestamp (unix seconds)
 /// ARGV[2] = hold TTL seconds
 /// ```

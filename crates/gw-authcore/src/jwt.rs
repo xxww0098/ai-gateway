@@ -16,7 +16,7 @@ mod tests;
 pub const DEFAULT_EXPIRY_HOURS: i64 = 24;
 
 /// Issuer stamped on every token we mint.
-pub const ISSUER: &str = "cpa-gateway";
+pub const ISSUER: &str = "ai-gateway";
 
 /// Claims carried by a panel session token.
 ///

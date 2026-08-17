@@ -51,9 +51,9 @@ impl Default for DbSettings {
         Self {
             host: "127.0.0.1".to_owned(),
             port: 5432,
-            user: "cpa_gateway".to_owned(),
+            user: "ai_gateway".to_owned(),
             password: String::new(),
-            dbname: "cpa_gateway".to_owned(),
+            dbname: "ai_gateway".to_owned(),
             sslmode: "disable".to_owned(),
             max_idle_conns: 0,
             max_open_conns: 0,

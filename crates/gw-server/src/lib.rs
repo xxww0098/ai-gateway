@@ -84,7 +84,7 @@ impl FromRef<AppState> for Arc<Metrics> {
 pub fn base_router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health::liveness))
-        // The CPA SDK's internal server owned `/healthz`, and dropping the
+        // The previous SDK's internal server owned `/healthz`, and dropping the
         // SDK dropped the route while `frontend/vite.config.ts` kept proxying
         // it. See [`health::healthz`] for why its body differs from
         // `/api/health`'s.
@@ -152,7 +152,7 @@ pub async fn serve_with_shutdown(
     info!(
         host = %config.server.host,
         port = config.server.port,
-        "starting CPA-Gateway",
+        "starting AI-GateWay",
     );
 
     let served = axum::serve(listener, app)
@@ -167,7 +167,7 @@ pub async fn serve_with_shutdown(
     metrics.set_abandoned_settlements(outcome.abandoned as i64);
     served?;
 
-    info!("CPA-Gateway stopped");
+    info!("AI-GateWay stopped");
     Ok(())
 }
 
@@ -231,7 +231,7 @@ pub fn run() -> anyhow::Result<()> {
 
     if cli.show_version {
         startup::init_tracing(gw_config::DEFAULT_LOG_LEVEL);
-        info!(version = APP_VERSION, "cpa-gateway");
+        info!(version = APP_VERSION, "ai-gateway");
         return Ok(());
     }
 

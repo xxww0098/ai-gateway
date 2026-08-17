@@ -6,7 +6,7 @@ use super::*;
 #[test]
 fn masking_keeps_the_prefix_and_never_leaks_the_rest() {
     // 性质：遮蔽值以前缀开头，且比前缀长（后面是固定的遮蔽符）。
-    for prefix in ["cpa-000000ab", "cpa-", ""] {
+    for prefix in ["agw-000000ab", "agw-", ""] {
         let shown = masked(prefix);
         assert!(shown.starts_with(prefix), "prefix={prefix:?}");
         assert!(shown.len() > prefix.len(), "prefix={prefix:?}");
@@ -32,8 +32,8 @@ fn list_item_omits_absent_group_and_last_used() {
     let item = ApiKeyListItem {
         id: 1,
         name: "n".into(),
-        key: "cpa-abc****".into(),
-        key_prefix: "cpa-abc".into(),
+        key: "agw-abc****".into(),
+        key_prefix: "agw-abc".into(),
         status: "active".into(),
         group_id: None,
         last_used_at: None,
@@ -56,8 +56,8 @@ fn list_item_emits_group_id_when_bound() {
     let item = ApiKeyListItem {
         id: 1,
         name: "n".into(),
-        key: "cpa-abc****".into(),
-        key_prefix: "cpa-abc".into(),
+        key: "agw-abc****".into(),
+        key_prefix: "agw-abc".into(),
         status: "active".into(),
         group_id: Some(7),
         last_used_at: Some(chrono::Utc::now()),
@@ -75,7 +75,7 @@ fn admin_item_uses_prefix_not_key_prefix() {
     let json = serde_json::to_value(AdminApiKeyItem {
         id: 3,
         name: "n".into(),
-        prefix: "cpa-abc".into(),
+        prefix: "agw-abc".into(),
         status: "active".into(),
         quota: 0,
         quota_used: 0,

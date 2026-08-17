@@ -76,7 +76,7 @@ describe('model_catalog', () => {
     expect(hasModelDetails({ id: 'named-model', display_name: 'Named Model' })).toBe(true)
   })
 
-  it('enriches OpenAI-compatible configured models from the CPA registry overlay', () => {
+  it('enriches OpenAI-compatible configured models from the custom registry overlay', () => {
     const model = configuredModelToCatalogItem({ name: 'MiniMax-M2.7' }, { provider: 'openai' })
 
     expect(model.display_name).toBe('MiniMax M2.7')

@@ -1,6 +1,6 @@
 //! [`AuthCrypto`] over `gw_authcore`.
 //!
-//! `hash_api_key` for the `cpa-` credential path and `validate_jwt` for the
+//! `hash_api_key` for the `agw-` credential path and `validate_jwt` for the
 //! panel token path. The JWT secret is held here rather than passed per call,
 //! which is what lets [`crate::access::AccessProvider`] stay free of
 //! configuration.

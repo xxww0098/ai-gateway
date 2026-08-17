@@ -5,7 +5,7 @@
 //! * a JSON snapshot of the `/api/panel/**` surface (the panel dashboard reads
 //!   it);
 //! * Prometheus text for the `/v1/*` proxy surface, plus the
-//!   `cpa_channel_benched_total` / `cpa_orphaned_holds` gauges.
+//!   `agw_channel_benched_total` / `agw_orphaned_holds` gauges.
 //!
 //! Hand-rolling the exposition format (rather than taking a Prometheus client
 //! dependency) is deliberate and keeps the output strictly compatible.
@@ -215,68 +215,68 @@ impl Metrics {
         let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
 
         out.push_str(
-            "# HELP cpa_v1_requests_total Total /v1 proxy requests by HTTP status class.\n",
+            "# HELP agw_v1_requests_total Total /v1 proxy requests by HTTP status class.\n",
         );
-        out.push_str("# TYPE cpa_v1_requests_total counter\n");
+        out.push_str("# TYPE agw_v1_requests_total counter\n");
         let _ = writeln!(
             out,
-            "cpa_v1_requests_total{{status_class=\"2xx\"}} {}",
+            "agw_v1_requests_total{{status_class=\"2xx\"}} {}",
             load(&self.v1_2xx)
         );
         let _ = writeln!(
             out,
-            "cpa_v1_requests_total{{status_class=\"4xx\"}} {}",
+            "agw_v1_requests_total{{status_class=\"4xx\"}} {}",
             load(&self.v1_4xx)
         );
         let _ = writeln!(
             out,
-            "cpa_v1_requests_total{{status_class=\"5xx\"}} {}",
+            "agw_v1_requests_total{{status_class=\"5xx\"}} {}",
             load(&self.v1_5xx)
         );
 
-        out.push_str("# HELP cpa_v1_request_duration_seconds Cumulative /v1 request latency.\n");
-        out.push_str("# TYPE cpa_v1_request_duration_seconds summary\n");
+        out.push_str("# HELP agw_v1_request_duration_seconds Cumulative /v1 request latency.\n");
+        out.push_str("# TYPE agw_v1_request_duration_seconds summary\n");
         // Print exactly six decimals.
         let _ = writeln!(
             out,
-            "cpa_v1_request_duration_seconds_sum {:.6}",
+            "agw_v1_request_duration_seconds_sum {:.6}",
             load(&self.v1_duration_nanos) as f64 / 1e9
         );
         let _ = writeln!(
             out,
-            "cpa_v1_request_duration_seconds_count {}",
+            "agw_v1_request_duration_seconds_count {}",
             load(&self.v1_duration_count)
         );
 
         out.push_str(
-            "# HELP cpa_channel_benched_total Upstream accounts currently benched by health checks.\n",
+            "# HELP agw_channel_benched_total Upstream accounts currently benched by health checks.\n",
         );
-        out.push_str("# TYPE cpa_channel_benched_total gauge\n");
+        out.push_str("# TYPE agw_channel_benched_total gauge\n");
         let _ = writeln!(
             out,
-            "cpa_channel_benched_total {}",
+            "agw_channel_benched_total {}",
             self.channel_benched.load(Ordering::Relaxed)
         );
 
         out.push_str(
-            "# HELP cpa_orphaned_holds Holds orphaned by a prior crash (read-only B8 detection).\n",
+            "# HELP agw_orphaned_holds Holds orphaned by a prior crash (read-only B8 detection).\n",
         );
-        out.push_str("# TYPE cpa_orphaned_holds gauge\n");
+        out.push_str("# TYPE agw_orphaned_holds gauge\n");
         let _ = writeln!(
             out,
-            "cpa_orphaned_holds {}",
+            "agw_orphaned_holds {}",
             self.orphaned_holds.load(Ordering::Relaxed)
         );
 
         // Rust-only, appended AFTER the parity block above so existing
         // dashboards keep matching (Prometheus exposition is additive).
         out.push_str(
-            "# HELP cpa_abandoned_settlements Settlements still running when the shutdown drain timed out.\n",
+            "# HELP agw_abandoned_settlements Settlements still running when the shutdown drain timed out.\n",
         );
-        out.push_str("# TYPE cpa_abandoned_settlements gauge\n");
+        out.push_str("# TYPE agw_abandoned_settlements gauge\n");
         let _ = writeln!(
             out,
-            "cpa_abandoned_settlements {}",
+            "agw_abandoned_settlements {}",
             self.abandoned_settlements.load(Ordering::Relaxed)
         );
     }

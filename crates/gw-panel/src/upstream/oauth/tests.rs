@@ -66,6 +66,32 @@ fn the_session_config_never_serialises_an_absent_verifier() {
     assert!(!object.contains_key("code_verifier"));
     assert!(!object.contains_key("code_challenge_method"));
     assert!(!object.contains_key("provider_alias"));
+    assert!(!object.contains_key("device_code"));
+    assert!(!object.contains_key("client_secret"));
+    assert!(!object.contains_key("flow"));
+}
+
+#[test]
+fn a_device_session_round_trips_through_the_config_column() {
+    let config = SessionConfig {
+        flow: "device".to_owned(),
+        device_code: "dc-1".to_owned(),
+        user_code: "WDJB-MJHT".to_owned(),
+        verification_uri: "https://auth.x.ai/device".to_owned(),
+        interval: 5,
+        client_id: "public-client".to_owned(),
+        client_secret: "s3cret".to_owned(),
+        ..SessionConfig::default()
+    };
+    let encoded = serde_json::to_value(&config).expect("serializes");
+    let decoded: SessionConfig = serde_json::from_value(encoded.clone()).expect("round-trips");
+    assert_eq!(decoded.device_code, config.device_code);
+    assert_eq!(decoded.user_code, config.user_code);
+    assert_eq!(decoded.client_secret, config.client_secret);
+    assert_eq!(decoded.interval, 5);
+    let object = encoded.as_object().expect("object");
+    assert!(object.contains_key("device_code"));
+    assert!(object.contains_key("client_secret"));
 }
 
 #[test]

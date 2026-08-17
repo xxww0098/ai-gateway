@@ -42,7 +42,7 @@ pub(super) const CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 pub(super) const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_SCOPES: &str = "openid email profile offline_access";
 
-/// The three providers with a panel-driven OAuth flow.
+/// The providers with a panel-driven OAuth flow.
 ///
 /// `anthropic` is accepted as an inbound alias for `claude` in the auth-url key
 /// but the credential is always stored under `claude`, so one provider never
@@ -52,6 +52,10 @@ pub enum Provider {
     Gemini,
     Claude,
     Codex,
+    /// xAI Grok — device-code (RFC 8628), stored as `xai`.
+    Xai,
+    /// Kiro / AWS Builder ID — device-code, auth-code, or IDC.
+    Kiro,
 }
 
 impl Provider {
@@ -62,6 +66,8 @@ impl Provider {
             "gemini" => Some(Self::Gemini),
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
+            "xai" | "grok" => Some(Self::Xai),
+            "kiro" => Some(Self::Kiro),
             _ => None,
         }
     }
@@ -73,6 +79,8 @@ impl Provider {
             Self::Gemini => "gemini",
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Xai => "xai",
+            Self::Kiro => "kiro",
         }
     }
 
@@ -86,6 +94,8 @@ impl Provider {
             "gemini-cli-auth-url" => Some(Self::Gemini),
             "anthropic-auth-url" => Some(Self::Claude),
             "codex-auth-url" => Some(Self::Codex),
+            "xai-auth-url" | "grok-auth-url" => Some(Self::Xai),
+            "kiro-auth-url" => Some(Self::Kiro),
             _ => None,
         }
     }
@@ -180,19 +190,22 @@ pub fn build_authorize_url(
                 ("codex_cli_simplified_flow", "true".to_owned()),
             ]
         }
+        // Device / dynamic-client flows build their URL elsewhere.
+        Provider::Xai | Provider::Kiro => return Ok(String::new()),
     };
 
     let base = match provider {
         Provider::Gemini => GEMINI_AUTH_URL,
         Provider::Claude => CLAUDE_AUTH_URL,
         Provider::Codex => CODEX_AUTH_URL,
+        Provider::Xai | Provider::Kiro => "",
     };
     Ok(format!("{base}?{}", form_encode(&params)))
 }
 
 /// Generates the PKCE pair, storing the verifier and returning the challenge.
 /// 对应 `sdkMgmtGeneratePKCE` —— 96 random bytes, base64url without padding.
-fn set_pkce(config: &mut SessionConfig) -> Result<String, rand::Error> {
+pub(super) fn set_pkce(config: &mut SessionConfig) -> Result<String, rand::Error> {
     use rand::RngCore as _;
     let mut raw = [0u8; 96];
     rand::rngs::OsRng.try_fill_bytes(&mut raw)?;

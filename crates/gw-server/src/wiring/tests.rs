@@ -32,7 +32,7 @@ fn names(sdk: &SdkConfig) -> Vec<&'static str> {
 fn blank_config_still_yields_the_db_backed_upstreams() {
     let built = names(&SdkConfig::default());
 
-    for expected in ["claude", "gemini", "codex", "vertex"] {
+    for expected in ["claude", "gemini", "codex", "vertex", "xai", "kiro"] {
         assert!(
             built.contains(&expected),
             "{expected} missing from {built:?}",

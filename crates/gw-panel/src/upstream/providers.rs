@@ -123,7 +123,7 @@ pub async fn get(
     headers: axum::http::HeaderMap,
 ) -> Response {
     if endpoint.ends_with(AUTH_URL_SUFFIX) {
-        return super::oauth::auth_url(&state, &headers, &endpoint).await;
+        return super::oauth::auth_url(&state, &headers, &endpoint, None).await;
     }
     let Some(provider) = provider_for_endpoint(&endpoint) else {
         return unknown_provider();
@@ -160,7 +160,8 @@ pub async fn post(
     body: Option<axum::Json<Value>>,
 ) -> Response {
     if endpoint.ends_with(AUTH_URL_SUFFIX) {
-        return super::oauth::auth_url(&state, &headers, &endpoint).await;
+        let payload = body.as_ref().map(|axum::Json(value)| value);
+        return super::oauth::auth_url(&state, &headers, &endpoint, payload).await;
     }
     let Some(provider) = provider_for_endpoint(&endpoint) else {
         return unknown_provider();

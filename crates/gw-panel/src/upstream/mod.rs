@@ -13,7 +13,7 @@
 //! | [`record`] | [`AuthRecord`](gw_authcore::AuthRecord) 的读取与三种序列化 | `sdkMgmtAttr*` / `sdkMgmtSerialize*` |
 //! | [`auth_files`] | 凭证清单：列表 / 上传 / 启停 / 删除 / 配额 / 模型 | `SDKMgmtAuthFiles*Handler` |
 //! | [`providers`] | 五个 provider 的 API Key 池 CRUD + 用量桶 | `SDKMgmtProvider*Handler` |
-//! | [`oauth`] | 三个 provider 的 OAuth 起止与会话 | `SDKMgmtOAuth*` |
+//! | [`oauth`] | Gemini / Claude / Codex / xAI / Kiro 的 OAuth 起止与会话 | `SDKMgmtOAuth*` |
 //! | [`ampcode`] | Ampcode 上游的配置块 | `SDKMgmtAmpcode*Handler` |
 //! | [`runtime_config`] | 运行时设置块与十八条便捷键路由 | `SDKMgmtConfig*` |
 //! | [`logs`] | 日志面板与模型目录 | `SDKMgmtLogs*` / `SDKMgmtModelDefinitions*` |
@@ -73,6 +73,10 @@ pub fn router() -> Router<PanelState> {
         .route(&path("/get-auth-status"), get(oauth::auth_status))
         .route(&path("/oauth-callback"), post(oauth::sdk_callback))
         .route(&path("/oauth-callback/{provider}"), post(oauth::callback))
+        .route(
+            &path("/oauth-device-poll/{provider}"),
+            post(oauth::device_poll),
+        )
         // ── ampcode ──
         .route(&path("/ampcode"), get(ampcode::get).put(ampcode::put))
         .route(

@@ -64,6 +64,12 @@ sdk:
     enabled: false
     base_url: ""
     api_key: ""
+  # xAI (Grok) and Kiro OAuth are panel-driven (device-code / Builder ID).
+  # There is no sdk.xai / sdk.kiro block: connect an account from
+  # AI-GateWay → 渠道 → OAuth. xAI tokens are used by the OpenAI-compatible
+  # executor (channel prefix `xai/` or `grok/`). Kiro tokens are stored and
+  # refreshed; the 15-cell relay matrix has no Kiro cell, so export the
+  # auth file or call the kiro executor directly.
 
 frontend:
   port: 3000

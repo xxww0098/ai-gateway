@@ -30,10 +30,25 @@ fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
 // ---------------------------------------------------------------- providers
 
 #[test]
-fn the_three_providers_round_trip() {
-    for provider in [Provider::Gemini, Provider::Claude, Provider::Codex] {
+fn the_oauth_providers_round_trip() {
+    for provider in [
+        Provider::Gemini,
+        Provider::Claude,
+        Provider::Codex,
+        Provider::Xai,
+        Provider::Kiro,
+    ] {
         assert_eq!(Provider::parse(provider.as_str()), Some(provider));
     }
+}
+
+#[test]
+fn grok_is_an_alias_for_xai() {
+    assert_eq!(Provider::parse("grok"), Some(Provider::Xai));
+    assert_eq!(Provider::parse("XAI"), Some(Provider::Xai));
+    assert_eq!(Provider::from_auth_url_key("xai-auth-url"), Some(Provider::Xai));
+    assert_eq!(Provider::from_auth_url_key("grok-auth-url"), Some(Provider::Xai));
+    assert_eq!(Provider::from_auth_url_key("kiro-auth-url"), Some(Provider::Kiro));
 }
 
 #[test]

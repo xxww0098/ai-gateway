@@ -43,6 +43,8 @@ pub struct TokenResponse {
     pub raw: Map<String, Value>,
     pub email: String,
     pub account_id: String,
+    /// Provider-specific extras (Kiro client_id/secret, xAI base_url, …).
+    pub extra: Map<String, Value>,
 }
 
 /// Exchanges an authorization code for tokens.
@@ -141,6 +143,10 @@ pub async fn exchange(
                 ..tokens
             })
         }
+        Provider::Kiro => super::device::exchange_kiro_code(config, code).await,
+        Provider::Xai => anyhow::bail!(
+            "xAI uses the device-code flow, not an authorization-code callback"
+        ),
     }
 }
 
@@ -220,6 +226,7 @@ pub fn parse_token_body(raw: Map<String, Value>) -> TokenResponse {
         raw,
         email: String::new(),
         account_id: String::new(),
+        extra: Map::new(),
     }
 }
 
@@ -339,6 +346,12 @@ pub fn oauth_record(provider: Provider, tokens: &TokenResponse, now: DateTime<Ut
     if provider == Provider::Gemini {
         metadata.insert("token".to_owned(), gemini_token_metadata(tokens, now));
     }
+    for (key, value) in &tokens.extra {
+        metadata.insert(key.clone(), value.clone());
+    }
+    if provider == Provider::Xai && !tokens.access_token.is_empty() {
+        metadata.insert("api_key".to_owned(), json!(tokens.access_token));
+    }
 
     let label = if tokens.email.is_empty() {
         format!("{} OAuth", provider.as_str())
@@ -351,6 +364,9 @@ pub fn oauth_record(provider: Provider, tokens: &TokenResponse, now: DateTime<Ut
     record.metadata = Value::Object(metadata);
     record.last_refreshed_at = Some(now);
     record.set_attribute("oauth", "true");
+    if provider == Provider::Xai {
+        record.set_attribute("base_url", super::device::XAI_API_BASE);
+    }
     record
 }
 

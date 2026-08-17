@@ -4,9 +4,9 @@
 
 use crate::common::{
     DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_OPENAI, ProviderConfig, attach_body,
-    chat_completions_endpoint, ensure_include_usage, request_surface, requested_model,
-    resolve_timeout, responses_endpoint, shared_client, stream_response, string_from_map,
-    usage_stream,
+    chat_completions_endpoint, ensure_include_usage, nested_string, request_surface,
+    requested_model, resolve_timeout, responses_endpoint, shared_client, stream_response,
+    string_from_map, usage_stream,
 };
 use crate::types::{
     Provider, ProviderError, ProviderRequest, ProviderResponse, StreamResponse,
@@ -76,6 +76,8 @@ impl OpenAiCompatibleProvider {
     /// exist in stored credentials.
     fn resolve_credentials<'a>(&'a self, auth: &'a AuthRecord) -> (Cow<'a, str>, Cow<'a, str>) {
         let api_key = string_from_map(&auth.metadata, "api_key")
+            .or_else(|| string_from_map(&auth.metadata, "access_token"))
+            .or_else(|| nested_string(&auth.metadata, "token_data", "access_token"))
             .map(Cow::Owned)
             .unwrap_or(Cow::Borrowed(self.api_key.as_str()));
         let mut base_url = Cow::Borrowed(self.base_url.as_str());

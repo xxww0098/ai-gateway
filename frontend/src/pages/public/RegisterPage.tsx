@@ -47,13 +47,15 @@ export default function Register() {
         )}
 
         <div className="space-y-1">
-          <label className="input-label">邮箱</label>
+          <label htmlFor="register-email" className="input-label">邮箱</label>
           <div className="relative">
             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-400">
               <Mail className="h-5 w-5" />
             </div>
             <input
+              id="register-email"
               type="email"
+              autoComplete="email"
               className="input pl-10"
               placeholder="yours@example.com"
               value={email}
@@ -64,13 +66,15 @@ export default function Register() {
         </div>
 
         <div className="space-y-1">
-          <label className="input-label">设置密码</label>
+          <label htmlFor="register-password" className="input-label">设置密码</label>
           <div className="relative">
             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-400">
               <Lock className="h-5 w-5" />
             </div>
             <input
+              id="register-password"
               type={showPassword ? "text" : "password"}
+              autoComplete="new-password"
               className="input pl-10 pr-10"
               placeholder="至少 8 位"
               value={password}
@@ -80,6 +84,7 @@ export default function Register() {
             />
             <button
               type="button"
+              aria-label={showPassword ? "隐藏密码" : "显示密码"}
               onClick={() => setShowPassword(!showPassword)}
               className="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
             >

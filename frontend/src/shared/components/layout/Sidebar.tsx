@@ -1,4 +1,5 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { useAuthStore } from '@/features/auth/auth_store'
 import { logout as serverLogout } from '@/features/auth/api'
 import { useAppStore } from '@/shared/store/app_store'
@@ -29,6 +30,7 @@ type NavLinkItem = {
 export function Sidebar() {
   const logout = useAuthStore(s => s.logout)
   const user = useAuthStore(s => s.user)
+  const queryClient = useQueryClient()
   const sidebarCollapsed = useAppStore(s => s.sidebarCollapsed)
   const mobileOpen = useAppStore(s => s.mobileOpen)
   const setMobileOpen = useAppStore(s => s.setMobileOpen)
@@ -314,6 +316,7 @@ export function Sidebar() {
                 /* ignore */
               }
               logout()
+              queryClient.clear()
               navigate('/login')
             }}
             title={sidebarCollapsed ? '退出登录' : undefined}

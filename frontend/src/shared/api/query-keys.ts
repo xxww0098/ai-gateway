@@ -66,8 +66,9 @@ export const queryKeys = {
   },
   dashboard: {
     all: () => ['dashboard'] as const,
-    stats: () => ['dashboard', 'stats'] as const,
-    trend: (days: number) => ['dashboard', 'trend', days] as const,
+    stats: (role: 'admin' | 'user') => ['dashboard', 'stats', role] as const,
+    trend: (days: number, role: 'admin' | 'user') => ['dashboard', 'trend', days, role] as const,
+    models: (role: 'admin' | 'user') => ['dashboard', 'models', role] as const,
     recentUsage: () => ['dashboard', 'recentUsage'] as const,
   },
 } as const

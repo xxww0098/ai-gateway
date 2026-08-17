@@ -246,13 +246,14 @@ describe('Property 6: Query Key Factory Determinism', () => {
     )
   })
 
-  it('dashboard.trend() is deterministic for any days value', () => {
+  it('dashboard.trend() is deterministic for any days and role', () => {
     fc.assert(
       fc.property(
         fc.integer({ min: 1, max: 365 }),
-        (days) => {
-          const result1 = queryKeys.dashboard.trend(days)
-          const result2 = queryKeys.dashboard.trend(days)
+        fc.constantFrom('admin' as const, 'user' as const),
+        (days, role) => {
+          const result1 = queryKeys.dashboard.trend(days, role)
+          const result2 = queryKeys.dashboard.trend(days, role)
           expect(result1).toEqual(result2)
         }
       )
@@ -265,7 +266,9 @@ describe('Property 6: Query Key Factory Determinism', () => {
         fc.constant(undefined),
         () => {
           expect(queryKeys.dashboard.all()).toEqual(queryKeys.dashboard.all())
-          expect(queryKeys.dashboard.stats()).toEqual(queryKeys.dashboard.stats())
+          expect(queryKeys.dashboard.stats('admin')).toEqual(queryKeys.dashboard.stats('admin'))
+          expect(queryKeys.dashboard.stats('user')).toEqual(queryKeys.dashboard.stats('user'))
+          expect(queryKeys.dashboard.models('admin')).toEqual(queryKeys.dashboard.models('admin'))
           expect(queryKeys.dashboard.recentUsage()).toEqual(queryKeys.dashboard.recentUsage())
         }
       )

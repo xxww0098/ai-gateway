@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { QRCodeSVG } from "qrcode.react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/shared/components/ui/card"
 import { Button } from "@/shared/components/ui/button"
@@ -22,17 +22,27 @@ export default function WechatPaySection({ onSuccess }: WechatPaySectionProps) {
   const statusQuery = useWechatOrderStatus(order?.order_id ?? null, polling)
   const status = statusQuery.data?.status ?? null
 
-  // Handle status transitions
+  const onSuccessRef = useRef(onSuccess)
+  onSuccessRef.current = onSuccess
+  const handledOrderRef = useRef<string | null>(null)
+
   useEffect(() => {
+    const orderId = order?.order_id
+    if (!orderId) return
+    if (status !== "paid" && status !== "failed") return
+    if (handledOrderRef.current === orderId) return
+    handledOrderRef.current = orderId
+    setPolling(false)
     if (status === "paid") {
-      setPolling(false)
-      toast.success(`微信支付成功！已充值 $${statusQuery.data!.amount.toFixed(2)}`)
-      onSuccess?.()
-    } else if (status === "failed") {
-      setPolling(false)
+      const amount = statusQuery.data?.amount
+      if (typeof amount === "number") {
+        toast.success(`微信支付成功！已充值 $${amount.toFixed(2)}`)
+      }
+      onSuccessRef.current?.()
+    } else {
       toast.error("支付失败，请重试")
     }
-  }, [status, statusQuery.data, onSuccess])
+  }, [status, order?.order_id, statusQuery.data?.amount])
 
   const handleCreateOrder = useCallback(async () => {
     const val = parseFloat(amount)

@@ -9,10 +9,14 @@ python3 scripts/perf/summarize.py --acceptance relay   # T1–T13 逐条 达标/
 python3 scripts/perf/profile-summary.py         # CPU 热点按类别归因
 ./scripts/perf/hotpath-flamegraph.sh           # 真内核 + mock 上游 → unary / stream 火焰图
 MODE=stream ./scripts/perf/hotpath-flamegraph.sh  # 只采 SSE 满速（32×256B）
+./scripts/perf/compare-notes.sh                # 重打最新 hotpath*.load.json（不采样）
 ```
 
 wave 1 的基线结论在 [`docs/relay-perf-baseline.md`](../../docs/relay-perf-baseline.md)，
 wave 3 的 T1–T13 验收结果在 [`docs/relay-perf-acceptance.md`](../../docs/relay-perf-acceptance.md)。
+AI-GateWay 对 NewAPI / CLIProxyAPI 的架构对照在
+[`docs/perf-vs-newapi-cliproxy.md`](../../docs/perf-vs-newapi-cliproxy.md)
+（只有我们自己的数字，没有编造它们的 rps）。
 本 README 只讲**怎么跑**和**装置是怎么搭的**。
 
 ---

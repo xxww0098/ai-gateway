@@ -12,7 +12,7 @@
 //! 对应 `AuthMiddleware` 与 `requireAdmin`。Required behaviour:
 //!
 //! 1. No/blank bearer  -> [`AuthRejection::missing_bearer`].
-//! 2. Token starts `cpa-` -> API-key path：
+//! 2. Token starts `agw-` -> API-key path：
 //!    `hash_api_key` -> `ApiKeyCache` -> DB. A cached key whose `Status` is
 //!    already non-active is rejected **before** any user lookup —— 已经被判定
 //!    失效的 key 不需要再查 DB 就能知道它失效。
@@ -110,7 +110,7 @@ impl FromRequestParts<PanelState> for AuthUser {
     ) -> Result<Self, Self::Rejection> {
         let token = bearer_token(&parts.headers).ok_or_else(AuthRejection::missing_bearer)?;
 
-        // Two credential kinds share this surface. The `cpa-` prefix is the
+        // Two credential kinds share this surface. The `agw-` prefix is the
         // discriminator —— an API key is never fed to the JWT validator and vice
         // versa.
         let mut user = if is_api_key_token(token) {
@@ -151,14 +151,14 @@ impl FromRequestParts<PanelState> for AdminUser {
 
 /// Which of the two credential kinds a bearer token is.
 ///
-/// 对应 `strings.HasPrefix(token, "cpa-")`。The prefix itself is owned by
+/// 对应 `strings.HasPrefix(token, "agw-")`。The prefix itself is owned by
 /// `gw_authcore`, so minting and routing cannot drift.
 #[must_use]
 fn is_api_key_token(token: &str) -> bool {
     token.starts_with(gw_authcore::API_KEY_PREFIX)
 }
 
-/// The `cpa-`-prefixed path. 对应 `PanelRouter.validateAPIKey` 及其后的
+/// The `agw-`-prefixed path. 对应 `PanelRouter.validateAPIKey` 及其后的
 /// `bc.Status != active` 短路。
 async fn authenticate_api_key(state: &PanelState, token: &str) -> Result<AuthUser, AuthRejection> {
     let key_hash = gw_authcore::hash_api_key(token);

@@ -32,7 +32,7 @@ export default function Login() {
     <>
       <div className="text-center mb-8">
         <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">欢迎回来</h2>
-        <p className="text-gray-500 dark:text-gray-400">登入 CPA Gateway 计费管理平台</p>
+        <p className="text-gray-500 dark:text-gray-400">登入 AI-GateWay 计费管理平台</p>
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-5">

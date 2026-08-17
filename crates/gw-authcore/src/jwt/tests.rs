@@ -12,17 +12,17 @@ use jsonwebtoken::errors::ErrorKind;
 const GOLDEN_SECRET: &str = "golden-jwt-secret";
 
 /// `{"user_id":42,"email":"golden@example.com","tv":3,"exp":4102444800,
-///   "iat":1700000000,"nbf":1700000000,"iss":"cpa-gateway","sub":"42"}`
-const GOLDEN_TOKEN: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjo0MiwiZW1haWwiOiJnb2xkZW5AZXhhbXBsZS5jb20iLCJ0diI6MywiZXhwIjo0MTAyNDQ0ODAwLCJpYXQiOjE3MDAwMDAwMDAsIm5iZiI6MTcwMDAwMDAwMCwiaXNzIjoiY3BhLWdhdGV3YXkiLCJzdWIiOiI0MiJ9.oQUejGTmvTH_dEJtPHFU08tVU2Gr2dRaC0q9E3NLzok";
+///   "iat":1700000000,"nbf":1700000000,"iss":"ai-gateway","sub":"42"}`
+const GOLDEN_TOKEN: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjo0MiwiZW1haWwiOiJnb2xkZW5AZXhhbXBsZS5jb20iLCJ0diI6MywiZXhwIjo0MTAyNDQ0ODAwLCJpYXQiOjE3MDAwMDAwMDAsIm5iZiI6MTcwMDAwMDAwMCwiaXNzIjoiYWktZ2F0ZXdheSIsInN1YiI6IjQyIn0.HBbZDnFfyTWGUPjqlVU51uMJdidC_abSrEjYXTB7nI8";
 
 /// Same shape, but minted before the `tv` claim existed (user 7).
-const GOLDEN_TOKEN_WITHOUT_TV: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjo3LCJlbWFpbCI6ImxlZ2FjeUBleGFtcGxlLmNvbSIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxNzAwMDAwMDAwLCJuYmYiOjE3MDAwMDAwMDAsImlzcyI6ImNwYS1nYXRld2F5Iiwic3ViIjoiNyJ9.MAFXs67XkaCmBvzCHazqsaKl83Ll7DKa4FeTa-9wIN8";
+const GOLDEN_TOKEN_WITHOUT_TV: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjo3LCJlbWFpbCI6ImxlZ2FjeUBleGFtcGxlLmNvbSIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxNzAwMDAwMDAwLCJuYmYiOjE3MDAwMDAwMDAsImlzcyI6ImFpLWdhdGV3YXkiLCJzdWIiOiI3In0.3yRa5DTKw3rQqAdEZYbXhlpiUFtai54eM7goW8Bo0e0";
 
 /// Well-formed, correctly signed, but `exp` is 2023-11-14.
-const GOLDEN_TOKEN_EXPIRED: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjo0MiwiZW1haWwiOiJnb2xkZW5AZXhhbXBsZS5jb20iLCJ0diI6MCwiZXhwIjoxNzAwMDAzNjAwLCJpYXQiOjE3MDAwMDAwMDAsIm5iZiI6MTcwMDAwMDAwMCwiaXNzIjoiY3BhLWdhdGV3YXkiLCJzdWIiOiI0MiJ9.gS2DDclRZeGCg5_5_hJ39QV6gsheQY_P4F4aP2P6SYo";
+const GOLDEN_TOKEN_EXPIRED: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjo0MiwiZW1haWwiOiJnb2xkZW5AZXhhbXBsZS5jb20iLCJ0diI6MCwiZXhwIjoxNzAwMDAzNjAwLCJpYXQiOjE3MDAwMDAwMDAsIm5iZiI6MTcwMDAwMDAwMCwiaXNzIjoiYWktZ2F0ZXdheSIsInN1YiI6IjQyIn0.eX84byXc2sdNZmGxCqC7rdZ2wMcCCj5PDk5VUBCpCvM";
 
 /// The unsigned `alg: none` variant of [`GOLDEN_TOKEN`].
-const GOLDEN_TOKEN_ALG_NONE: &str = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJ1c2VyX2lkIjo0MiwiZW1haWwiOiJnb2xkZW5AZXhhbXBsZS5jb20iLCJ0diI6MywiZXhwIjo0MTAyNDQ0ODAwLCJpYXQiOjE3MDAwMDAwMDAsIm5iZiI6MTcwMDAwMDAwMCwiaXNzIjoiY3BhLWdhdGV3YXkiLCJzdWIiOiI0MiJ9.";
+const GOLDEN_TOKEN_ALG_NONE: &str = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJ1c2VyX2lkIjo0MiwiZW1haWwiOiJnb2xkZW5AZXhhbXBsZS5jb20iLCJ0diI6MywiZXhwIjo0MTAyNDQ0ODAwLCJpYXQiOjE3MDAwMDAwMDAsIm5iZiI6MTcwMDAwMDAwMCwiaXNzIjoiYWktZ2F0ZXdheSIsInN1YiI6IjQyIn0.";
 
 fn payload_json(token: &str) -> serde_json::Value {
     let segment = token
@@ -43,7 +43,7 @@ fn token_issued_elsewhere_validates_here() {
     assert_eq!(claims.email, "golden@example.com");
     assert_eq!(claims.token_version, 3);
     assert_eq!(claims.sub.as_deref(), Some("42"));
-    assert_eq!(claims.iss.as_deref(), Some("cpa-gateway"));
+    assert_eq!(claims.iss.as_deref(), Some("ai-gateway"));
 }
 
 #[test]

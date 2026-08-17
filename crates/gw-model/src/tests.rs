@@ -44,7 +44,7 @@ round_trip!(api_key_round_trip, ApiKey, {
     "id": 1,
     "user_id": 7,
     "key_hash": "deadbeef",
-    "key_prefix": "sk-cpa",
+    "key_prefix": "agw",
     "name": "default",
     "status": "active",
     "group_id": null,
@@ -247,7 +247,7 @@ round_trip!(payment_order_round_trip, PaymentOrder, {
 
 round_trip!(redeem_code_round_trip, RedeemCode, {
     "id": 15,
-    "code": "CPA-XXXX",
+    "code": "AGW-XXXX",
     "amount": 10.0,
     "status": "unused",
     "used_by_id": null,

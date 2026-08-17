@@ -15,10 +15,10 @@ export function QuickIntegrationPanel({
 }: QuickIntegrationPanelProps) {
   const origin = window.location.origin
   const description = integrationTab === 'openai'
-    ? '配置 OpenAI 兼容客户端（如 Cursor、Cline、aider）连接到 CPA Gateway 代理池：'
+    ? '配置 OpenAI 兼容客户端（如 Cursor、Cline、aider）连接到 AI-GateWay 代理池：'
     : integrationTab === 'anthropic'
-      ? '配置 Anthropic 原生客户端（如 Claude Code）连接到 CPA Gateway 代理池：'
-      : '配置 Amp CLI 或编辑器扩展使用 CPA Gateway 的 Amp 路由：'
+      ? '配置 Anthropic 原生客户端（如 Claude Code）连接到 AI-GateWay 代理池：'
+      : '配置 Amp CLI 或编辑器扩展使用 AI-GateWay 的 Amp 路由：'
 
   return (
     <div className="glass-card overflow-hidden flex flex-col relative border-primary-500/20">

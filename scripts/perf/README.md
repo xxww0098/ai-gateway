@@ -176,7 +176,7 @@ PERF_PORT=18080 PERF_ADMIN_PORT=18090 PERF_MODE=full \
   PERF_UPSTREAM=http://127.0.0.1:18081 PERF_WORKERS=3 $B/gateway &
 
 curl -s -XPOST 'http://127.0.0.1:18080/v1/chat/completions?resp_bytes=2048' \
-  -H 'authorization: Bearer cpa-perfbaselinekey' -H 'content-type: application/json' \
+  -H 'authorization: Bearer agw-perfbaselinekey' -H 'content-type: application/json' \
   -d '{"model":"gpt-4o","stream":false,"max_tokens":512}' | head -c 200
 
 # 分配计数（需要进程带 PERF_COUNT_ALLOC=1 起）

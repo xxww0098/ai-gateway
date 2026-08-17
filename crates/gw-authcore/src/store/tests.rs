@@ -204,7 +204,7 @@ fn timestamps_follow_auto_stamping() {
 // ---------------------------------------------------------------------------
 // Postgres-backed tests. They need a real database because the whole point of
 // the store is the existing schema; run them with
-//   GW_TEST_DATABASE_URL=postgres://user:pw@localhost/cpa cargo test -p gw-authcore -- --ignored
+//   GW_TEST_DATABASE_URL=postgres://user:pw@localhost/agw cargo test -p gw-authcore -- --ignored
 // against a database that has had the gateway migrations applied.
 // ---------------------------------------------------------------------------
 
@@ -294,7 +294,7 @@ async fn credentials_round_trip_through_postgres() {
 async fn config_seeded_credentials_are_never_written() {
     let store = PostgresAuthStore::new(test_pool().await, KEY_HEX).expect("hex key is accepted");
     let mut record = sample_record();
-    record.id = "cpa-gateway-claude-test".to_owned();
+    record.id = "ai-gateway-claude-test".to_owned();
     record.set_attribute(RUNTIME_ONLY_ATTRIBUTE, "true");
 
     store

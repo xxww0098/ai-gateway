@@ -7,7 +7,7 @@
 本文不改任何代码。所有结论都带 `file:line` 证据。
 
 > **行号基线**：本文所有行号对应**提交 `1acdc49`**，不是工作区。
-> 审计期间有并行 worker 正在同一个 worktree 上剥离 Go/CPA 引用，工作区行号一直在漂，
+> 审计期间有并行 worker 正在同一个 worktree 上剥离旧品牌引用，工作区行号一直在漂，
 > 所以证据一律以不可变的提交为准 —— 核对时用 `git show 1acdc49:<path>`。
 > 部分条目额外给了符号名（函数 / 常量 / 字段），符号名在重构后仍然可定位。
 
@@ -584,7 +584,7 @@ provider 再 `clone()` 一次。一个 900 KB 的请求在 3 次 failover 下要
 | 1 | `Authorization` 丢弃并换成上游账号凭证 | 丢弃 `crates/gw-provider/src/types.rs:38`；注入 `openai.rs:125`、`codex.rs:209` | 租户凭证与上游凭证是两个信任域，不能串 |
 | 2 | `x-api-key` 覆盖为 Anthropic 上游凭证 | `crates/gw-provider/src/claude.rs:247`（`insert`，不是 `if !contains_key`） | 同上。注释 `claude.rs:236-239` 的理由是对的 |
 | 3 | `x-goog-api-key` 覆盖为 Google 上游凭证 | `crates/gw-provider/src/gemini.rs:150`；Vertex 用 `Authorization: Bearer` `vertex.rs:543-551` | 同上 |
-| 4 | `/v1beta` 上剥离租户凭证载体（`x-goog-api-key` / `x-api-key` / `?key=`） | `crates/gw-proxy/src/access.rs:153-164`（`strip_consumed_credentials`） | **安全必需**。不剥就把 CPA 租户 key 原样送给 Google。原则要推广：**凡是本层读过的凭证载体，本层负责剥掉**（观察 #17 就是这条没推广到 `/v1/*`） |
+| 4 | `/v1beta` 上剥离租户凭证载体（`x-goog-api-key` / `x-api-key` / `?key=`） | `crates/gw-proxy/src/access.rs:153-164`（`strip_consumed_credentials`） | **安全必需**。不剥就把租户 key 原样送给 Google。原则要推广：**凡是本层读过的凭证载体，本层负责剥掉**（观察 #17 就是这条没推广到 `/v1/*`） |
 | 5 | `Host` 丢弃，按上游 URL 重建 | 丢弃 `types.rs:41`，reqwest 重建 | 请求换了 origin，`Host` 必须跟着换 |
 | 6 | 请求 `Content-Length` 丢弃并重算 | 丢弃 `types.rs:40`，reqwest 按实际 body 重算 | body 长度可能变（`stream_options` 插入），且 `Streaming` 态下压根没有确定长度 |
 | 7 | 逐跳 header 消费：`connection` / `keep-alive` / `te` / `trailer` / `transfer-encoding` / `upgrade` / `proxy-authenticate` / `proxy-authorization` | 请求方向 `types.rs:36-48`；响应方向 `routes.rs:573-586` | RFC 7230 §6.1。代理必须自己消费，不能转发 |
@@ -632,7 +632,7 @@ provider 再 `clone()` 一次。一个 900 KB 的请求在 3 次 failover 下要
   `crates/gw-server/src/lib.rs:114-124`（未挂载 `CompressionLayer`）两处交叉确认。
 - **行号做过一次程序化核对**：把每一条 `file:line` 引用对着 `git show 1acdc49:<path>` 抽出的
   blob 逐条断言"这一行确实含有我说的那个构造"，共 70 条，全绿。
-  之所以钉在提交而不是工作区：审计期间并行 worker 正在同一个 worktree 上剥离 Go/CPA 引用，
+  之所以钉在提交而不是工作区：审计期间并行 worker 正在同一个 worktree 上剥离旧品牌引用，
   `types.rs` / `common.rs` / `openai.rs` / `codex.rs` / `streambuf.rs` / `claude.rs` / `gemini.rs` /
   `vertex.rs` / `routes.rs` / `hold.rs` / `error.rs` / `access.rs` / `gw-server/src/lib.rs`
   在两小时内漂了多次。提交是不可变的，工作区不是。

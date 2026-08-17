@@ -12,11 +12,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEPLOY_HOST="${DEPLOY_HOST:-64.83.38.21}"
 DEPLOY_USER="${DEPLOY_USER:-root}"
-# 远端标识沿用旧名：线上已有 /opt/cpa-gateway 与同名 systemd 服务，改默认值会把原地升级
-# 变成「部署到新目录 + 重启一个不存在的服务」。要平行部署就覆盖这三个环境变量。
-REMOTE_DIR="${REMOTE_DIR:-/opt/cpa-gateway}"
-SERVICE_NAME="${SERVICE_NAME:-cpa-gateway}"
-BINARY_NAME="cpa-gateway-linux-amd64"
+# 远端目录 / 服务名 / 二进制名。平行部署时覆盖这三个环境变量。
+REMOTE_DIR="${REMOTE_DIR:-/opt/ai-gateway}"
+SERVICE_NAME="${SERVICE_NAME:-ai-gateway}"
+BINARY_NAME="ai-gateway-linux-amd64"
 
 SSH_OPTS=(-o StrictHostKeyChecking=no -o ConnectTimeout=15)
 if [[ -n "${DEPLOY_SSH_KEY:-}" ]]; then
@@ -64,22 +63,22 @@ echo "==> 远程切换并重启..."
 run_ssh bash -s <<REMOTE
 set -euo pipefail
 cd ${REMOTE_DIR}
-if [[ -f dist/cpa-gateway ]]; then
-  cp dist/cpa-gateway backup/cpa-gateway.\$(date +%Y%m%d-%H%M%S) || true
+if [[ -f dist/ai-gateway ]]; then
+  cp dist/ai-gateway backup/ai-gateway.\$(date +%Y%m%d-%H%M%S) || true
 fi
-mv dist/${BINARY_NAME}.new dist/cpa-gateway
-chmod +x dist/cpa-gateway
+mv dist/${BINARY_NAME}.new dist/ai-gateway
+chmod +x dist/ai-gateway
 if systemctl is-active --quiet ${SERVICE_NAME}; then
   systemctl restart ${SERVICE_NAME}
   sleep 2
   systemctl is-active ${SERVICE_NAME}
-elif docker ps --format '{{.Names}}' | grep -q '^cpa-gateway\$'; then
-  docker restart cpa-gateway
+elif docker ps --format '{{.Names}}' | grep -q '^ai-gateway\$'; then
+  docker restart ai-gateway
 else
-  echo "未找到 systemd/docker 服务，请手动重启 CPA"
+  echo "未找到 systemd/docker 服务，请手动重启 AI-GateWay"
 fi
 REMOTE
 
 echo "==> 验证 API..."
-curl -sf "https://api.xxww.online/v1/models" -H "Authorization: Bearer ${CPA_TEST_KEY:-invalid}" >/dev/null || true
+curl -sf "https://api.xxww.online/v1/models" -H "Authorization: Bearer ${AGW_TEST_KEY:-invalid}" >/dev/null || true
 echo "部署完成: https://api.xxww.online"

@@ -30,9 +30,9 @@ export default function Home() {
       <header className="relative z-20 px-6 py-4">
         <nav className="mx-auto flex max-w-6xl items-center justify-between">
           <div className="flex items-center gap-3">
-            <img src="/icon.svg" alt="CPA Gateway" className="h-10 w-10 rounded-xl shrink-0" />
+            <img src="/icon.svg" alt="AI-GateWay" className="h-10 w-10 rounded-xl shrink-0" />
             <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-gray-900 to-gray-600 dark:from-white dark:to-gray-300">
-              CPA Gateway
+              AI-GateWay
             </span>
           </div>
 
@@ -63,7 +63,7 @@ export default function Home() {
             <div className="flex-1 text-center lg:text-left space-y-8 animate-in fade-in slide-in-from-bottom-8 duration-700" style={{ willChange: 'transform, opacity' }}>
               <div className="inline-flex items-center gap-2 rounded-full border border-primary-200 bg-primary-50/50 px-4 py-1.5 text-sm font-medium text-primary-700 dark:border-primary-800/50 dark:bg-primary-900/20 dark:text-primary-400">
                 <Activity className="h-4 w-4" />
-                CLI Proxy API 全新管理层
+                AI-GateWay 全新管理层
               </div>
               
               <h1 className="text-5xl font-extrabold tracking-tight text-gray-900 dark:text-white md:text-6xl lg:text-7xl leading-tight">
@@ -95,7 +95,7 @@ export default function Home() {
                       <div className="w-3 h-3 rounded-full bg-amber-500"></div>
                       <div className="w-3 h-3 rounded-full bg-green-500"></div>
                     </div>
-                    <div className="flex-1 text-center text-xs font-mono text-gray-400">cpa-gateway ~ bash</div>
+                    <div className="flex-1 text-center text-xs font-mono text-gray-400">ai-gateway ~ bash</div>
                   </div>
                   {/* Code body */}
                   <div className="p-5 font-mono text-sm leading-relaxed">
@@ -104,7 +104,7 @@ export default function Home() {
                       <span>curl -X POST /v1/chat/completions \</span>
                     </div>
                     <div className="pl-4 text-gray-300">
-                      -H "Authorization: Bearer sk-cpa-..." \
+                      -H "Authorization: Bearer agw-..." \
                     </div>
                     <div className="pl-4 text-gray-300">
                       -H "Content-Type: application/json" \

@@ -1,7 +1,7 @@
 //! Per-upstream circuit breaker.
 //!
 //! State lives in one Redis hash per provider
-//! (`cpa-gateway:circuit:{provider}`, fields `state` / `failures` /
+//! (`ai-gateway:circuit:{provider}`, fields `state` / `failures` /
 //! `successes` / `total` / `opened_at`), so every gateway instance trips and
 //! recovers together.
 //!
@@ -33,7 +33,7 @@ pub const DEFAULT_COOLDOWN_SECONDS: i64 = 30;
 
 /// Redis hash key holding a provider's breaker state.
 pub fn circuit_key(provider: &str) -> String {
-    format!("cpa-gateway:circuit:{provider}")
+    format!("ai-gateway:circuit:{provider}")
 }
 
 /// Breaker state.

@@ -86,7 +86,7 @@ export default function AdminUsersPage() {
   const handleDeleteUser = useCallback(async (u: UserItem) => {
     const ok = await confirmModal({
       title: "删除用户",
-      message: `删除用户 ${u.email}？\n该用户将从列表移除，CPA API Key 会同时禁用。`,
+      message: `删除用户 ${u.email}？\n该用户将从列表移除，API Key 会同时禁用。`,
       confirmText: "删除",
       cancelText: "取消",
       variant: "danger",
@@ -111,7 +111,7 @@ export default function AdminUsersPage() {
     const previewText = targets.length > 3 ? `${preview} 等 ${targets.length} 位用户` : preview
     const ok = await confirmModal({
       title: `批量删除 ${targets.length} 位用户`,
-      message: `${previewText}\n\n这些用户将从列表移除，CPA API Key 会同时禁用。`,
+      message: `${previewText}\n\n这些用户将从列表移除，API Key 会同时禁用。`,
       confirmText: "批量删除",
       cancelText: "取消",
       variant: "danger",

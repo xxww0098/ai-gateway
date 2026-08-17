@@ -1,6 +1,6 @@
 {
-  "name": "CPA Gateway",
-  "short_name": "CPA",
+  "name": "AI-GateWay",
+  "short_name": "AGW",
   "description": "多租户 LLM API 网关控制台",
   "start_url": "/dashboard",
   "scope": "/",

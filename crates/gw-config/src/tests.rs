@@ -36,8 +36,8 @@ server:
 database:
   host: 127.0.0.1
   port: 5432
-  user: cpa-gateway
-  dbname: cpa_gateway
+  user: ai-gateway
+  dbname: ai_gateway
   sslmode: disable
 redis:
   addr: 127.0.0.1:6379
@@ -79,8 +79,8 @@ fn example_config_parses_every_shipped_key() {
 
     assert_eq!(cfg.database.host, "127.0.0.1");
     assert_eq!(cfg.database.port, 5432);
-    assert_eq!(cfg.database.user, "cpa_gateway");
-    assert_eq!(cfg.database.dbname, "cpa_gateway");
+    assert_eq!(cfg.database.user, "ai_gateway");
+    assert_eq!(cfg.database.dbname, "ai_gateway");
     assert_eq!(cfg.database.sslmode, "disable");
     // Explicit 0s in the file: the pool knobs have no consumer-side clamp, so
     // they must survive normalize() untouched (the consumer owns those defaults).
@@ -128,7 +128,7 @@ fn runtime_config_parses_and_fills_absent_sections() {
     assert_eq!(cfg.auth.admin_emails.len(), 1);
     assert_eq!(cfg.auth.jwt.expiry_hours, 24);
     assert_eq!(cfg.auth.jwt.secret.len(), 64);
-    assert_eq!(cfg.database.user, "cpa-gateway");
+    assert_eq!(cfg.database.user, "ai-gateway");
 
     // The fixture has no rate_limit / circuit_breaker section at all: the
     // effective values must equal the rate-limiter / circuit-breaker defaults.
@@ -157,10 +157,10 @@ fn runtime_config_parses_and_fills_absent_sections() {
 
 #[test]
 fn load_reports_the_path_it_could_not_read() {
-    let err = Config::load("/nonexistent/cpa-gateway/config.yaml").unwrap_err();
+    let err = Config::load("/nonexistent/ai-gateway/config.yaml").unwrap_err();
     match err {
         ConfigError::Read { path, .. } => {
-            assert_eq!(path, "/nonexistent/cpa-gateway/config.yaml");
+            assert_eq!(path, "/nonexistent/ai-gateway/config.yaml");
         }
         other => panic!("expected a Read error, got {other:?}"),
     }
@@ -615,7 +615,7 @@ fn dsn_matches_the_libpq_key_value_layout() {
     let cfg = load_str(EXAMPLE_YAML, &[]);
     assert_eq!(
         cfg.database.dsn(),
-        "host=127.0.0.1 port=5432 user=cpa_gateway password= dbname=cpa_gateway sslmode=disable"
+        "host=127.0.0.1 port=5432 user=ai_gateway password= dbname=ai_gateway sslmode=disable"
     );
 }
 

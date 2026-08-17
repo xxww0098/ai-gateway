@@ -16,7 +16,7 @@ import { GroupRebindDropdown } from "./GroupRebindDropdown"
 import type { ApiKey, AvailableGroup } from "../types"
 
 function maskApiKeyDisplay(key: string): string {
-  if (key.startsWith("sk-cpa-")) return "sk-cpa-****"
+  if (key.startsWith("agw-")) return "agw-****"
   if (key.startsWith("sk-")) return "sk-****"
   return "****"
 }

@@ -424,11 +424,11 @@ pub trait ChannelPolicyStore: Send + Sync {
 /// `set_orphaned_holds`.
 pub trait MetricsSink: Send + Sync {
     /// Upstream accounts currently benched by [`crate::channel::ChannelHealth`].
-    /// Feeds `cpa_channel_benched_total`.
+    /// Feeds `agw_channel_benched_total`.
     fn set_channel_benched(&self, count: i64);
 
     /// Holds orphaned by a prior crash, as of the last reconcile scan.
-    /// Feeds `cpa_orphaned_holds`.
+    /// Feeds `agw_orphaned_holds`.
     fn set_orphaned_holds(&self, count: i64);
 }
 

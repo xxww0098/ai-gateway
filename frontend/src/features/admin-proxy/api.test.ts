@@ -11,7 +11,7 @@ vi.mock('@/features/auth/auth_store', () => ({
   },
 }))
 
-describe('fetchMgmtApi CLI Proxy API SDK Client', () => {
+describe('fetchMgmtApi management API SDK Client', () => {
   let fetchSpy: ReturnType<typeof vi.spyOn>
 
   beforeEach(() => {
@@ -23,7 +23,7 @@ describe('fetchMgmtApi CLI Proxy API SDK Client', () => {
     vi.clearAllMocks()
   })
 
-  it('routes JSON SDK management requests through the CPA admin proxy', async () => {
+  it('routes JSON SDK management requests through the admin proxy', async () => {
     fetchSpy.mockResolvedValueOnce(
       new Response(JSON.stringify({ code: 0, message: 'ok', data: { success: true, message: 'config updated' } }), {
         status: 200,
@@ -54,7 +54,7 @@ describe('fetchMgmtApi CLI Proxy API SDK Client', () => {
     expect(url).toBe('/api/panel/admin/sdk-management/users')
   })
 
-  it('routes multipart SDK management requests through the CPA admin proxy', async () => {
+  it('routes multipart SDK management requests through the admin proxy', async () => {
     const form = new FormData()
     form.append('file', new Blob(['{}'], { type: 'application/json' }), 'auth.json')
 

@@ -510,7 +510,7 @@ async fn the_v1_surface_keeps_reading_authorization_and_nothing_else() {
     let harness = Harness::build();
     let request = axum::http::Request::builder()
         .method("POST")
-        .uri("/v1/chat/completions?key=cpa-testkey")
+        .uri("/v1/chat/completions?key=agw-testkey")
         .header("content-type", "application/json")
         .header("x-goog-api-key", TEST_API_KEY)
         .body(axum::body::Body::from(chat_body("gpt-4o").to_string()))
@@ -698,7 +698,7 @@ async fn this_router_can_be_merged_with_one_that_owns_the_metrics_endpoint() {
     let harness = Harness::build();
     let host: axum::Router = axum::Router::new().route(
         "/metrics/prometheus",
-        axum::routing::get(|| async { "cpa_v1_requests_total 0" }),
+        axum::routing::get(|| async { "agw_v1_requests_total 0" }),
     );
 
     let merged = host.merge(harness.router());

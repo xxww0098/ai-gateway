@@ -7,7 +7,7 @@ frontend/dist
 docs
 *.md
 # Local build artifacts / prebuilt binaries.
-cpa-gateway
+ai-gateway
 /gateway
 *.test
 /tmp

@@ -292,7 +292,7 @@ pub async fn wire(
         .with_metrics(Arc::clone(&metrics) as Arc<_>);
     proxy_state.publish_gauges();
 
-    // B8: the scan always runs (it feeds `cpa_orphaned_holds`); charging the
+    // B8: the scan always runs (it feeds `agw_orphaned_holds`); charging the
     // reserved amount is opt-in through BILLING_AUTO_RECONCILE_HOLDS.
     let auto_reconcile = reconcile::auto_reconcile_enabled();
     let orphan_scanner = reconcile::spawn_scanner(

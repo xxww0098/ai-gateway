@@ -5,9 +5,9 @@ server:
 database:
   host: 127.0.0.1
   port: 5432
-  user: cpa_gateway
+  user: ai_gateway
   password: ""
-  dbname: cpa_gateway
+  dbname: ai_gateway
   sslmode: disable
   # Connection pool tuning (optional). Omit/0 → gateway defaults (25/200/30m),
   # sized for a hot proxy path. Also settable via DB_MAX_IDLE_CONNS /

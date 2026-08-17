@@ -58,7 +58,7 @@ pub(crate) struct Harness {
 }
 
 /// The plaintext key every harness test authenticates with.
-pub(crate) const TEST_API_KEY: &str = "cpa-testkey";
+pub(crate) const TEST_API_KEY: &str = "agw-testkey";
 /// The tenant that key belongs to.
 pub(crate) const TEST_USER_ID: Id = 7;
 

@@ -242,7 +242,7 @@ export function AuthFileUploadDialog({
             </Tabs>
 
             <div className="mt-4 rounded-xl border border-dashed border-gray-200 dark:border-dark-600 bg-gray-50/80 dark:bg-dark-800/70 px-3 py-3 text-xs leading-5 text-gray-500 dark:text-dark-400">
-              支持 CPA JSON 和标准 Auth File。导入后会自动识别 Provider，相同内容只保留一份。
+              支持网关 JSON 和标准 Auth File。导入后会自动识别 Provider，相同内容只保留一份。
             </div>
           </div>
 

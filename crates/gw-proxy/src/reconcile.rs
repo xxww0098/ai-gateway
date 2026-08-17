@@ -1,7 +1,7 @@
 //! Recovery of holds abandoned by a crashed request.
 //!
 //! Charging a crash-orphaned request is a policy choice, so the scan always
-//! runs (it feeds the `cpa_orphaned_holds` gauge) while the settlement half is
+//! runs (it feeds the `agw_orphaned_holds` gauge) while the settlement half is
 //! opt-in through `BILLING_AUTO_RECONCILE_HOLDS`.
 //!
 //! Reconciliation is idempotent and safe to run concurrently: a hold whose

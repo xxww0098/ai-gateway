@@ -75,7 +75,7 @@ export function loadModelRegistries(): Promise<void> {
   }
   _registryLoadPromise = Promise.all([
     import('@/data/gateway-models-registry.json').then((m) => m.default as unknown as ModelRegistry),
-    import('@/data/cpa-models-registry.json').then((m) => m.default as unknown as ModelRegistry),
+    import('@/data/agw-models-registry.json').then((m) => m.default as unknown as ModelRegistry),
   ]).then(([modelRegistry, customModelRegistry]) => {
     buildMapsFromRegistries([modelRegistry, customModelRegistry])
   })

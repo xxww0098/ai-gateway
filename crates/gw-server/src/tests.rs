@@ -125,7 +125,7 @@ async fn merged_domain_routes_are_served_and_counted() {
     let mut text = String::new();
     metrics.write_prometheus(&mut text);
     assert!(
-        text.contains("cpa_v1_requests_total{status_class=\"2xx\"} 1"),
+        text.contains("agw_v1_requests_total{status_class=\"2xx\"} 1"),
         "the /v1 request was not counted: {text}"
     );
 }
@@ -141,5 +141,5 @@ fn app_state_hands_each_extractor_the_shared_instance() {
     let second: Arc<Metrics> = FromRef::from_ref(&state);
     let mut text = String::new();
     second.write_prometheus(&mut text);
-    assert!(text.contains("cpa_orphaned_holds 3"), "{text}");
+    assert!(text.contains("agw_orphaned_holds 3"), "{text}");
 }

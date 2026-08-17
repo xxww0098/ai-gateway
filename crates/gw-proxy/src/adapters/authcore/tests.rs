@@ -6,13 +6,13 @@ use super::*;
 fn an_api_key_hash_is_stable_and_collision_free_across_keys() {
     let crypto = AuthcoreCrypto::new("");
     assert_eq!(
-        crypto.hash_api_key("cpa-abc"),
-        crypto.hash_api_key("cpa-abc"),
+        crypto.hash_api_key("agw-abc"),
+        crypto.hash_api_key("agw-abc"),
         "the same key must always resolve to the same row",
     );
     assert_ne!(
-        crypto.hash_api_key("cpa-abc"),
-        crypto.hash_api_key("cpa-abd")
+        crypto.hash_api_key("agw-abc"),
+        crypto.hash_api_key("agw-abd")
     );
 }
 
@@ -20,7 +20,7 @@ fn an_api_key_hash_is_stable_and_collision_free_across_keys() {
 fn the_hash_is_the_lowercase_hex_digest_the_column_stores() {
     // 32 bytes of SHA-256 as lowercase hex. A different encoding here silently
     // stops matching the `api_keys.key_hash` values already persisted.
-    let digest = AuthcoreCrypto::new("").hash_api_key("cpa-abc");
+    let digest = AuthcoreCrypto::new("").hash_api_key("agw-abc");
     assert_eq!(digest.len(), 64, "got {digest}");
     assert!(
         digest

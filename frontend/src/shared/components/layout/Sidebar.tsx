@@ -182,7 +182,7 @@ export function Sidebar() {
       >
         {/* Brand Header */}
         <div className="h-14 sm:h-16 flex items-center px-3 border-b border-border flex-shrink-0 gap-2.5 max-w-full overflow-hidden">
-          <img src="/icon.svg" alt="CPA Gateway" className="w-9 h-9 rounded-xl shrink-0" />
+          <img src="/icon.svg" alt="AI-GateWay" className="w-9 h-9 rounded-xl shrink-0" />
           {/* Always show title on mobile drawer; hide only when desktop-collapsed */}
           <span
             className={cn(
@@ -190,7 +190,7 @@ export function Sidebar() {
               sidebarCollapsed && 'lg:hidden'
             )}
           >
-            CPA Gateway
+            AI-GateWay
           </span>
         </div>
 

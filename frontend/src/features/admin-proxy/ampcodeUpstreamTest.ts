@@ -30,7 +30,7 @@ interface EndpointAttempt {
 
 const PROBE_HEADERS = {
   Accept: 'application/json',
-  'User-Agent': 'CPA-Gateway-Upstream-Probe/1.0',
+  'User-Agent': 'AI-GateWay-Upstream-Probe/1.0',
 }
 
 const isHttpUrl = (url: string) => /^https?:\/\//i.test(url)

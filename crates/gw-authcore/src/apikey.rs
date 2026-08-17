@@ -1,4 +1,4 @@
-//! Panel-issued API keys (`cpa-…`).
+//! Panel-issued API keys (`agw-…`).
 //!
 //! The hash is the at-rest lookup key in `api_keys.key_hash`, so it must stay
 //! byte-identical to what existing rows hold.
@@ -10,11 +10,11 @@ use sha2::{Digest, Sha256};
 #[cfg(test)]
 mod tests;
 
-/// Prefix length: `"cpa-"` (4) + 8 hex chars.
+/// Prefix length: `"agw-"` (4) + 8 hex chars.
 pub const KEY_PREFIX_LEN: usize = 12;
 
-/// The literal `"cpa-"` prefix every minted key starts with.
-pub const API_KEY_PREFIX: &str = "cpa-";
+/// The literal `"agw-"` prefix every minted key starts with.
+pub const API_KEY_PREFIX: &str = "agw-";
 
 /// Number of random bytes behind the prefix (64 hex chars).
 const API_KEY_ENTROPY_BYTES: usize = 32;
@@ -43,7 +43,7 @@ pub fn hash_api_key(plaintext: &str) -> String {
     hex::encode(digest)
 }
 
-/// Mints a new plaintext API key: `"cpa-"` + 64 hex chars (32 OS-random bytes).
+/// Mints a new plaintext API key: `"agw-"` + 64 hex chars (32 OS-random bytes).
 ///
 /// The caller shows the plaintext once and persists only [`hash_api_key`] and
 /// [`api_key_prefix`] of it.

@@ -7,7 +7,7 @@ use super::*;
 use crate::ports::{ApiKeyRow, SubscriptionQuota};
 use crate::testsupport::{FakeCrypto, FakeDirectory};
 
-const KEY: &str = "cpa-abc";
+const KEY: &str = "agw-abc";
 
 struct Fixture {
     provider: AccessProvider,
@@ -138,7 +138,7 @@ async fn a_request_without_credentials_is_distinguished_from_a_bad_one() {
         AuthError::NoCredentials
     );
     assert_eq!(
-        fixture.auth("Bearer cpa-").await.unwrap_err(),
+        fixture.auth("Bearer agw-").await.unwrap_err(),
         AuthError::InvalidCredential
     );
 }

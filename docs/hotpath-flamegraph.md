@@ -4,7 +4,7 @@
 一层 `kernel::layer`）在本地 mock 上游上的 CPU 采样，不是生产流量，也不是
 进程内 `FakeProvider`。
 
-采样时间：2026-08-17 12:31 CST（UTC+8）。上一轮（状态机收成）是 11:46 CST。
+采样时间：2026-08-17 13:24 CST（UTC+8）。上一轮（少拷 body / peek）是 12:31 CST。
 
 ## 怎么出的
 
@@ -33,40 +33,44 @@ perfkit 给 gateway 套了 `counting_alloc` 全局分配器（为分配计数档
 图上的 `perfkit::counting_alloc` / 偏高的 `malloc`/`cfree` **有一部分是装置税**，
 生产二进制没有这层包装。
 
+本轮 harness 仍然是 in-memory `NullLedger`，**没有 Redis RTT**。生产上
+`hold_gated` 把 GET-balance + HOLD + EXPIRE 收成一条 Lua，那一截省下的
+往返不会出现在这张图上。图上能看到的是：常见路径不再 `tokio::join!`
+两趟账本 peek，`available_balance` 从栈上消失，改成一次 `hold_gated`。
+
 ## 这一轮读数
 
-loadgen 20s / concurrency=8 / 一元 1 KiB→2 KiB。括号里是 11:46 那一轮
-（热路径收成一层状态机）的对照。
+loadgen 20s / concurrency=8 / 一元 1 KiB→2 KiB。括号里是 12:31 那一轮
+（少拷 body / peek 不再整棵 serde）的对照。
 
 | 项 | 值 | 上一轮 |
 | --- | --- | --- |
-| 请求数 | 766 080 | 752 034 |
-| rps | 38 282 | 37 575 |
-| 延迟 p50 / p99 | 207 µs / 323 µs | 211 µs / 329 µs |
+| 请求数 | 792 701 | 766 080 |
+| rps | 39 587 | 38 282 |
+| 延迟 p50 / p99 | 200 µs / 309 µs | 207 µs / 323 µs |
 | errors / non_200 / stalls | 0 / 0 / 0 | 0 / 0 / 0 |
-| perf 样本 | 4 205（`cycles:u`，dwarf） | 4 297 |
+| perf 样本 | 4 263（`cycles:u`，dwarf） | 4 205 |
 
 栈上出现的内核帧（任意位置，按采样权重）：
 
 | 占比 | 上一轮 | 帧 |
 | --- | --- | --- |
-| 65.5% | 64.5% | `gw_proxy::kernel::layer` |
-| 60.7% | 61.6% | `HoldMiddleware::handle` |
-| 55.5% | 56.1% | `HoldMiddleware::handle_reserved` |
-| 55.1% | 53.8% | `routes::dispatch` |
-| 41.8% | 40.5% | `OpenAiCompatibleProvider::execute`（打 mock 上游） |
-| 3.9% | 3.4% | `routes::unary_response` |
-| 2.9% | 2.3% | `hold::peek_request_body` |
-| 2.7% | 2.5% | `Settlement::settle` |
-| 1.7% | — | `json_peek::parse_top_fields`（请求体顶层扫描，不再整棵 serde） |
-| 1.3% | — | `routes::inbound`（扩展 / HeaderMap 改为 move） |
-| 0.5% | — | `serde_json` 解 `OpenAiUsage`（只解顶层 `usage` 对象） |
+| 65.5% | 65.5% | `gw_proxy::kernel::layer` |
+| 60.7% | 60.7% | `HoldMiddleware::handle` |
+| 55.3% | 55.5% | `HoldMiddleware::handle_reserved` |
+| 54.3% | 55.1% | `routes::dispatch` |
+| 41.8% | 41.8% | `OpenAiCompatibleProvider::execute`（打 mock 上游） |
+| 4.1% | 3.9% | `routes::unary_response` |
+| 2.9% | 2.9% | `hold::peek_request_body` |
+| 2.9% | 2.7% | `Settlement::settle` |
+| 1.5% | 1.7% | `json_peek::parse_top_fields` |
+| 1.4% | 1.3% | `routes::inbound` |
+| 0.4% | — | `hold_gated`（预扣门 + 预扣合成一次调用） |
+| 0.0% | — | `available_balance`（常见路径不再单独 peek） |
 
-叶子热点仍是 `malloc` / `cfree` / `Bytes` 引用计数。`serde_json::skip_to_escape`
-不再出现在前 15 片叶子里，换成 `json_peek::Cursor::skip_string`（跳过
-`messages` / `choices` 的字节，不分配）。`peek_request_body` 的占比没有掉，
-因为它还是要把 1 KiB body 收进来并扫一遍顶层键；省掉的是 serde 的
-visitor / 字符串分配，以及把 body 再 `Body::from` 回去的那一次。
+`HoldMiddleware` 仍然包着 dispatch → execute，所以占比几乎不动是预期：
+省掉的是账本 peek 的 future / vtable，不是上游 HTTP。叶子热点仍是
+`malloc` / `cfree` / `Bytes` 引用计数（含 harness `counting_alloc` 税）。
 
 ## 复现
 

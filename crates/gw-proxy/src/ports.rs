@@ -94,6 +94,44 @@ pub trait BillingLedger: Send + Sync {
     /// Available balance (persisted balance minus active holds), used for the
     /// structured 402 body.
     async fn available_balance(&self, user_id: Id) -> Result<f64, BillingError>;
+
+    /// Reserve `amount` only if available balance covers `min_available`.
+    ///
+    /// The reserved score is `amount` (never the floor) so this cannot
+    /// over-hold. A floor refusal is [`HoldAdmit::Insufficient`] and must
+    /// not create a reservation — that is what keeps a 402
+    /// `insufficient_balance` from leaving a Redis hold behind.
+    ///
+    /// Default implementation: one available-balance peek, then [`Self::hold`].
+    /// Production overrides this with a single Lua script so the peek and the
+    /// reservation share one Redis RTT.
+    async fn hold_gated(
+        &self,
+        user_id: Id,
+        amount: f64,
+        min_available: f64,
+        request_id: &str,
+        ttl: Duration,
+    ) -> Result<HoldAdmit, BillingError> {
+        let available = self.available_balance(user_id).await.unwrap_or(0.0);
+        if available < min_available {
+            return Ok(HoldAdmit::Insufficient { available });
+        }
+        self.hold(user_id, amount, request_id, ttl).await?;
+        Ok(HoldAdmit::Reserved)
+    }
+}
+
+/// Outcome of [`BillingLedger::hold_gated`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HoldAdmit {
+    /// The reservation is live (or this request id already had one).
+    Reserved,
+    /// Available balance is below the floor. No reservation was created.
+    Insufficient {
+        /// Balance the 402 body should quote.
+        available: f64,
+    },
 }
 
 /// Pricing surface consumed by the hold pre-flight and the settlement pipeline.

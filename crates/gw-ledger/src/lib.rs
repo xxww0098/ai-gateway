@@ -49,7 +49,7 @@ pub use keys::{
     BALANCE_KEY_PREFIX, HOLDS_KEY_PREFIX, HOLDS_TS_KEY_PREFIX, balance_key, holds_key,
     holds_ts_key, shortfall_resolve_reference,
 };
-pub use ledger::{DEFAULT_BALANCE_TTL, DEFAULT_HOLD_TTL, Ledger, SettleOutcome};
+pub use ledger::{DEFAULT_BALANCE_TTL, DEFAULT_HOLD_TTL, HoldOutcome, Ledger, SettleOutcome};
 pub use reconcile::StaleHold;
 pub use settlement::Settlement;
 

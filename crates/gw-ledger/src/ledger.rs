@@ -53,6 +53,21 @@ pub struct SettleOutcome {
     pub shortfall_log_id: Option<i64>,
 }
 
+/// Result of a hold that may apply a pre-flight floor.
+///
+/// [`Ledger::hold`] maps [`Insufficient`](Self::Insufficient) to
+/// [`LedgerError::InsufficientBalance`] so its signature stays unchanged.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HoldOutcome {
+    /// Reservation is live (or this request id already had one).
+    Reserved,
+    /// Below the floor; no reservation was created.
+    Insufficient {
+        /// `cached_balance - sum(live holds)` at refusal.
+        available: f64,
+    },
+}
+
 /// Coordinates persistent balance updates in Postgres with Redis pre-charge
 /// holds.
 ///
@@ -266,6 +281,32 @@ impl Ledger {
         request_id: &str,
         ttl: Duration,
     ) -> Result<(), LedgerError> {
+        match self
+            .hold_with_floor(user_id, amount, amount, request_id, ttl)
+            .await?
+        {
+            HoldOutcome::Reserved => Ok(()),
+            HoldOutcome::Insufficient { .. } => Err(LedgerError::InsufficientBalance),
+        }
+    }
+
+    /// Like [`hold`](Self::hold), but refuses when available is below
+    /// `min_available` even if it covers `amount`.
+    ///
+    /// The reserved score is still `amount` — the floor is a gate, not an
+    /// over-hold. `EXPIRE` runs in the same Lua, so admission is one RTT.
+    ///
+    /// # Errors
+    /// Same wiring errors as [`hold`](Self::hold). A floor refusal is
+    /// [`HoldOutcome::Insufficient`], not [`LedgerError::InsufficientBalance`].
+    pub async fn hold_with_floor(
+        &self,
+        user_id: i64,
+        amount: f64,
+        min_available: f64,
+        request_id: &str,
+        ttl: Duration,
+    ) -> Result<HoldOutcome, LedgerError> {
         let Some(mut conn) = self.redis_conn() else {
             return Err(LedgerError::RedisNotConfigured);
         };
@@ -281,9 +322,11 @@ impl Ledger {
 
         let now = Self::now_unix();
         let hold_ttl_secs = self.hold_ttl.as_secs() as i64;
+        let key_ttl_secs = hold_keys_ttl(self.hold_ttl).as_secs() as i64;
         // Shortest round-tripping decimal form, so the score Lua stores is
         // bit-identical across implementations.
         let amount_arg = amount.to_string();
+        let floor_arg = min_available.to_string();
 
         let outcome = match run_hold(
             &mut conn,
@@ -292,6 +335,8 @@ impl Ledger {
             request_id,
             now,
             hold_ttl_secs,
+            key_ttl_secs,
+            &floor_arg,
         )
         .await
         {
@@ -306,6 +351,8 @@ impl Ledger {
                     request_id,
                     now,
                     hold_ttl_secs,
+                    key_ttl_secs,
+                    &floor_arg,
                 )
                 .await
             }
@@ -320,21 +367,11 @@ impl Ledger {
                 )));
             }
             Err(err) if is_insufficient_balance(&err) => {
-                return Err(LedgerError::InsufficientBalance);
+                return Ok(HoldOutcome::Insufficient {
+                    available: parse_insufficient_available(&err).unwrap_or(0.0),
+                });
             }
             Err(err) => return Err(err.into()),
-        }
-
-        // Let the hold keys self-expire once the user goes idle. Best-effort:
-        // the reservation itself is already recorded, and the Lua cutoff — not
-        // this TTL — is what governs correctness. 两条 EXPIRE 打进一条 pipeline，
-        // 少一次 RTT。
-        let key_ttl = (self.hold_ttl + HOLD_KEY_TTL_MARGIN).as_secs() as i64;
-        let mut pipe = redis::pipe();
-        pipe.expire(holds_key(user_id), key_ttl).ignore();
-        pipe.expire(holds_ts_key(user_id), key_ttl).ignore();
-        if let Err(err) = pipe.query_async::<()>(&mut conn).await {
-            tracing::debug!(error = %err, user_id, "failed to set hold key expiry");
         }
 
         // 审计是 best-effort，不该挡在预扣成功之后、上游调用之前。
@@ -350,7 +387,7 @@ impl Ledger {
             self.write_audit_log(user_id, amount, log_type::HOLD, &request_id, None)
                 .await;
         }
-        Ok(())
+        Ok(HoldOutcome::Reserved)
     }
 
     /// The amount currently reserved for `(user_id, request_id)`, or `None`
@@ -397,10 +434,9 @@ impl Ledger {
             return Ok(());
         };
 
-        if let Err(err) = Self::remove_hold(&mut conn, user_id, request_id).await {
+        if let Err(err) = Self::clear_reservation(&mut conn, user_id, request_id).await {
             tracing::debug!(error = %err, user_id, request_id, "release: hold removal failed");
         }
-        self.invalidate_balance_cache(user_id).await;
         self.write_audit_log(user_id, 0.0, log_type::RELEASE, request_id, None)
             .await;
         Ok(())
@@ -453,11 +489,10 @@ impl Ledger {
         // out of the database's transaction path entirely.
         if actual_amount <= 0.0 {
             if let Some(mut conn) = self.redis_conn()
-                && let Err(err) = Self::remove_hold(&mut conn, user_id, request_id).await
+                && let Err(err) = Self::clear_reservation(&mut conn, user_id, request_id).await
             {
                 tracing::debug!(error = %err, user_id, request_id, "settle: hold removal failed");
             }
-            self.invalidate_balance_cache(user_id).await;
             self.write_audit_log(user_id, 0.0, log_type::SETTLE, request_id, None)
                 .await;
             return Ok(());
@@ -614,8 +649,7 @@ impl Ledger {
         let Some(mut conn) = self.redis_conn() else {
             return Ok(());
         };
-        Self::remove_hold(&mut conn, user_id, request_id).await?;
-        self.invalidate_balance_cache(user_id).await;
+        Self::clear_reservation(&mut conn, user_id, request_id).await?;
         Ok(())
     }
 
@@ -744,19 +778,18 @@ SELECT EXISTS (
         }
     }
 
-    /// Removes a reservation from both the sorted set and the timestamp hash.
-    /// The pair must move together — a member left in either one alone would
-    /// either freeze balance forever or resurrect as an ageless hold.
-    async fn remove_hold(
+    /// Drops the reservation (both hold keys) and the cached balance in one
+    /// pipeline. The pair of hold keys must move together.
+    async fn clear_reservation(
         conn: &mut ConnectionManager,
         user_id: i64,
         request_id: &str,
     ) -> Result<(), redis::RedisError> {
-        conn.zrem::<_, _, ()>(holds_key(user_id), request_id)
-            .await?;
-        conn.hdel::<_, _, ()>(holds_ts_key(user_id), request_id)
-            .await?;
-        Ok(())
+        let mut pipe = redis::pipe();
+        pipe.zrem(holds_key(user_id), request_id).ignore();
+        pipe.hdel(holds_ts_key(user_id), request_id).ignore();
+        pipe.del(balance_key(user_id)).ignore();
+        pipe.query_async::<()>(conn).await
     }
 
     /// Writes a `balance_logs` audit row, best-effort: a failure here is
@@ -875,6 +908,7 @@ async fn run_get_balance(
 }
 
 /// Runs [`HOLD_SCRIPT`] and returns its raw string reply (`OK` on admission).
+#[allow(clippy::too_many_arguments)]
 async fn run_hold(
     conn: &mut ConnectionManager,
     user_id: i64,
@@ -882,6 +916,8 @@ async fn run_hold(
     request_id: &str,
     now: i64,
     hold_ttl_secs: i64,
+    key_ttl_secs: i64,
+    min_available: &str,
 ) -> Result<String, redis::RedisError> {
     let mut inv = HOLD_SCRIPT.prepare_invoke();
     inv.key(balance_key(user_id));
@@ -892,7 +928,16 @@ async fn run_hold(
     inv.arg(now);
     inv.arg(hold_ttl_secs);
     inv.arg(""); // idempotency key (unused for now, kept for parity)
+    inv.arg(key_ttl_secs);
+    inv.arg(min_available);
     inv.invoke_async(conn).await
+}
+
+/// How long the hold sorted set and timestamp hash should live after a
+/// successful admission. Strictly longer than the Lua cutoff so a key
+/// never disappears while a live hold could still be in it.
+pub(crate) fn hold_keys_ttl(hold_ttl: Duration) -> Duration {
+    hold_ttl + HOLD_KEY_TTL_MARGIN
 }
 
 /// Builds the JSON payload for a `balance_logs.metadata` column: always
@@ -923,6 +968,22 @@ fn is_cache_miss(err: &redis::RedisError) -> bool {
 /// Whether a Lua reply was the `INSUFFICIENT_BALANCE:<available>` refusal.
 fn is_insufficient_balance(err: &redis::RedisError) -> bool {
     marks(err, INSUFFICIENT_BALANCE)
+}
+
+/// Available-balance payload of `INSUFFICIENT_BALANCE:<n>`, if present.
+fn parse_insufficient_available(err: &redis::RedisError) -> Option<f64> {
+    err.code()
+        .and_then(available_after_marker)
+        .or_else(|| available_after_marker(&err.to_string()))
+}
+
+fn available_after_marker(s: &str) -> Option<f64> {
+    let rest = s.split_once(INSUFFICIENT_BALANCE)?.1;
+    let rest = rest.strip_prefix(':').unwrap_or(rest).trim();
+    let token = rest
+        .split(|c: char| c.is_whitespace() || c == ',' || c == ')' || c == '/')
+        .find(|part| !part.is_empty())?;
+    token.parse().ok()
 }
 
 fn marks(err: &redis::RedisError, marker: &str) -> bool {

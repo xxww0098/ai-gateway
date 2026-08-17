@@ -35,7 +35,7 @@ use crate::error::HoldRejection;
 use crate::idempotency::{CachedResponse, IdempotencyManager};
 use crate::kernel::{self, Phase, RelayCtx};
 use crate::ports::{
-    AccessMetadata, BillingError, BillingLedger, CircuitBreaker, Id, PricingCalculator,
+    AccessMetadata, BillingError, BillingLedger, CircuitBreaker, HoldAdmit, Id, PricingCalculator,
     RateLimiter, SubscriptionQuota, SubscriptionQuotaStore,
 };
 use crate::settlectx::{BillingHandle, RequestBilling, SettleCtx};
@@ -245,12 +245,6 @@ impl HoldMiddleware {
         // 唯一一次解析的结果原样交给 handler，`routes::inbound` 直接复用。
         req.extensions_mut().insert(spec);
         kernel::advance_ext(&mut req, Phase::Inspected);
-        if let Some(ctx) = req.extensions_mut().get_mut::<RelayCtx>() {
-            ctx.peek = Some(peek.clone());
-            ctx.request_id = request_id.clone();
-            ctx.ip_address = ip_address.clone();
-            ctx.idempotency_key = idempotency_key.clone();
-        }
 
         // --- rate limiter (fail-open on infrastructure error) ---
         let identity = meta.user_id.to_string();
@@ -342,13 +336,11 @@ impl HoldMiddleware {
             return HoldRejection::CircuitOpen.into_response();
         }
 
-        // --- outstanding-debt + available balance（并行，各一次 RTT）---
+        // --- outstanding-debt（必须在任何 Redis hold 之前）---
         // 拒绝优先级不变：欠款 402 先于余额 402。查失败仍然 fail-closed。
-        let (shortfall, available) = tokio::join!(
-            self.ledger.has_unresolved_shortfall(meta.user_id),
-            self.ledger.available_balance(meta.user_id),
-        );
-        match shortfall {
+        // 余额 peek 不再单独打一趟 GET-balance：无预算代币时由
+        // `hold_gated` 在同一条 Lua 里做 floor 检查 + 预扣 + EXPIRE。
+        match self.ledger.has_unresolved_shortfall(meta.user_id).await {
             Ok(false) => {}
             Ok(true) => {
                 tracing::warn!(
@@ -368,7 +360,6 @@ impl HoldMiddleware {
                 return HoldRejection::OutstandingDebt.into_response();
             }
         }
-        let available = available.unwrap_or(0.0);
 
         // The reservation scales with the real prompt size so a large request
         // reserves proportional funds instead of under-holding on a flat
@@ -414,38 +405,66 @@ impl HoldMiddleware {
             rate_mult,
             hold_amount,
         );
-        // A lookup failure reads as zero available, i.e. it rejects. This is
-        // the right posture: letting spend through during a balance-store
-        // outage is how a tenant ends up owing money the ledger cannot claw
-        // back.
-        if available < upper_bound {
-            tracing::warn!(
-                event = "preflight_insufficient_balance",
-                user_id = meta.user_id,
-                model = %peek.model,
-                upper_bound,
-                available,
-            );
-            return HoldRejection::InsufficientBalance {
-                current_balance: available,
-                required_amount: upper_bound,
-            }
-            .into_response();
-        }
-
-        // --- budget token, else Redis hold ---
-        let used_budget_token = self
-            .budget_tokens
-            .as_ref()
-            .is_some_and(|bts| bts.try_deduct(meta.user_id, hold_amount));
-
-        if !used_budget_token
-            && let Err(err) = self
+        // 预算代币先 peek 再扣（门在扣之前）。常见路径走 hold_gated，
+        // floor + 预扣 + EXPIRE 同一趟 Redis。
+        let used_budget_token = if self.budget_tokens.is_some() {
+            let available = self
                 .ledger
-                .hold(meta.user_id, hold_amount, &request_id, self.ttl)
+                .available_balance(meta.user_id)
                 .await
-        {
-            return self.reject_hold_error(err, meta.user_id, hold_amount).await;
+                .unwrap_or(0.0);
+            if available < upper_bound {
+                tracing::warn!(
+                    event = "preflight_insufficient_balance",
+                    user_id = meta.user_id,
+                    model = %peek.model,
+                    upper_bound,
+                    available,
+                );
+                return HoldRejection::InsufficientBalance {
+                    current_balance: available,
+                    required_amount: upper_bound,
+                }
+                .into_response();
+            }
+            self.budget_tokens
+                .as_ref()
+                .is_some_and(|bts| bts.try_deduct(meta.user_id, hold_amount))
+        } else {
+            false
+        };
+
+        if !used_budget_token {
+            match self
+                .ledger
+                .hold_gated(
+                    meta.user_id,
+                    hold_amount,
+                    upper_bound,
+                    &request_id,
+                    self.ttl,
+                )
+                .await
+            {
+                Ok(HoldAdmit::Reserved) => {}
+                Ok(HoldAdmit::Insufficient { available }) => {
+                    tracing::warn!(
+                        event = "preflight_insufficient_balance",
+                        user_id = meta.user_id,
+                        model = %peek.model,
+                        upper_bound,
+                        available,
+                    );
+                    return HoldRejection::InsufficientBalance {
+                        current_balance: available,
+                        required_amount: upper_bound,
+                    }
+                    .into_response();
+                }
+                Err(err) => {
+                    return self.reject_hold_error(err, meta.user_id, hold_amount).await;
+                }
+            }
         }
 
         kernel::advance_ext(&mut req, Phase::Gated);
@@ -469,6 +488,10 @@ impl HoldMiddleware {
         req.extensions_mut().insert(billing.clone());
         kernel::advance_ext(&mut req, Phase::Reserved);
         if let Some(ctx) = req.extensions_mut().get_mut::<RelayCtx>() {
+            ctx.peek = Some(peek);
+            ctx.request_id.clone_from(&billing.ctx.request_id);
+            ctx.ip_address.clone_from(&billing.ctx.ip_address);
+            ctx.idempotency_key.clone_from(&billing.ctx.idempotency_key);
             ctx.billing = Some(billing.clone());
         }
 

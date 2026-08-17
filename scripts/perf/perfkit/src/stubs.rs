@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use gw_authcore::{AuthRecord, AuthStore, Claims};
 use gw_proxy::ports::{
-    AccessMetadata, ApiKeyRow, AuthCrypto, BalanceEvent, BillingError, BillingLedger,
+    AccessMetadata, ApiKeyRow, AuthCrypto, BalanceEvent, BillingError, BillingLedger, HoldAdmit,
     ChannelPolicy, ChannelPolicyStore, CircuitBreaker, Id, IdempotencyStore, ModelCatalog,
     ModelEntry, PricingCalculator, RateLimiter, SettleReceipt, SettlementCommit,
     SubscriptionQuota, SubscriptionQuotaStore, TenantDirectory, TokenUsage, UsageLogEntry,
@@ -81,6 +81,21 @@ impl BillingLedger for NullLedger {
 
     async fn available_balance(&self, _user_id: Id) -> Result<f64, BillingError> {
         Ok(1_000_000.0)
+    }
+
+    /// PERF/test local path: skip the balance/debt peeks. Production
+    /// `SharedLedger` still runs the real Lua gate; this impl is only the
+    /// in-memory harness and must not change who is admitted there.
+    async fn hold_gated(
+        &self,
+        user_id: Id,
+        amount: f64,
+        _min_available: f64,
+        request_id: &str,
+        ttl: Duration,
+    ) -> Result<HoldAdmit, BillingError> {
+        self.hold(user_id, amount, request_id, ttl).await?;
+        Ok(HoldAdmit::Reserved)
     }
 }
 

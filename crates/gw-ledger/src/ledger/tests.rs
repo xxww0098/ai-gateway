@@ -10,7 +10,10 @@ use std::time::Duration;
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 
-use super::{Ledger, audit_metadata, is_cache_miss, is_insufficient_balance};
+use super::{
+    Ledger, audit_metadata, hold_keys_ttl, is_cache_miss, is_insufficient_balance,
+    parse_insufficient_available,
+};
 use crate::scripts::{CACHE_MISS, INSUFFICIENT_BALANCE};
 use crate::{DEFAULT_BALANCE_TTL, DEFAULT_HOLD_TTL, LedgerError};
 
@@ -198,4 +201,50 @@ fn extension_error(marker: &str) -> redis::RedisError {
         "An error was signalled by the server",
         marker.to_string(),
     ))
+}
+
+/// Hold-key EXPIRE must outlive the Lua cutoff. If the keys vanished first,
+/// a still-live reservation would disappear from the sorted set while the
+/// cutoff still considered it active — get-balance and hold would disagree.
+#[test]
+fn hold_keys_outlive_the_lua_cutoff() {
+    for ttl in [
+        Duration::from_secs(1),
+        DEFAULT_HOLD_TTL,
+        Duration::from_secs(3_600),
+    ] {
+        let keys = hold_keys_ttl(ttl);
+        assert!(keys > ttl, "key ttl {keys:?} must exceed hold ttl {ttl:?}");
+    }
+}
+
+/// The Lua refusal carries the available balance after a colon so a 402
+/// body does not need a second GET. The parser must read that payload
+/// from either shape redis-rs may use for a custom `error_reply`.
+#[test]
+fn the_insufficient_reply_yields_the_available_balance() {
+    let err = extension_error(&format!("{INSUFFICIENT_BALANCE}:12.5"));
+    assert_eq!(parse_insufficient_available(&err), Some(12.5));
+    assert_eq!(
+        parse_insufficient_available(&extension_error(INSUFFICIENT_BALANCE)),
+        None,
+        "a marker with no payload must not invent a number",
+    );
+}
+
+/// `hold` stays a thin wrapper: a floor refusal is still the sentinel
+/// error callers already match, not a new variant.
+#[tokio::test]
+async fn hold_collapses_a_floor_refusal_to_the_sentinel_error() {
+    let err = redisless()
+        .hold(1, 1.0, "req", Duration::from_secs(60))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, LedgerError::RedisNotConfigured), "{err:?}");
+
+    let err = redisless()
+        .hold_with_floor(1, 1.0, 5.0, "req", Duration::from_secs(60))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, LedgerError::RedisNotConfigured), "{err:?}");
 }

@@ -13,6 +13,8 @@
 
 架构与编码规范见 [`AGENTS.md`](AGENTS.md)。
 
+DeepSeek Harness 用户可用 [`plugins/agw-oauth`](plugins/agw-oauth)（AGW-Oauth）OAuth 登录 AI-GateWay，无需手写模型配置。
+
 ## 快速开始（本地）
 
 前置：Rust 1.97+、PostgreSQL、Redis。

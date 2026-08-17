@@ -260,5 +260,6 @@ pub fn router(state: PanelState) -> Router {
         // 路径，所以必须在 **ROOT** 合并，绝不放进上面的 `nest`：嵌套会把
         // 它服务在 `/api/panel/api/payment/...`，Stripe 的回调就会静默中断。
         .merge(commerce::public_router())
+        .merge(identity::public_router())
         .with_state(state)
 }

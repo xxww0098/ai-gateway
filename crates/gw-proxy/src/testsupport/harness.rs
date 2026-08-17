@@ -96,6 +96,7 @@ impl Harness {
             id: "gpt-4o".to_owned(),
             created: 0,
             owned_by: "openai".to_owned(),
+            ..ModelEntry::default()
         });
 
         directory.with_active_key(

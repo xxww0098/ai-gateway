@@ -768,3 +768,75 @@ fn only_account_level_statuses_are_worth_another_credential() {
     assert!(!is_retryable_status(400));
     assert!(!is_retryable_status(200));
 }
+
+#[tokio::test]
+async fn listing_models_exposes_catalog_capabilities_verbatim() {
+    use crate::ports::{ModelEntry, ModelReasoning, ModelReasoningEffort};
+
+    let harness = Harness::build();
+    {
+        let mut models = harness.catalog.models.lock();
+        models.clear();
+        models.push(ModelEntry {
+            id: "vision-thinker".to_owned(),
+            created: 1,
+            owned_by: "openai".to_owned(),
+            context_length: Some(128_000),
+            max_output_tokens: Some(16_384),
+            input_modalities: vec!["text".into(), "image".into()],
+            reasoning: Some(ModelReasoning {
+                efforts: vec![
+                    ModelReasoningEffort {
+                        id: "low".into(),
+                        name: "Low".into(),
+                    },
+                    ModelReasoningEffort {
+                        id: "high".into(),
+                        name: "High".into(),
+                    },
+                ],
+                default_effort: Some("high".into()),
+            }),
+        });
+        models.push(ModelEntry {
+            id: "text-only".to_owned(),
+            created: 2,
+            owned_by: "openai".to_owned(),
+            context_length: Some(8_192),
+            max_output_tokens: Some(2_048),
+            input_modalities: vec!["text".into()],
+            reasoning: None,
+        });
+    }
+
+    let (status, body) = send(harness.router(), signed_get("/v1/models")).await;
+    assert_eq!(status, StatusCode::OK);
+    let data = body["data"].as_array().expect("data array");
+    let vision = data.iter().find(|m| m["id"] == "vision-thinker").unwrap();
+    let text = data.iter().find(|m| m["id"] == "text-only").unwrap();
+
+    assert_eq!(vision["context_length"], 128_000);
+    assert_eq!(vision["max_output_tokens"], 16_384);
+    assert_eq!(vision["input_modalities"], serde_json::json!(["text", "image"]));
+    assert_eq!(
+        vision["reasoning"]["efforts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["low", "high"]
+    );
+
+    assert_eq!(text["context_length"], 8_192);
+    assert_eq!(text["max_output_tokens"], 2_048);
+    assert_eq!(text["input_modalities"], serde_json::json!(["text"]));
+    assert!(text.get("reasoning").is_none());
+    assert!(
+        text["input_modalities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m != "image")
+    );
+}

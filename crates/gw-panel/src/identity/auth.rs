@@ -180,12 +180,12 @@ fn allow_request_at(identity: &str, capacity: i64, now: DateTime<Utc>) -> bool {
 /// 对应旧实现的 `AuthRateLimitMiddleware`：身份前缀 `auth:` + 调用方 IP。
 ///
 /// 前缀是有意的：旧实现的注释说它保证这些桶「不会和将来任何限流面撞车」。
-fn allow_auth_attempt(client_ip: &str) -> bool {
+pub(crate) fn allow_auth_attempt(client_ip: &str) -> bool {
     let identity = format!("auth:{client_ip}");
     allow_request_at(&identity, AUTH_RATE_LIMIT_PER_MIN, Utc::now())
 }
 
-fn rate_limited() -> Response {
+pub(crate) fn rate_limited() -> Response {
     err(
         StatusCode::TOO_MANY_REQUESTS,
         ERR_MW_RATE_LIMIT,

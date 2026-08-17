@@ -29,6 +29,7 @@
 pub mod apikey;
 pub mod auth;
 pub mod bootstrap;
+pub mod dsh_oauth;
 pub mod entitlement;
 pub mod groups;
 pub mod oplog;
@@ -160,6 +161,7 @@ pub fn router() -> Router<PanelState> {
         .route("/auth/register", post(auth::register))
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
+        .merge(dsh_oauth::router())
         // ── 用户自助 ──
         .route("/user/profile", get(users::profile))
         .route(
@@ -193,4 +195,10 @@ pub fn router() -> Router<PanelState> {
             put(groups::admin_update).delete(groups::admin_delete),
         )
         .layer(axum::middleware::from_fn(auth::trace_id_layer))
+}
+
+/// Consent page for DeepSeek Harness device-code login. Mounted at the app root
+/// (not under `/api/panel`) so the verification URL stays short.
+pub fn public_router() -> Router<PanelState> {
+    dsh_oauth::public_router()
 }

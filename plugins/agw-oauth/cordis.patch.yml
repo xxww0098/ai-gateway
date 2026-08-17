@@ -1,0 +1,13 @@
+# Bundle layer applied when this package is listed in a profile's
+# `dsh.profile.bundles`.
+#
+#   dsh plugin --profile web add ./plugins/agw-oauth
+#
+# The row `name` must match package.json. After OAuth the adapter registers
+# the `ai-gateway` provider route from GET {origin}/v1/models.
+- insert:
+    - id: agw-oauth
+      name: dsh-agw-oauth
+      inject: [llm]
+      config:
+        origin: !!js process.env.AGW_ORIGIN ?? ''

@@ -734,12 +734,7 @@ pub async fn models(State(state): State<ProxyState>) -> Response {
     match catalog.list_models().await {
         Ok(models) => axum::Json(serde_json::json!({
             "object": "list",
-            "data": models.iter().map(|m| serde_json::json!({
-                "id": m.id,
-                "object": "model",
-                "created": m.created,
-                "owned_by": m.owned_by,
-            })).collect::<Vec<_>>(),
+            "data": models.iter().map(model_json).collect::<Vec<_>>(),
         }))
         .into_response(),
         Err(err) => {
@@ -756,17 +751,46 @@ pub async fn model_detail(State(state): State<ProxyState>, Path(model): Path<Str
     };
     match catalog.list_models().await {
         Ok(models) => match models.iter().find(|m| m.id == model) {
-            Some(m) => axum::Json(serde_json::json!({
-                "id": m.id,
-                "object": "model",
-                "created": m.created,
-                "owned_by": m.owned_by,
-            }))
-            .into_response(),
+            Some(m) => axum::Json(model_json(m)).into_response(),
             None => StatusCode::NOT_FOUND.into_response(),
         },
         Err(err) => DispatchError::Internal(err).into_response(),
     }
+}
+
+/// OpenAI listing object plus the catalog fields Harness needs.
+pub(crate) fn model_json(model: &crate::ports::ModelEntry) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "id": model.id,
+        "object": "model",
+        "created": model.created,
+        "owned_by": model.owned_by,
+    });
+    if let Some(n) = model.context_length {
+        value["context_length"] = serde_json::json!(n);
+    }
+    if let Some(n) = model.max_output_tokens {
+        value["max_output_tokens"] = serde_json::json!(n);
+    }
+    if !model.input_modalities.is_empty() {
+        value["input_modalities"] = serde_json::json!(model.input_modalities);
+    }
+    if let Some(reasoning) = &model.reasoning {
+        if !reasoning.efforts.is_empty() {
+            let mut body = serde_json::json!({
+                "efforts": reasoning
+                    .efforts
+                    .iter()
+                    .map(|e| serde_json::json!({ "id": e.id, "name": e.name }))
+                    .collect::<Vec<_>>(),
+            });
+            if let Some(default_effort) = &reasoning.default_effort {
+                body["default_effort"] = serde_json::json!(default_effort);
+            }
+            value["reasoning"] = body;
+        }
+    }
+    value
 }
 
 #[cfg(test)]

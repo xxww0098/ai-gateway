@@ -11,9 +11,38 @@
 - **安全** — JWT + API Key 双鉴权、登录限流、上游凭证 AES-GCM 落库加密、JWT 全端登出撤销。
 - **运营面板** — 用户/分组/订阅/兑换码/退款/公告/定价/审计，支付充值（人工确认即可收款）。
 
-架构与编码规范见 [`AGENTS.md`](AGENTS.md)。
+实践与禁令、计费与停机不变量见 [`AGENTS.md`](AGENTS.md)；工程规范 [`docs/rust-engineering.md`](docs/rust-engineering.md)。
 
 DeepSeek Harness 用户可用 [`plugins/agw-oauth`](plugins/agw-oauth)（AGW-Oauth）OAuth 登录 AI-GateWay，无需手写模型配置。
+
+## 仓库结构
+
+```
+ai-gateway/
+├── Cargo.toml              # 虚拟根清单：resolver 3、edition 2024、MSRV 1.97
+├── CONTRACT.md             # 工程契约：所有权、硬约束、数据库既成事实
+├── rust-toolchain.toml     # 钉死 1.97.1 + clippy/rustfmt
+├── migrations/             # sqlx SQL 迁移（对既有 schema 幂等）
+├── crates/                 # 平铺，目录名 = crate 名（规则 1.3）
+│   ├── gw-config/          #   YAML + 环境变量配置
+│   ├── gw-model/           #   实体、迁移、种子、列解码适配器（compat）
+│   ├── gw-infra/           #   PG 池、Redis、缓存、限流、熔断
+│   ├── gw-authcore/        #   JWT、API Key、AES-GCM 凭证加密、AuthStore
+│   ├── gw-pricing/         #   ModelPriceCache + 四列单价 Calculator
+│   ├── gw-ledger/          #   Hold/Settle/Release 账本（Redis Lua + PG）
+│   ├── gw-provider/        #   5 个上游 executor + 协议翻译 + usage 解析
+│   ├── gw-proxy/           #   /v1/* 代理内核（无 /v1beta）
+│   ├── gw-panel/           #   /api/panel/** 运营面板，按业务域切分
+│   ├── gw-relay/           #   纯字节中继内核
+│   └── gw-server/          #   组合根：装配、迁移、种子、优雅停机
+├── tools/xtask/            # 架构门禁（cargo xtask ci）
+├── plugins/agw-oauth/      # DeepSeek Harness：设备码登录 AI-GateWay
+├── docs/                   # 工程规范与调研文档
+├── frontend/               # React 前端（独立构建）
+├── deploy/                 # Dockerfile + compose
+├── config.yaml             # 运行时配置（不入库）
+└── config.example.yaml     # 配置模板
+```
 
 ## 快速开始（本地）
 
@@ -57,11 +86,22 @@ curl https://<your-host>/v1/chat/completions \
 ## 测试
 
 ```bash
-make test          # cargo test --workspace
+make test          # cargo test --workspace（无需外部服务）
+make test-ignored  # 需要真 Postgres/Redis 的那一档
 make gates         # cargo xtask ci —— 9 条架构门禁
-make lint          # clippy -D warnings
+make lint          # clippy --all-targets -- -D warnings
 cd frontend && npm test       # 前端 vitest
 ```
+
+```bash
+make build         # cargo build --release → ./ai-gateway
+make run           # 构建并以 config.yaml 启动
+./ai-gateway --config config.yaml
+./ai-gateway --version
+./ai-gateway --health-check   # 探针：ready → 0，否则 1
+```
+
+计费与停机不变量、外部测试 fail-loud / `#[ignore]`、测试不许复述源码字面量，见 [`AGENTS.md`](AGENTS.md)。
 
 ## 上线
 

@@ -5,7 +5,7 @@ ai-gateway：Rust + axum 实现的 LLM 中转网关，不依赖任何上游网�
 11 个 worker 分两波在**同一个 worktree**里工作。之所以能并行，全靠下面这份所有权表：
 **只写属于你的文件，绝不碰别人的。**
 
-> **工程规范以 `/Volumes/Acasis/Code/REPO/ozon/ozon/ozon-pod/docs/rust-engineering.md` 为准（1108 行，必读）。**
+> **工程规范以 [`docs/rust-engineering.md`](docs/rust-engineering.md) 为准（1108 行，必读）。**
 > 本文件不复述它（规则 5.6：索引文档只链接、不复述，复述出来的那份就是半年后过期的那份）。
 > 下面只列**本仓库已经做出的决定**，以及**该文档里最容易被违反的几条**。
 

@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuthStore } from '@/features/auth/auth_store'
+import { docsRoutes } from '@/shared/routes/docs'
 import { Monitor, CreditCard, Shield, ChevronRight, Activity, Play } from 'lucide-react'
 
 export default function Home() {
@@ -30,13 +31,19 @@ export default function Home() {
       <header className="relative z-20 px-6 py-4">
         <nav className="mx-auto flex max-w-6xl items-center justify-between">
           <div className="flex items-center gap-3">
-            <img src="/icon.svg" alt="CPA Gateway" className="h-10 w-10 rounded-xl shrink-0" />
+            <img src="/icon.svg" alt="AI-GateWay" className="h-10 w-10 rounded-xl shrink-0" />
             <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-gray-900 to-gray-600 dark:from-white dark:to-gray-300">
-              CPA Gateway
+              AI-GateWay
             </span>
           </div>
 
           <div className="flex items-center gap-4">
+            <Link
+              to={docsRoutes.root}
+              className="text-sm font-medium text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white transition-colors"
+            >
+              接入指南
+            </Link>
             {isAuthenticated ? (
               <Link 
                 to={dashboardPath}
@@ -95,7 +102,7 @@ export default function Home() {
                       <div className="w-3 h-3 rounded-full bg-amber-500"></div>
                       <div className="w-3 h-3 rounded-full bg-green-500"></div>
                     </div>
-                    <div className="flex-1 text-center text-xs font-mono text-gray-400">cpa-gateway ~ bash</div>
+                    <div className="flex-1 text-center text-xs font-mono text-gray-400">ai-gateway ~ bash</div>
                   </div>
                   {/* Code body */}
                   <div className="p-5 font-mono text-sm leading-relaxed">
@@ -104,7 +111,7 @@ export default function Home() {
                       <span>curl -X POST /v1/chat/completions \</span>
                     </div>
                     <div className="pl-4 text-gray-300">
-                      -H "Authorization: Bearer sk-cpa-..." \
+                      -H "Authorization: Bearer agw-..." \
                     </div>
                     <div className="pl-4 text-gray-300">
                       -H "Content-Type: application/json" \

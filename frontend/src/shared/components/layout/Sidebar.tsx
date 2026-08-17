@@ -1,4 +1,5 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { useAuthStore } from '@/features/auth/auth_store'
 import { logout as serverLogout } from '@/features/auth/api'
 import { useAppStore } from '@/shared/store/app_store'
@@ -8,7 +9,7 @@ import {
   Sun, Moon, Cpu, FileBarChart, Crown,
   ShoppingCart, Ticket, Wallet,
   Users, Network, CreditCard, BarChart3,
-  ClipboardList, ShieldAlert,
+  ClipboardList, ShieldAlert, BookOpen,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import type { LucideIcon } from 'lucide-react'
@@ -16,6 +17,7 @@ import { cn } from '@/shared/utils/utils'
 import { currentTheme, toggleTheme, type Theme } from '@/shared/theme'
 import { adminRoutes } from '@/shared/routes/admin'
 import { userRoutes } from '@/shared/routes/user'
+import { docsRoutes } from '@/shared/routes/docs'
 
 type NavLinkItem = {
   label: string
@@ -28,6 +30,7 @@ type NavLinkItem = {
 export function Sidebar() {
   const logout = useAuthStore(s => s.logout)
   const user = useAuthStore(s => s.user)
+  const queryClient = useQueryClient()
   const sidebarCollapsed = useAppStore(s => s.sidebarCollapsed)
   const mobileOpen = useAppStore(s => s.mobileOpen)
   const setMobileOpen = useAppStore(s => s.setMobileOpen)
@@ -182,7 +185,7 @@ export function Sidebar() {
       >
         {/* Brand Header */}
         <div className="h-14 sm:h-16 flex items-center px-3 border-b border-border flex-shrink-0 gap-2.5 max-w-full overflow-hidden">
-          <img src="/icon.svg" alt="CPA Gateway" className="w-9 h-9 rounded-xl shrink-0" />
+          <img src="/icon.svg" alt="AI-GateWay" className="w-9 h-9 rounded-xl shrink-0" />
           {/* Always show title on mobile drawer; hide only when desktop-collapsed */}
           <span
             className={cn(
@@ -190,7 +193,7 @@ export function Sidebar() {
               sidebarCollapsed && 'lg:hidden'
             )}
           >
-            CPA Gateway
+            AI-GateWay
           </span>
         </div>
 
@@ -275,6 +278,15 @@ export function Sidebar() {
 
         {/* Footer actions */}
         <div className="p-2 border-t border-border flex flex-col gap-0.5">
+          <Link
+            to={docsRoutes.root}
+            onClick={handleLinkClick}
+            title={sidebarCollapsed ? '接入指南' : undefined}
+            className="flex min-h-11 items-center gap-2.5 rounded-xl px-2.5 py-2 text-sm font-medium text-gray-500 dark:text-dark-400 hover:bg-gray-50 dark:hover:bg-dark-800 hover:text-gray-700 dark:hover:text-white transition-colors w-full"
+          >
+            <BookOpen className="h-[18px] w-[18px] flex-shrink-0" />
+            <span className={cn(sidebarCollapsed && 'lg:hidden')}>接入指南</span>
+          </Link>
           <button
             type="button"
             onClick={handleToggleTheme}
@@ -304,6 +316,7 @@ export function Sidebar() {
                 /* ignore */
               }
               logout()
+              queryClient.clear()
               navigate('/login')
             }}
             title={sidebarCollapsed ? '退出登录' : undefined}

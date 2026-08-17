@@ -44,13 +44,15 @@ export default function Login() {
         )}
 
         <div className="space-y-1">
-          <label className="input-label">邮箱</label>
+          <label htmlFor="login-email" className="input-label">邮箱</label>
           <div className="relative">
             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-400">
               <Mail className="h-5 w-5" />
             </div>
             <input
+              id="login-email"
               type="email"
+              autoComplete="email"
               className="input pl-10"
               placeholder="admin@example.com"
               value={email}
@@ -61,13 +63,15 @@ export default function Login() {
         </div>
 
         <div className="space-y-1">
-          <label className="input-label">密码</label>
+          <label htmlFor="login-password" className="input-label">密码</label>
           <div className="relative">
             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-400">
               <Lock className="h-5 w-5" />
             </div>
             <input
+              id="login-password"
               type={showPassword ? "text" : "password"}
+              autoComplete="current-password"
               className="input pl-10 pr-10"
               placeholder="••••••••"
               value={password}
@@ -76,6 +80,7 @@ export default function Login() {
             />
             <button
               type="button"
+              aria-label={showPassword ? "隐藏密码" : "显示密码"}
               onClick={() => setShowPassword(!showPassword)}
               className="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
             >

@@ -29,7 +29,7 @@ export function useDashboardStats() {
   const isAdmin = user?.role === 'admin'
 
   const adminQuery = useQuery({
-    queryKey: queryKeys.dashboard.stats(),
+    queryKey: queryKeys.dashboard.stats('admin'),
     queryFn: async () => {
       const data = await fetchAdminDashboard()
       return {
@@ -45,7 +45,7 @@ export function useDashboardStats() {
   })
 
   const userQuery = useQuery({
-    queryKey: queryKeys.dashboard.stats(),
+    queryKey: queryKeys.dashboard.stats('user'),
     queryFn: async () => {
       const [profileRes, usageRes] = await Promise.all([
         fetchUserProfile(),
@@ -86,9 +86,10 @@ export function useDashboardStats() {
 export function useDashboardTrend(days: 7 | 30) {
   const user = useAuthStore(s => s.user)
   const isAdmin = user?.role === 'admin'
+  const role = isAdmin ? 'admin' : 'user'
 
   return useQuery({
-    queryKey: queryKeys.dashboard.trend(days),
+    queryKey: queryKeys.dashboard.trend(days, role),
     queryFn: () => isAdmin ? fetchAdminUsageTrend(days) : fetchUserUsageTrend(days),
   })
 }
@@ -101,9 +102,10 @@ export function useDashboardTrend(days: 7 | 30) {
 export function useDashboardModels() {
   const user = useAuthStore(s => s.user)
   const isAdmin = user?.role === 'admin'
+  const role = isAdmin ? 'admin' : 'user'
 
   return useQuery({
-    queryKey: [...queryKeys.dashboard.all(), 'models'] as const,
+    queryKey: queryKeys.dashboard.models(role),
     queryFn: () => isAdmin ? fetchAdminModelStats() : fetchUserModelStats(),
   })
 }

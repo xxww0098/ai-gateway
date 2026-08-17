@@ -59,26 +59,29 @@ export function CreateApiKeyDialog({ onCreate, groups, groupsLoading }: Props) {
   const handleSubmit = async (e: { preventDefault: () => void }) => {
     e.preventDefault()
     setCreating(true)
-    const form: CreateKeyForm = {
-      name,
-      quota,
-      rate_5h: rate5h,
-      rate_1d: rate1d,
-      rate_7d: rate7d,
-      rate_30d: rate30d,
+    try {
+      const form: CreateKeyForm = {
+        name,
+        quota,
+        rate_5h: rate5h,
+        rate_1d: rate1d,
+        rate_7d: rate7d,
+        rate_30d: rate30d,
+      }
+      if (selectedGroupId) {
+        form.group_id = parseInt(selectedGroupId, 10)
+      }
+      const expiresInDays = getExpiresInDays()
+      if (expiresInDays !== undefined) {
+        form.expires_in_days = expiresInDays
+      }
+      await onCreate(form, () => {
+        setOpen(false)
+        resetForm()
+      })
+    } finally {
+      setCreating(false)
     }
-    if (selectedGroupId) {
-      form.group_id = parseInt(selectedGroupId, 10)
-    }
-    const expiresInDays = getExpiresInDays()
-    if (expiresInDays !== undefined) {
-      form.expires_in_days = expiresInDays
-    }
-    await onCreate(form, () => {
-      setOpen(false)
-      resetForm()
-    })
-    setCreating(false)
   }
 
   const selectedGroup = groups.find((g) => String(g.id) === selectedGroupId)
@@ -103,8 +106,9 @@ export function CreateApiKeyDialog({ onCreate, groups, groupsLoading }: Props) {
           <form onSubmit={handleSubmit} className="space-y-4">
             {/* Name */}
             <div className="space-y-1.5">
-              <label className="input-label">名称</label>
+              <label htmlFor="create-key-name" className="input-label">名称</label>
               <input
+                id="create-key-name"
                 className="input"
                 placeholder="例如：本地开发测试环境"
                 value={name}
@@ -116,8 +120,9 @@ export function CreateApiKeyDialog({ onCreate, groups, groupsLoading }: Props) {
 
             {/* Quota */}
             <div className="space-y-1.5">
-              <label className="input-label">总额度上限 (可选)</label>
+              <label htmlFor="create-key-quota" className="input-label">总额度上限 (可选)</label>
               <input
+                id="create-key-quota"
                 type="number"
                 className="input"
                 placeholder="留空表示无限制"
@@ -130,9 +135,10 @@ export function CreateApiKeyDialog({ onCreate, groups, groupsLoading }: Props) {
 
             {/* Group Selector */}
             <div className="space-y-1.5">
-              <label className="input-label">绑定分组 (可选)</label>
+              <label htmlFor="create-key-group" className="input-label">绑定分组 (可选)</label>
               <div className="relative">
                 <select
+                  id="create-key-group"
                   className="input appearance-none pr-8 cursor-pointer"
                   value={selectedGroupId}
                   onChange={(e) => setSelectedGroupId(e.target.value)}
@@ -170,7 +176,7 @@ export function CreateApiKeyDialog({ onCreate, groups, groupsLoading }: Props) {
 
             {/* Expiration Picker */}
             <div className="space-y-2">
-              <label className="input-label">有效期</label>
+              <div className="input-label">有效期</div>
               <div className="flex gap-2 flex-wrap">
                 {EXPIRATION_PRESETS.map((preset) => (
                   <button
@@ -224,6 +230,7 @@ export function CreateApiKeyDialog({ onCreate, groups, groupsLoading }: Props) {
                 {expirationMode === "custom" && (
                   <div className="flex items-center gap-1.5">
                     <input
+                      id="create-key-custom-days"
                       type="number"
                       className="input w-24"
                       placeholder="天数"
@@ -233,7 +240,7 @@ export function CreateApiKeyDialog({ onCreate, groups, groupsLoading }: Props) {
                       max="3650"
                       autoFocus
                     />
-                    <span className="text-sm text-gray-500 dark:text-dark-400">天</span>
+                    <label htmlFor="create-key-custom-days" className="text-sm text-gray-500 dark:text-dark-400">天</label>
                   </div>
                 )}
               </div>
@@ -253,20 +260,20 @@ export function CreateApiKeyDialog({ onCreate, groups, groupsLoading }: Props) {
               <summary className="text-sm font-medium text-gray-900 dark:text-white outline-none select-none cursor-pointer">高级：时间窗口速率限制 (USD)</summary>
               <div className="mt-4 grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
-                  <label className="text-xs font-semibold text-gray-500 dark:text-dark-400 uppercase">5h 限制</label>
-                  <input type="number" placeholder="无限制" className="input" value={rate5h} onChange={(e) => setRate5h(e.target.value)} step="0.01" min="0" />
+                  <label htmlFor="create-key-rate-5h" className="text-xs font-semibold text-gray-500 dark:text-dark-400 uppercase">5h 限制</label>
+                  <input id="create-key-rate-5h" type="number" placeholder="无限制" className="input" value={rate5h} onChange={(e) => setRate5h(e.target.value)} step="0.01" min="0" />
                 </div>
                 <div className="space-y-1.5">
-                  <label className="text-xs font-semibold text-gray-500 dark:text-dark-400 uppercase">1 天限制</label>
-                  <input type="number" placeholder="无限制" className="input" value={rate1d} onChange={(e) => setRate1d(e.target.value)} step="0.01" min="0" />
+                  <label htmlFor="create-key-rate-1d" className="text-xs font-semibold text-gray-500 dark:text-dark-400 uppercase">1 天限制</label>
+                  <input id="create-key-rate-1d" type="number" placeholder="无限制" className="input" value={rate1d} onChange={(e) => setRate1d(e.target.value)} step="0.01" min="0" />
                 </div>
                 <div className="space-y-1.5">
-                  <label className="text-xs font-semibold text-gray-500 dark:text-dark-400 uppercase">7 天限制</label>
-                  <input type="number" placeholder="无限制" className="input" value={rate7d} onChange={(e) => setRate7d(e.target.value)} step="0.01" min="0" />
+                  <label htmlFor="create-key-rate-7d" className="text-xs font-semibold text-gray-500 dark:text-dark-400 uppercase">7 天限制</label>
+                  <input id="create-key-rate-7d" type="number" placeholder="无限制" className="input" value={rate7d} onChange={(e) => setRate7d(e.target.value)} step="0.01" min="0" />
                 </div>
                 <div className="space-y-1.5">
-                  <label className="text-xs font-semibold text-gray-500 dark:text-dark-400 uppercase">30 天限制</label>
-                  <input type="number" placeholder="无限制" className="input" value={rate30d} onChange={(e) => setRate30d(e.target.value)} step="0.01" min="0" />
+                  <label htmlFor="create-key-rate-30d" className="text-xs font-semibold text-gray-500 dark:text-dark-400 uppercase">30 天限制</label>
+                  <input id="create-key-rate-30d" type="number" placeholder="无限制" className="input" value={rate30d} onChange={(e) => setRate30d(e.target.value)} step="0.01" min="0" />
                 </div>
               </div>
             </details>

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { toast } from "sonner"
 import { QRCodeSVG } from "qrcode.react"
 
@@ -42,17 +42,26 @@ export default function AlipayPayment({ initialOrderId, onSuccess }: AlipayPayme
     }
   }, [initialOrderId])
 
-  // Handle status transitions
+  const onSuccessRef = useRef(onSuccess)
+  onSuccessRef.current = onSuccess
+  const handledOrderRef = useRef<string | null>(null)
+
   useEffect(() => {
+    if (!activeOrderId) return
+    if (status !== "paid" && status !== "failed") return
+    if (handledOrderRef.current === activeOrderId) return
+    handledOrderRef.current = activeOrderId
+    setPolling(false)
     if (status === "paid") {
-      setPolling(false)
-      toast.success(`支付宝支付成功！充值 $${statusQuery.data!.amount.toFixed(2)}`)
-      onSuccess?.()
-    } else if (status === "failed") {
-      setPolling(false)
+      const amount = statusQuery.data?.amount
+      if (typeof amount === "number") {
+        toast.success(`支付宝支付成功！充值 $${amount.toFixed(2)}`)
+      }
+      onSuccessRef.current?.()
+    } else {
       toast.error("支付宝支付失败")
     }
-  }, [status, statusQuery.data, onSuccess])
+  }, [status, activeOrderId, statusQuery.data?.amount])
 
   const handleCreateOrder = useCallback(() => {
     const val = parseFloat(amount)

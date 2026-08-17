@@ -1,3 +1,6 @@
 hotpath.perf.data
 hotpath.folded
 hotpath.demangled.folded
+hotpath-stream.perf.data
+hotpath-stream.folded
+*.perf.data.old

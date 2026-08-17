@@ -34,20 +34,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
-use axum::body::{Body, Bytes};
+use axum::body::Bytes;
 use axum::extract::{Path, Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use futures_util::StreamExt;
 use gw_authcore::{AuthRecord, AuthStore};
-use gw_provider::types::{
-    Provider, ProviderError, ProviderRequest, ProviderResponse, StreamChunk, StreamResponse,
-    UsageRecord,
-};
+use gw_provider::types::{Provider, ProviderError, ProviderRequest, ProviderResponse};
 use gw_relay::Surface;
 use gw_relay::endpoint::spec::RequestSpec;
 use gw_relay::endpoint::upstream::ChannelResolver;
-use tokio_util::task::TaskTracker;
 
 use crate::ProxyState;
 use crate::channel::ChannelPool;
@@ -55,12 +50,16 @@ use crate::error::DispatchError;
 use crate::hold::PeekedBody;
 use crate::kernel::{Phase, RelayCtx};
 use crate::ports::{CircuitBreaker, ModelCatalog};
-use crate::settlectx::{BillingHandle, SettleCtx};
+use crate::settlectx::BillingHandle;
 use crate::usage::{Settlement, UsageOutcome};
 
 mod routing;
+mod stream;
 
 pub(crate) use routing::{dialect_error, partition_routable, rewrite_model, select_upstreams};
+#[cfg(test)]
+pub(crate) use stream::is_hop_by_hop;
+use stream::{relay, stream_response};
 
 /// How many upstream accounts one client request may burn through.
 /// Bounded so a fully-broken pool fails fast instead of walking every account.
@@ -271,11 +270,7 @@ impl Dispatcher {
 ///
 /// `billing` is `None` for the endpoints [`crate::hold::is_billable`] excludes
 /// (token counting, catalogue reads); those never reserve, never settle.
-async fn dispatch(
-    state: &ProxyState,
-    surface: Surface,
-    mut inbound: Inbound,
-) -> Response {
+async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) -> Response {
     let stream = inbound.stream;
     let billing = inbound.billing.clone();
     let model = std::mem::take(&mut inbound.model);
@@ -541,7 +536,7 @@ async fn unary_response(
         && billing.claim_finalize()
     {
         let outcome = UsageOutcome {
-            usage: response.usage.clone(),
+            usage: response.usage,
             failed: !status.is_success(),
             auth_id,
             provider: provider.to_owned(),
@@ -556,168 +551,6 @@ async fn unary_response(
     relay(status, response.headers, response.body)
 }
 
-/// Relays a streamed response, settling when the stream ends.
-///
-/// Settlement is claimed up-front so the hold middleware's finalizer stands
-/// down; the actual charge is applied by [`StreamSettler`] once the last chunk
-/// has been forwarded, or by its `Drop` if the client hangs up mid-stream.
-fn stream_response(
-    state: &ProxyState,
-    upstream: StreamResponse,
-    billing: Option<BillingHandle>,
-    auth_id: String,
-    provider: &str,
-    started: Instant,
-) -> Response {
-    let StreamResponse {
-        status,
-        headers,
-        chunks,
-    } = upstream;
-    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
-    let settler = billing.and_then(|b| {
-        b.claim_finalize().then(|| StreamSettler {
-            settlement: state.dispatch.settlement.clone(),
-            drain: state.drain.clone(),
-            ctx: b.ctx.clone(),
-            usage: None,
-            failed: false,
-            auth_id,
-            provider: provider.to_owned(),
-            started,
-            done: false,
-        })
-    });
-
-    let body = Body::from_stream(futures_util::stream::unfold(
-        Some((chunks, settler)),
-        |carrier| async move {
-            let (mut chunks, mut settler) = carrier?;
-            loop {
-                match chunks.next().await {
-                    Some(StreamChunk::Payload(bytes)) => {
-                        return Some((
-                            Ok::<Bytes, std::convert::Infallible>(bytes),
-                            Some((chunks, settler)),
-                        ));
-                    }
-                    Some(StreamChunk::Usage(record)) => {
-                        if let Some(s) = settler.as_mut() {
-                            s.usage = Some(record);
-                        }
-                    }
-                    Some(StreamChunk::Error { status, message }) => {
-                        tracing::warn!(?status, %message, "upstream stream error");
-                        if let Some(s) = settler.as_mut() {
-                            s.failed = true;
-                        }
-                    }
-                    None => {
-                        if let Some(s) = settler.as_mut() {
-                            s.finish().await;
-                        }
-                        return None;
-                    }
-                }
-            }
-        },
-    ));
-
-    // Relay the upstream's own status and headers. The provider carries them
-    // explicitly (`StreamResponse`) precisely so a relay does not have to
-    // hardcode 200 and guess the content type.
-    let mut response = Response::new(body);
-    *response.status_mut() = status;
-    for (name, value) in headers.iter() {
-        if is_hop_by_hop(name.as_str()) {
-            continue;
-        }
-        response.headers_mut().insert(name, value.clone());
-    }
-    let response_headers = response.headers_mut();
-    if !response_headers.contains_key(header::CONTENT_TYPE) {
-        response_headers.insert(
-            header::CONTENT_TYPE,
-            header::HeaderValue::from_static("text/event-stream"),
-        );
-    }
-    if !response_headers.contains_key(header::CACHE_CONTROL) {
-        response_headers.insert(
-            header::CACHE_CONTROL,
-            header::HeaderValue::from_static("no-cache"),
-        );
-    }
-    response
-}
-
-/// Carries the settlement obligation for a streamed response.
-struct StreamSettler {
-    settlement: Arc<Settlement>,
-    /// The composition root's tracker, so a settlement spawned from `drop`
-    /// survives shutdown. Cloned from [`ProxyState::drain`] — never created
-    /// here, or the drain would wait on a tracker nobody else can see.
-    drain: TaskTracker,
-    ctx: SettleCtx,
-    usage: Option<UsageRecord>,
-    failed: bool,
-    auth_id: String,
-    provider: String,
-    started: Instant,
-    done: bool,
-}
-
-impl StreamSettler {
-    fn outcome(&self) -> UsageOutcome {
-        UsageOutcome {
-            usage: self.usage.clone(),
-            failed: self.failed,
-            auth_id: self.auth_id.clone(),
-            provider: self.provider.clone(),
-            duration_ms: self.started.elapsed().as_millis() as i64,
-        }
-    }
-
-    async fn finish(&mut self) {
-        if self.done {
-            return;
-        }
-        self.done = true;
-        self.settlement.settle(&self.ctx, self.outcome()).await;
-    }
-}
-
-impl Drop for StreamSettler {
-    /// A client that hangs up mid-stream drops the body without the stream ever
-    /// ending, so settle from a detached task rather than leaving the hold to
-    /// its TTL. The detached finalizer runs regardless of the client.
-    ///
-    /// The task goes to [`ProxyState::drain`], **not** to `tokio::spawn`. A
-    /// bare spawn is aborted the instant the runtime is dropped, which for a
-    /// disconnect that lands during shutdown means the charge is lost and the
-    /// hold leaks until its TTL — free upstream output, and a breach of the
-    /// billing invariants in `AGENTS.md`.
-    ///
-    /// No "is the tracker closed?" check is needed or wanted:
-    /// `TaskTracker::close` does not block later spawns, so a `drop` that lands
-    /// mid-drain is still tracked and still waited on.
-    fn drop(&mut self) {
-        if self.done {
-            return;
-        }
-        self.done = true;
-        let settlement = self.settlement.clone();
-        let ctx = self.ctx.clone();
-        let outcome = self.outcome();
-        // `TaskTracker::spawn` panics outside a runtime, exactly like
-        // `tokio::spawn`; a body can only be dropped on one, but tests may
-        // construct a settler off-runtime.
-        if tokio::runtime::Handle::try_current().is_ok() {
-            self.drain
-                .spawn(async move { settlement.settle(&ctx, outcome).await });
-        }
-    }
-}
-
 /// Terminates billing for a request that never reached an upstream.
 async fn finish_error(
     state: &ProxyState,
@@ -726,41 +559,6 @@ async fn finish_error(
 ) -> Response {
     finish_billing_failed(state, billing).await;
     err.into_response()
-}
-
-/// Copies an upstream response through, minus hop-by-hop headers.
-fn relay(status: StatusCode, headers: HeaderMap, body: Bytes) -> Response {
-    let mut response = Response::new(Body::from(body));
-    *response.status_mut() = status;
-    for (name, value) in headers.iter() {
-        if is_hop_by_hop(name.as_str()) {
-            continue;
-        }
-        response.headers_mut().insert(name, value.clone());
-    }
-    if !response.headers().contains_key(header::CONTENT_TYPE) {
-        response.headers_mut().insert(
-            header::CONTENT_TYPE,
-            header::HeaderValue::from_static("application/json"),
-        );
-    }
-    response
-}
-
-/// Headers that describe one hop and must not be forwarded.
-fn is_hop_by_hop(name: &str) -> bool {
-    matches!(
-        name,
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-            | "content-length"
-    )
 }
 
 // ---------------------------------------------------------------- handlers

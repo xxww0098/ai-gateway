@@ -11,13 +11,13 @@ use crate::types::{ProviderError, ProviderRequest, StreamChunk, StreamResponse};
 use crate::usage::UsageTokens;
 use bytes::Bytes;
 use futures::Stream;
-use futures_util::StreamExt;
 use gw_relay::endpoint::include_usage::Spliced;
 use gw_relay::endpoint::{IncludeUsagePolicy, RequestSpec, splice_include_usage};
 use gw_relay::{Surface, UpstreamDialect};
 use serde_json::Value;
 use std::pin::Pin;
 use std::sync::OnceLock;
+use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 /// Shared provider identifiers.
@@ -425,6 +425,17 @@ pub struct StreamIdleElapsed;
 ///
 /// A zero `idle` disables the watchdog and passes the inner stream through
 /// untouched.
+///
+/// # Why this is a `Stream` and not `unfold` + `timeout`
+///
+/// The previous implementation was `unfold` around `tokio::time::timeout(idle,
+/// inner.next())`. That builds a new `Sleep` future on **every poll**, including
+/// the case where the next chunk is already ready. On a burst SSE stream that
+/// is one timer per chunk for a 300 s window that never fires.
+///
+/// This type polls the inner stream first and only arms a reusable [`Sleep`]
+/// when that poll returns `Pending`. Ready chunks therefore do not touch the
+/// timer at all.
 pub fn with_stream_idle_timeout<S>(
     inner: S,
     idle: Duration,
@@ -433,22 +444,87 @@ where
     S: Stream + Send + 'static,
     S::Item: Send,
 {
-    futures_util::stream::unfold(
-        (Box::pin(inner), idle, false),
-        |(mut inner, idle, expired)| async move {
-            if expired {
-                return None;
+    IdleTimeout::new(inner, idle)
+}
+
+/// See [`with_stream_idle_timeout`].
+struct IdleTimeout<S> {
+    inner: Pin<Box<S>>,
+    /// Reused across gaps so a long stream pays one timer allocation, not one
+    /// per chunk. `None` until the first `Pending`.
+    sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+    idle: Duration,
+    expired: bool,
+    /// `true` while `sleep` is counting the current gap. Cleared when an item
+    /// arrives so the next `Pending` restarts the window from now.
+    armed: bool,
+}
+
+impl<S> IdleTimeout<S>
+where
+    S: Stream,
+{
+    fn new(inner: S, idle: Duration) -> Self {
+        Self {
+            inner: Box::pin(inner),
+            sleep: None,
+            idle,
+            expired: false,
+            armed: false,
+        }
+    }
+
+    fn poll_idle(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        let deadline = tokio::time::Instant::now() + self.idle;
+        if let Some(sleep) = self.sleep.as_mut() {
+            if !self.armed {
+                sleep.as_mut().reset(deadline);
+                self.armed = true;
             }
-            if idle.is_zero() {
-                return inner.next().await.map(|it| (Ok(it), (inner, idle, false)));
+            return sleep.as_mut().poll(cx);
+        }
+        let mut sleep = Box::pin(tokio::time::sleep_until(deadline));
+        let poll = sleep.as_mut().poll(cx);
+        self.sleep = Some(sleep);
+        self.armed = true;
+        poll
+    }
+}
+
+impl<S> Stream for IdleTimeout<S>
+where
+    S: Stream,
+{
+    type Item = Result<S::Item, StreamIdleElapsed>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.expired {
+            return Poll::Ready(None);
+        }
+        if this.idle.is_zero() {
+            return this.inner.as_mut().poll_next(cx).map(|item| item.map(Ok));
+        }
+        match this.inner.as_mut().poll_next(cx) {
+            Poll::Ready(Some(item)) => {
+                this.armed = false;
+                Poll::Ready(Some(Ok(item)))
             }
-            match tokio::time::timeout(idle, inner.next()).await {
-                Ok(Some(item)) => Some((Ok(item), (inner, idle, false))),
-                Ok(None) => None,
-                Err(_) => Some((Err(StreamIdleElapsed), (inner, idle, true))),
-            }
-        },
-    )
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => match this.poll_idle(cx) {
+                Poll::Ready(()) => {
+                    this.expired = true;
+                    this.armed = false;
+                    Poll::Ready(Some(Err(StreamIdleElapsed)))
+                }
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
 }
 
 // --- streamed usage accumulation ---------------------------------------------
@@ -484,15 +560,74 @@ enum UsagePhase {
 }
 
 /// The per-stream constants [`usage_stream`] threads through every chunk.
-///
-/// A struct rather than four more tuple slots: the `unfold` state already
-/// carries the reader, the buffer and the phase, and a six-field tuple stops
-/// being readable at the destructuring site.
 struct UsageStreamMeta {
     model: String,
     provider: &'static str,
     /// Status of the response being relayed, stamped onto any error chunk.
     upstream_status: u16,
+}
+
+/// One stream: idle watchdog + line probe + [`StreamChunk`] mapping.
+///
+/// Replaces two stacked `unfold` state machines. State stays in place across
+/// polls — the probe's `pending` line buffer is not moved on every chunk —
+/// and the idle timer is the [`IdleTimeout`] above, so a ready chunk does not
+/// allocate a `Sleep`.
+struct UsageRelay<S> {
+    inner: IdleTimeout<S>,
+    probe: StreamUsageProbe,
+    meta: UsageStreamMeta,
+    phase: UsagePhase,
+}
+
+impl<S> Stream for UsageRelay<S>
+where
+    S: Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
+{
+    type Item = StreamChunk;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            match this.phase {
+                UsagePhase::Done => return Poll::Ready(None),
+                UsagePhase::Trailing => {
+                    this.phase = UsagePhase::Done;
+                    return Poll::Ready(
+                        this.probe
+                            .finish()
+                            .map(|tokens| tokens.to_record(&this.meta.model, this.meta.provider))
+                            .map(StreamChunk::Usage),
+                    );
+                }
+                UsagePhase::Streaming => match ready!(Pin::new(&mut this.inner).poll_next(cx)) {
+                    Some(Ok(Ok(chunk))) => {
+                        this.probe.observe(&chunk);
+                        return Poll::Ready(Some(StreamChunk::Payload(chunk)));
+                    }
+                    // Transport error mid-stream: surface it, then still try
+                    // to bill whatever usage the truncated body carried.
+                    Some(Ok(Err(err))) => {
+                        this.phase = UsagePhase::Trailing;
+                        return Poll::Ready(Some(StreamChunk::Error {
+                            status: Some(this.meta.upstream_status),
+                            message: err.to_string(),
+                        }));
+                    }
+                    Some(Err(elapsed)) => {
+                        this.phase = UsagePhase::Trailing;
+                        return Poll::Ready(Some(StreamChunk::Error {
+                            status: Some(this.meta.upstream_status),
+                            message: elapsed.to_string(),
+                        }));
+                    }
+                    None => {
+                        this.phase = UsagePhase::Trailing;
+                    }
+                },
+            }
+        }
+    }
 }
 
 /// Turns a raw upstream byte stream into the [`StreamChunk`] sequence the
@@ -522,62 +657,16 @@ pub fn usage_stream<S>(
 where
     S: Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
 {
-    let guarded: Pin<Box<dyn Stream<Item = _> + Send>> =
-        Box::pin(with_stream_idle_timeout(body, idle));
-    let state = (
-        guarded,
-        StreamUsageProbe::new(parse),
-        UsagePhase::Streaming,
-        UsageStreamMeta {
+    Box::pin(UsageRelay {
+        inner: IdleTimeout::new(body, idle),
+        probe: StreamUsageProbe::new(parse),
+        meta: UsageStreamMeta {
             model,
             provider,
             upstream_status,
         },
-    );
-
-    Box::pin(futures_util::stream::unfold(
-        state,
-        |(mut inner, mut buf, mut phase, meta)| async move {
-            loop {
-                match phase {
-                    UsagePhase::Done => return None,
-                    UsagePhase::Trailing => {
-                        let record = buf
-                            .finish()
-                            .map(|t| t.to_record(&meta.model, meta.provider));
-                        let state = (inner, buf, UsagePhase::Done, meta);
-                        return record.map(|rec| (StreamChunk::Usage(rec), state));
-                    }
-                    UsagePhase::Streaming => match inner.next().await {
-                        Some(Ok(Ok(chunk))) => {
-                            buf.observe(&chunk);
-                            let state = (inner, buf, UsagePhase::Streaming, meta);
-                            return Some((StreamChunk::Payload(chunk), state));
-                        }
-                        // Transport error mid-stream: surface it, then still try
-                        // to bill whatever usage the truncated body carried.
-                        Some(Ok(Err(err))) => {
-                            let chunk = StreamChunk::Error {
-                                status: Some(meta.upstream_status),
-                                message: err.to_string(),
-                            };
-                            return Some((chunk, (inner, buf, UsagePhase::Trailing, meta)));
-                        }
-                        Some(Err(elapsed)) => {
-                            let chunk = StreamChunk::Error {
-                                status: Some(meta.upstream_status),
-                                message: elapsed.to_string(),
-                            };
-                            return Some((chunk, (inner, buf, UsagePhase::Trailing, meta)));
-                        }
-                        None => {
-                            phase = UsagePhase::Trailing;
-                        }
-                    },
-                }
-            }
-        },
-    ))
+        phase: UsagePhase::Streaming,
+    })
 }
 
 #[cfg(test)]

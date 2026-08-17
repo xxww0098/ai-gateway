@@ -17,6 +17,7 @@ use crate::testsupport::{
 };
 
 mod dispatch;
+mod stream;
 
 /// A usage chunk carrying `input`/`output` tokens, as an upstream would emit it
 /// mid-stream.

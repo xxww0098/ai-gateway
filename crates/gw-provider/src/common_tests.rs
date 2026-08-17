@@ -476,6 +476,23 @@ async fn a_zero_idle_window_disables_the_watchdog() {
     assert_eq!(items, vec![Ok(7)]);
 }
 
+/// Immediately-ready items must never be killed by the idle window.
+///
+/// The old `timeout(idle, inner.next())` built a Sleep on every poll. This
+/// guards the new impl: if the watchdog is armed *before* the inner stream is
+/// polled, a 1 ns window can expire between two ready items on a busy runtime.
+#[tokio::test]
+async fn ready_items_are_not_killed_by_a_tiny_idle_window() {
+    let inner = futures_util::stream::iter(0u16..1_000);
+    let guarded = with_stream_idle_timeout(inner, Duration::from_nanos(1));
+    let items: Vec<_> = guarded.collect().await;
+    assert_eq!(items.len(), 1_000);
+    assert!(
+        items.iter().all(Result::is_ok),
+        "a ready item is not an idle gap"
+    );
+}
+
 // --- streamed usage accumulation ---------------------------------------------
 
 fn sse(chunks: &[&'static str]) -> Vec<reqwest::Result<Bytes>> {

@@ -37,20 +37,21 @@ pub struct ProviderRequest {
 /// `authorization` (each provider supplies its own credential). Comparison is
 /// case-insensitive on the trimmed name.
 pub fn is_skipped_proxy_header(name: &str) -> bool {
-    matches!(
-        name.trim().to_ascii_lowercase().as_str(),
-        "authorization"
-            | "connection"
-            | "content-length"
-            | "host"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-    )
+    // HeaderName 已经是小写，但本函数吃 &str，大小写都要认。
+    // 以前 to_ascii_lowercase() 每个头分配一次 String，热路径上每个
+    // 入站头都走这里。
+    let name = name.trim();
+    name.eq_ignore_ascii_case("authorization")
+        || name.eq_ignore_ascii_case("connection")
+        || name.eq_ignore_ascii_case("content-length")
+        || name.eq_ignore_ascii_case("host")
+        || name.eq_ignore_ascii_case("keep-alive")
+        || name.eq_ignore_ascii_case("proxy-authenticate")
+        || name.eq_ignore_ascii_case("proxy-authorization")
+        || name.eq_ignore_ascii_case("te")
+        || name.eq_ignore_ascii_case("trailer")
+        || name.eq_ignore_ascii_case("transfer-encoding")
+        || name.eq_ignore_ascii_case("upgrade")
 }
 
 /// Copies forwardable inbound headers onto an outbound request.

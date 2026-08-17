@@ -176,15 +176,15 @@ pub fn truncate_failure_body(payload: &[u8]) -> String {
 /// Prefers the translated [`ProviderRequest::model`] and falls back to the
 /// [`REQUESTED_MODEL_METADATA_KEY`] hint the router stored.
 #[must_use]
-pub fn requested_model(req: &ProviderRequest) -> String {
+pub fn requested_model(req: &ProviderRequest) -> &str {
     let model = req.model.trim();
     if !model.is_empty() {
-        return model.to_owned();
+        return model;
     }
     req.metadata
         .get(REQUESTED_MODEL_METADATA_KEY)
-        .map(|v| v.trim().to_owned())
-        .unwrap_or_default()
+        .map(|v| v.trim())
+        .unwrap_or("")
 }
 
 // --- credential lookup helpers ----------------------------------------------

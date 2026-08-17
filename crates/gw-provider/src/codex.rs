@@ -334,7 +334,7 @@ fn updated_token_data(
 fn codex_billing_model(req: &ProviderRequest) -> String {
     let from_body = codex_model_from_body(&req.payload);
     if from_body.is_empty() {
-        requested_model(req)
+        requested_model(req).to_owned()
     } else {
         from_body
     }

@@ -388,7 +388,7 @@ impl Provider for ClaudeProvider {
         req: ProviderRequest,
     ) -> Result<StreamResponse, ProviderError> {
         let (credential, base_url) = self.resolve_credentials(Some(auth));
-        let model = requested_model(&req);
+        let model = requested_model(&req).to_owned();
         let response = self
             .build_request(&req, true, &credential, &base_url)?
             .send()

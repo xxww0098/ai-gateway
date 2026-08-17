@@ -180,7 +180,14 @@ impl HoldMiddleware {
             return next.run(req).await;
         }
 
-        let Some(meta) = req.extensions().get::<AccessMetadata>().cloned() else {
+        // 内核路径上 AccessMetadata 只住在 RelayCtx 里，不再单独插一份。
+        // hold::layer 单测仍会直接挂 AccessMetadata，所以两处都认。
+        let Some(meta) = req
+            .extensions()
+            .get::<crate::kernel::RelayCtx>()
+            .map(|ctx| ctx.access.clone())
+            .or_else(|| req.extensions().get::<AccessMetadata>().cloned())
+        else {
             // The access layer runs first; missing metadata means auth was
             // skipped or failed in an unexpected way. Fail closed so an
             // unauthenticated request is never billed.
@@ -882,9 +889,11 @@ pub fn extract_idempotency_key(headers: &HeaderMap) -> String {
 
 // ---------------------------------------------------------------- plumbing
 
-/// Buffers the body for peeking and puts it back so the handler sees it
-/// unchanged. A body over [`HOLD_REQUEST_BODY_LIMIT`] is rejected with 413
-/// rather than silently corrupting the payload forwarded upstream.
+/// 把入站 body 收成一块 [`Bytes`] 供 peek 与转发共用。
+///
+/// 超 [`HOLD_REQUEST_BODY_LIMIT`] 回 413。**不再写回 `Request`**：
+/// handler 走 [`PeekedBody`]，再 `Body::from(bytes.clone())` 只是多挂一个
+/// `Full`，火焰图上 `peek_request_body` 的一部分就是这个。
 async fn peek_request_body(
     req: &mut Request,
     surface: gw_relay::Surface,
@@ -911,7 +920,6 @@ async fn peek_request_body(
     // （告警由被调用方自己打，返回值这里不需要）。
     let _conflicted =
         gw_relay::endpoint::accept_conflicts_with_body(&spec, req.headers(), req.uri().path());
-    *req.body_mut() = Body::from(bytes.clone());
     Ok((spec, bytes))
 }
 

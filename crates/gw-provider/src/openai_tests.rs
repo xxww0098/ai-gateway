@@ -99,31 +99,35 @@ fn a_non_positive_timeout_falls_back_to_the_default() {
 #[test]
 fn credential_metadata_overrides_the_configured_api_key() {
     let provider = provider();
-    let (key, base) = provider.resolve_credentials(&auth(json!({"api_key": " sk-auth "}), &[]));
+    let overridden = auth(json!({"api_key": " sk-auth "}), &[]);
+    let (key, base) = provider.resolve_credentials(&overridden);
     assert_eq!(key, "sk-auth");
     assert_eq!(base, provider.base_url());
 
-    let (key, _) = provider.resolve_credentials(&auth(json!({"api_key": ""}), &[]));
+    let blank = auth(json!({"api_key": ""}), &[]);
+    let (key, _) = provider.resolve_credentials(&blank);
     assert_eq!(key, "sk-config", "a blank override must not win");
 
-    let (key, _) = provider.resolve_credentials(&bare_auth());
+    let bare = bare_auth();
+    let (key, _) = provider.resolve_credentials(&bare);
     assert_eq!(key, "sk-config");
 }
 
 #[test]
 fn both_base_url_spellings_are_accepted_with_underscore_winning() {
     let provider = provider();
-    let (_, base) = provider.resolve_credentials(&auth(
+    let both = auth(
         json!({}),
         &[
             ("base_url", "https://a.example.com/"),
             ("base-url", "https://b.example.com"),
         ],
-    ));
+    );
+    let (_, base) = provider.resolve_credentials(&both);
     assert_eq!(base, "https://a.example.com");
 
-    let (_, base) =
-        provider.resolve_credentials(&auth(json!({}), &[("base-url", "https://b.example.com")]));
+    let dashed = auth(json!({}), &[("base-url", "https://b.example.com")]);
+    let (_, base) = provider.resolve_credentials(&dashed);
     assert_eq!(base, "https://b.example.com");
 }
 
@@ -332,4 +336,21 @@ async fn count_tokens_refuses_rather_than_fabricating_a_number() {
             "{len} bytes produced a fabricated count"
         );
     }
+}
+
+
+/// 大小写与两侧空白都不该改变「这个头该不该转发」的判定。
+///
+/// 守护的 bug：改回 `to_ascii_lowercase()`（每头一次分配），或者改成
+/// 只认小写、把 `Authorization` 漏出去打到上游。
+#[test]
+fn hop_by_hop_header_names_match_without_regard_to_case() {
+    for name in ["Authorization", "AUTHORIZATION", " authorization ", "Host", "content-length"] {
+        assert!(
+            is_skipped_proxy_header(name),
+            "{name} must stay on the denylist"
+        );
+    }
+    assert!(!is_skipped_proxy_header("x-custom"));
+    assert!(!is_skipped_proxy_header("openai-organization"));
 }

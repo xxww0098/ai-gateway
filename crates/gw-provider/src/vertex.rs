@@ -541,7 +541,7 @@ impl VertexProvider {
 /// The router may hand over a `vertex/`-qualified name, but the publisher path
 /// already says which publisher this is.
 fn vertex_requested_model(req: &ProviderRequest) -> String {
-    strip_vertex_prefix(&requested_model(req)).to_owned()
+    strip_vertex_prefix(requested_model(req)).to_owned()
 }
 
 fn strip_vertex_prefix(model: &str) -> &str {

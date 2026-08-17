@@ -4,7 +4,7 @@
 一层 `kernel::layer`）在本地 mock 上游上的 CPU 采样，不是生产流量，也不是
 进程内 `FakeProvider`。
 
-采样时间：2026-08-17 11:46 CST（UTC+8）。
+采样时间：2026-08-17 12:31 CST（UTC+8）。上一轮（状态机收成）是 11:46 CST。
 
 ## 怎么出的
 
@@ -35,32 +35,38 @@ perfkit 给 gateway 套了 `counting_alloc` 全局分配器（为分配计数档
 
 ## 这一轮读数
 
-loadgen 20s / concurrency=8 / 一元 1 KiB→2 KiB：
+loadgen 20s / concurrency=8 / 一元 1 KiB→2 KiB。括号里是 11:46 那一轮
+（热路径收成一层状态机）的对照。
 
-| 项 | 值 |
-| --- | --- |
-| 请求数 | 752 034 |
-| rps | 37 575 |
-| 延迟 p50 / p99 | 211 µs / 329 µs |
-| errors / non_200 / stalls | 0 / 0 / 0 |
-| perf 样本 | 4 297（`cycles:u`，dwarf） |
+| 项 | 值 | 上一轮 |
+| --- | --- | --- |
+| 请求数 | 766 080 | 752 034 |
+| rps | 38 282 | 37 575 |
+| 延迟 p50 / p99 | 207 µs / 323 µs | 211 µs / 329 µs |
+| errors / non_200 / stalls | 0 / 0 / 0 | 0 / 0 / 0 |
+| perf 样本 | 4 205（`cycles:u`，dwarf） | 4 297 |
 
 栈上出现的内核帧（任意位置，按采样权重）：
 
-| 占比 | 帧 |
-| --- | --- |
-| 64.5% | `gw_proxy::kernel::layer` |
-| 61.6% | `HoldMiddleware::handle` |
-| 56.1% | `HoldMiddleware::handle_reserved` |
-| 53.8% | `routes::dispatch` |
-| 40.5% | `OpenAiCompatibleProvider::execute`（打 mock 上游） |
-| 3.4% | `routes::unary_response` |
-| 2.5% | `Settlement::settle` |
-| 2.3% | `hold::peek_request_body` |
+| 占比 | 上一轮 | 帧 |
+| --- | --- | --- |
+| 65.5% | 64.5% | `gw_proxy::kernel::layer` |
+| 60.7% | 61.6% | `HoldMiddleware::handle` |
+| 55.5% | 56.1% | `HoldMiddleware::handle_reserved` |
+| 55.1% | 53.8% | `routes::dispatch` |
+| 41.8% | 40.5% | `OpenAiCompatibleProvider::execute`（打 mock 上游） |
+| 3.9% | 3.4% | `routes::unary_response` |
+| 2.9% | 2.3% | `hold::peek_request_body` |
+| 2.7% | 2.5% | `Settlement::settle` |
+| 1.7% | — | `json_peek::parse_top_fields`（请求体顶层扫描，不再整棵 serde） |
+| 1.3% | — | `routes::inbound`（扩展 / HeaderMap 改为 move） |
+| 0.5% | — | `serde_json` 解 `OpenAiUsage`（只解顶层 `usage` 对象） |
 
-叶子热点仍是分配与 `Bytes` 引用计数（`malloc`/`cfree`/`bytes_*_shared`），
-以及 serde_json 扫字符串。这和「热路径已经是一层状态机 + 零拷贝 body」
-对得上：剩下的 CPU 主要在 HTTP 编解码和堆，不在中间件叠罗汉。
+叶子热点仍是 `malloc` / `cfree` / `Bytes` 引用计数。`serde_json::skip_to_escape`
+不再出现在前 15 片叶子里，换成 `json_peek::Cursor::skip_string`（跳过
+`messages` / `choices` 的字节，不分配）。`peek_request_body` 的占比没有掉，
+因为它还是要把 1 KiB body 收进来并扫一遍顶层键；省掉的是 serde 的
+visitor / 字符串分配，以及把 body 再 `Body::from` 回去的那一次。
 
 ## 复现
 

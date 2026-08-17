@@ -17,6 +17,7 @@ use gw_authcore::{AuthRecord, AuthStatus};
 use gw_relay::Surface;
 use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use http::{HeaderMap, HeaderValue};
+use std::borrow::Cow;
 use std::time::Duration;
 
 /// Executor for any OpenAI-compatible API.
@@ -27,6 +28,8 @@ pub struct OpenAiCompatibleProvider {
     api_key: String,
     timeout: Duration,
     client: reqwest::Client,
+    /// 配置默认 key 的 `Authorization` 头。热路径上不再每请求 `format!`。
+    bearer: HeaderValue,
 }
 
 impl OpenAiCompatibleProvider {
@@ -50,12 +53,14 @@ impl OpenAiCompatibleProvider {
                 "invalid sdk base_url"
             )));
         }
+        let bearer = bearer(&api_key)?;
         Ok(Self {
             provider: PROVIDER_OPENAI,
             base_url,
             api_key,
             timeout: resolve_timeout(timeout_seconds),
             client: shared_client(),
+            bearer,
         })
     }
 
@@ -69,18 +74,16 @@ impl OpenAiCompatibleProvider {
     ///
     /// `base-url` is accepted alongside `base_url` because both spellings
     /// exist in stored credentials.
-    fn resolve_credentials(&self, auth: &AuthRecord) -> (String, String) {
-        let mut api_key = self.api_key.clone();
-        let mut base_url = self.base_url.clone();
-
-        if let Some(candidate) = string_from_map(&auth.metadata, "api_key") {
-            api_key = candidate;
-        }
+    fn resolve_credentials<'a>(&'a self, auth: &'a AuthRecord) -> (Cow<'a, str>, Cow<'a, str>) {
+        let api_key = string_from_map(&auth.metadata, "api_key")
+            .map(Cow::Owned)
+            .unwrap_or(Cow::Borrowed(self.api_key.as_str()));
+        let mut base_url = Cow::Borrowed(self.base_url.as_str());
         for key in ["base_url", "base-url"] {
             if let Some(value) = auth.attributes.get(key) {
                 let value = value.trim().trim_end_matches('/');
                 if !value.is_empty() {
-                    base_url = value.to_owned();
+                    base_url = Cow::Owned(value.to_owned());
                     break;
                 }
             }
@@ -127,7 +130,12 @@ impl OpenAiCompatibleProvider {
         } else if !headers.contains_key(ACCEPT) {
             headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         }
-        headers.insert(AUTHORIZATION, bearer(api_key)?);
+        let authorization = if api_key == self.api_key {
+            self.bearer.clone()
+        } else {
+            bearer(api_key)?
+        };
+        headers.insert(AUTHORIZATION, authorization);
 
         let mut builder = attach_body(
             self.client.post(endpoint).headers(headers),
@@ -200,7 +208,7 @@ impl Provider for OpenAiCompatibleProvider {
         req: ProviderRequest,
     ) -> Result<StreamResponse, ProviderError> {
         let (api_key, base_url) = self.resolve_credentials(auth);
-        let model = requested_model(&req);
+        let model = requested_model(&req).to_owned();
         let response = self
             .build_request(&req, true, &api_key, &base_url)?
             .send()

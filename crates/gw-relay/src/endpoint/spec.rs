@@ -19,8 +19,8 @@
 //!   而是带着空模型名走完整个计费与派发链。这里升级为 400。
 
 use http::{HeaderMap, Method, StatusCode, header};
-use serde::Deserialize;
 
+use super::json_peek::parse_top_fields;
 use crate::contract::Surface;
 
 /// 入口校验失败的三种形态。每一种对应一个确定的 HTTP 状态码，调用方不要再猜。
@@ -125,29 +125,26 @@ pub struct RequestSpec {
     pub body_visible: bool,
 }
 
-/// 只含网关必须解析的字段。serde 的结构体反序列化天然只看**顶层**键，
-/// 所以 `stream_options` 的探测不会被嵌在 `messages` 里的同名字符串骗到。
-#[derive(Debug, Deserialize)]
-struct RawPeek {
+/// 测试用的 serde 对照物。生产路径走 [`parse_top_fields`]，不再把
+/// `messages` 整棵扫进 serde。对照测试见 `tests.rs` 的 corpus。
+#[cfg(test)]
+#[derive(Debug, serde::Deserialize)]
+pub(super) struct RawPeek {
     #[serde(default)]
-    model: Option<String>,
+    pub model: Option<String>,
     #[serde(default)]
-    stream: Option<bool>,
+    pub stream: Option<bool>,
     #[serde(default)]
-    max_tokens: Option<i64>,
+    pub max_tokens: Option<i64>,
     #[serde(default)]
-    max_completion_tokens: Option<i64>,
-    /// 入口 B（`/v1/responses`）的输出上限字段。今天没人解析它。
+    pub max_completion_tokens: Option<i64>,
     #[serde(default)]
-    max_output_tokens: Option<i64>,
-    /// 只判**键在不在**。`Option` 的缺省反序列化会把 `null` 也变成 `None`，
-    /// 那样 `"stream_options": null` 会被当成「客户端没写」，插入之后产出一个
-    /// 有重复键的 body。`deserialize_with` 只在键存在时被调用，所以它一旦跑起来
-    /// 就无条件返回 `Some`。
+    pub max_output_tokens: Option<i64>,
     #[serde(default, deserialize_with = "present")]
-    stream_options: Option<serde::de::IgnoredAny>,
+    pub stream_options: Option<serde::de::IgnoredAny>,
 }
 
+#[cfg(test)]
 fn present<'de, D>(de: D) -> Result<Option<serde::de::IgnoredAny>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -179,7 +176,7 @@ impl RequestSpec {
     /// `Some` 即止。三个入口共用同一条链：入口不同只是字段名不同，语义是同一个。
     #[must_use]
     pub fn parse(surface: Surface, peek: Option<&[u8]>) -> Self {
-        let Some(raw) = peek.and_then(|b| serde_json::from_slice::<RawPeek>(b).ok()) else {
+        let Some(raw) = peek.and_then(parse_top_fields) else {
             return Self {
                 surface,
                 model: None,
@@ -197,7 +194,7 @@ impl RequestSpec {
                 .max_tokens
                 .or(raw.max_completion_tokens)
                 .or(raw.max_output_tokens),
-            stream_options_present: raw.stream_options.is_some(),
+            stream_options_present: raw.stream_options_present,
             body_visible: true,
         }
     }
@@ -232,8 +229,8 @@ pub fn accept_conflicts_with_body(spec: &RequestSpec, headers: &HeaderMap, path:
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    let wants_sse = accept.to_ascii_lowercase().contains("text/event-stream");
-    let wants_json = accept.to_ascii_lowercase().contains("application/json");
+    let wants_sse = contains_ignore_ascii(accept, "text/event-stream");
+    let wants_json = contains_ignore_ascii(accept, "application/json");
 
     let conflict = if spec.stream {
         wants_json && !wants_sse
@@ -249,6 +246,12 @@ pub fn accept_conflicts_with_body(spec: &RequestSpec, headers: &HeaderMap, path:
         );
     }
     conflict
+}
+
+fn contains_ignore_ascii(hay: &str, needle: &str) -> bool {
+    hay.as_bytes()
+        .windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 #[cfg(test)]

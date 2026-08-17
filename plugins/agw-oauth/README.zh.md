@@ -18,6 +18,8 @@ dsh plugin --profile web add github:xxww0098/ai-gateway
 
 web profile 打开 **设置 → AGW Oauth**。填写网关地址后点 **登录**，页面走现有设备码流程并轮询状态，直到 OAuth 凭据写入。没有新的 OAuth 协议。
 
+![AGW Oauth signed in](./agw-oauth-signed-in.png)
+
 命令栏里的 `/agw login`、`/agw status`、`/agw logout` 仍然可用。
 
 ## 环境变量

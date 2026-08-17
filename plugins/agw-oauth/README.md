@@ -22,6 +22,8 @@ The plugin path inside the repo is `plugins/agw-oauth` (`dsh-agw-oauth`).
 
 On the web profile, open **Settings → AGW Oauth**. Enter the gateway URL, then **Sign in**. The page starts the existing device-code flow and polls until the OAuth credential is stored. No new OAuth protocol.
 
+![AGW Oauth signed in](./agw-oauth-signed-in.png)
+
 `/agw login`, `/agw status`, and `/agw logout` keep working in the command bar.
 
 ## Environment

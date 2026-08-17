@@ -3,7 +3,9 @@
 //! # Why this module exists
 //!
 //! `gw-proxy`'s `StreamSettler::drop` settles a request whose client hung up
-//! mid-stream by spawning a detached task — `drop` cannot `.await`. Those tasks
+//! mid-stream — and every unary settle, which reuses the same drop so the
+//! HTTP response is not blocked on ledger I/O — by spawning a detached
+//! task. `drop` cannot `.await`. Those tasks
 //! are the ONLY thing standing between a mid-stream disconnect and a lost
 //! `Settle`, and a detached task dies silently when the runtime is dropped:
 //! `run()` returns, `main` ends, the runtime tears down, and every in-flight

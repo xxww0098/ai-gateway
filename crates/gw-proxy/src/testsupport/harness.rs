@@ -204,6 +204,23 @@ impl Harness {
             ))
             .with_state(state)
     }
+
+    /// Waits until every detached settlement on [`Self::drain`] has finished.
+    ///
+    /// Unary (and failed-dispatch) ledger writes are spawned onto the tracker
+    /// before the handler returns, so a zero here means nothing is in flight —
+    /// not "the spawn has not happened yet".
+    pub(crate) async fn wait_idle(&self) {
+        let start = std::time::Instant::now();
+        while !self.drain.is_empty() {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "detached settlement did not finish; {} still on the tracker",
+                self.drain.len(),
+            );
+            tokio::task::yield_now().await;
+        }
+    }
 }
 
 /// Builds an authenticated JSON POST to `path`.
@@ -237,6 +254,9 @@ pub(crate) fn anonymous_request(path: &str, body: serde_json::Value) -> HttpRequ
 }
 
 /// Sends `request` through `router` and returns the status plus decoded body.
+///
+/// Does **not** wait for detached settlements. Hold-layer tests that drive a
+/// stub router still want this: they never spawn onto the drain tracker.
 pub(crate) async fn send(
     router: Router,
     request: HttpRequest<Body>,
@@ -252,6 +272,18 @@ pub(crate) async fn send(
         .to_bytes();
     let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, json)
+}
+
+/// [`send`] plus [`Harness::wait_idle`]: the helper dispatch tests use so
+/// they can assert on the ledger after a unary response that no longer
+/// awaits settle on the request path.
+pub(crate) async fn send_settled(
+    harness: &Harness,
+    request: HttpRequest<Body>,
+) -> (StatusCode, serde_json::Value) {
+    let out = send(harness.router(), request).await;
+    harness.wait_idle().await;
+    out
 }
 
 /// A minimal chat-completions payload.

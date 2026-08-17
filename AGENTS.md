@@ -73,7 +73,8 @@ Request → access 中间件（API Key/JWT → 租户）
 通过 `shortfall_resolve:<requestID>:<debitLogID>` 的 Credit 配对解除；订阅购买 `Debit` 成功但建订阅失败时，
 立刻以 `subscription_purchase:<pkgID>:compensate:<debitRef>` 回滚。
 
-**停机时必须排空在途结算**：`StreamSettler::drop` 走 `TaskTracker`，`gw-server` 在 graceful shutdown
+**停机时必须排空在途结算**：`StreamSettler::drop` 走 `TaskTracker`（流式中途断开，以及一元
+把账本写入从请求路径卸下来的那条），`gw-server` 在 graceful shutdown
 返回之后才 `close()` + `wait()`。顺序反了会让在途 Settle 随 runtime 一起死，hold 只能等 TTL —— 用户白嫖。
 
 ## 测试

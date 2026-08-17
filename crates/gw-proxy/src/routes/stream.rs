@@ -1,9 +1,15 @@
-//! Streamed relay: byte-forwarding body + settle-on-end / settle-on-drop.
+//! Streamed relay + the shared off-path settler used by unary too.
 //!
 //! Split out of `routes.rs` so the dispatch file stays under the 1,000-line
-//! ratchet. Behaviour is unchanged: payload bytes go to the client, usage /
-//! error chunks stay on [`StreamSettler`], and a client hang-up still settles
-//! through [`ProxyState::drain`].
+//! ratchet. Stream payload bytes go to the client; usage / error chunks stay
+//! on [`StreamSettler`]. A client hang-up still settles through
+//! [`ProxyState::drain`].
+//!
+//! Unary reuses the same settler: the HTTP response is built as soon as the
+//! upstream body and usage (or the fallback / strict / release decision
+//! inputs) are in hand, and the ledger write is spawned onto
+//! [`ProxyState::drain`] via [`StreamSettler`]'s `Drop`. That is the same
+//! path a hung-up stream already uses — not a second queue.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -15,7 +21,7 @@ use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Response;
 use futures::Stream;
-use gw_provider::types::{StreamChunk, StreamResponse, UsageRecord};
+use gw_provider::types::{ProviderResponse, StreamChunk, StreamResponse, UsageRecord};
 use tokio_util::task::TaskTracker;
 
 use crate::ProxyState;
@@ -76,6 +82,66 @@ pub(super) fn stream_response(
         );
     }
     response
+}
+
+/// Relays a completed non-streaming response without waiting for the ledger.
+///
+/// The settle-vs-release-vs-strict decision is made from inputs we already
+/// have (status, parsed usage, in-memory strict flag). The *write* is the
+/// same detached [`StreamSettler`] drop a hung-up stream uses, so the client
+/// is not blocked on Redis / Postgres. [`claim_finalize`][BillingHandle::claim_finalize]
+/// still runs here so the hold middleware's safety net stands down and
+/// failover cannot bill twice.
+pub(super) fn unary_response(
+    state: &ProxyState,
+    response: ProviderResponse,
+    billing: Option<BillingHandle>,
+    auth_id: String,
+    provider: &str,
+    started: Instant,
+) -> Response {
+    let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::OK);
+    // Bind the settler so it drops *after* the response is built and
+    // *before* we return: Drop spawns onto `state.drain`. Marking `done`
+    // would skip the spawn and leak the hold.
+    let _settler = billing.and_then(|b| {
+        b.claim_finalize().then(|| StreamSettler {
+            settlement: state.dispatch.settlement.clone(),
+            drain: state.drain.clone(),
+            ctx: b.ctx.clone(),
+            usage: response.usage,
+            failed: !status.is_success(),
+            auth_id,
+            provider: provider.to_owned(),
+            started,
+            done: false,
+        })
+    });
+    relay(status, response.headers, response.body)
+}
+
+/// Releases (never charges) a request that never produced an upstream body.
+///
+/// Same drain path as [`unary_response`]: claim here, ledger I/O off the
+/// client wait. Matches [`UsageOutcome::failed`]: no usage envelope, `failed`.
+pub(super) fn schedule_release(state: &ProxyState, billing: Option<&BillingHandle>) {
+    let Some(billing) = billing else {
+        return;
+    };
+    if !billing.claim_finalize() {
+        return;
+    }
+    let _settler = StreamSettler {
+        settlement: state.dispatch.settlement.clone(),
+        drain: state.drain.clone(),
+        ctx: billing.ctx.clone(),
+        usage: None,
+        failed: true,
+        auth_id: String::new(),
+        provider: String::new(),
+        started: Instant::now(),
+        done: false,
+    };
 }
 
 /// Client-facing body of a streamed relay.
@@ -174,9 +240,12 @@ impl StreamSettler {
 }
 
 impl Drop for StreamSettler {
-    /// A client that hangs up mid-stream drops the body without the stream ever
-    /// ending, so settle from a detached task rather than leaving the hold to
-    /// its TTL. The detached finalizer runs regardless of the client.
+    /// Detaches the ledger write onto [`ProxyState::drain`].
+    ///
+    /// Two callers land here: a stream body dropped mid-flight, and a unary
+    /// response that already has its usage (or the release / strict inputs)
+    /// and must not make the client wait for Redis / Postgres. Either way
+    /// the hold must not be left to its TTL — that is free upstream output.
     ///
     /// The task goes to [`ProxyState::drain`], **not** to `tokio::spawn`. A
     /// bare spawn is aborted the instant the runtime is dropped, which for a

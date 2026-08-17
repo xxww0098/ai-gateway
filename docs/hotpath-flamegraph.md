@@ -6,6 +6,8 @@
 都不是生产流量，也不是进程内 `FakeProvider`。
 
 采样时间：2026-08-17 14:14 CST（UTC+8）。上一轮（hold 收成一条 Lua）是 13:24 CST。
+AI-GateWay 对 NewAPI / CLIProxyAPI 的对照（架构 + 本仓库数字，没有它们的 rps）见
+[`perf-vs-newapi-cliproxy.md`](perf-vs-newapi-cliproxy.md)。
 
 ## 怎么出的
 

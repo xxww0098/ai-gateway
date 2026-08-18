@@ -79,3 +79,45 @@ Request → access 中间件（API Key/JWT → 租户）
 
 **测试不许复述源码里的字面量**：把实现抄进断言的测试，通过是构造出来的。测不写死在源码里的性质。
 写完一条守护性测试后，**先把它要防的 bug 塞回去、确认测试真的会失败**，再还原。
+
+## Cursor Cloud specific instructions
+
+依赖（Rust 1.97.1 工具链、cargo-watch、`frontend/node_modules`、PostgreSQL 16、Redis 7）已随快照装好；
+update script 只做增量刷新（`cargo fetch` + `frontend` 的 `npm ci`）。下面是**每次会话需要自己做**的、不显然的启动约定。
+
+**必须手动起服务（本 VM 没有 systemd）**：
+
+```bash
+sudo pg_ctlcluster 16 main start                     # PostgreSQL 16
+sudo redis-server /etc/redis/redis.conf --daemonize yes   # Redis
+```
+
+- `pg_hba.conf` 里 `127.0.0.1/32` 与 `::1/128` 已改成 `trust`，所以 `config.example.yaml` 的空密码能连；
+  角色 `ai_gateway` 已建、已授 `CREATEDB`，库 `ai_gateway`（运行用）与 `ai_gateway_test`（跑 `--ignored` 用，已灌好迁移）都在。
+- 仓库根的 `config.yaml` 已生成（`.gitignore` 忽略、随快照保留），含开发用 `JWT_SECRET`/`CREDENTIAL_ENCRYPTION_KEY`
+  与 `bootstrap_admin_email: admin@example.com`（首个注册该邮箱的用户自动升管理员）。丢了就 `cp config.example.yaml config.yaml` 再 `make gen-secrets` 填密钥。
+
+**跑起来**（命令本身见 [README.md](README.md) / [dev.sh](dev.sh) / [Makefile](Makefile)，不复述）：先起 PG/Redis，再 `./dev.sh`
+（后端 `cargo watch` 在 `:8888`、前端 vite 在 `:3000`，vite 把 `/api`、`/v1`、`/healthz` 代理到 `:8888`）。
+
+**`--ignored` 集成档的连接串**（README 只给了范例，这里给本机可直接用的一组）：
+
+```bash
+DATABASE_URL=postgres://ai_gateway@127.0.0.1:5432/ai_gateway_test \
+GW_TEST_DATABASE_URL=postgres://ai_gateway@127.0.0.1:5432/ai_gateway_test \
+GW_TEST_REDIS_URL=redis://127.0.0.1:6379 \
+  cargo test --workspace -- --ignored
+```
+
+`gw-model` 读 `DATABASE_URL`、其余读 `GW_TEST_*`；`gw-model`/`gw-panel` 会 `CREATE/DROP DATABASE gw_*_test_*`（靠 `ai_gateway` 的 CREATEDB），
+`gw-authcore`/`gw-infra`/`gw-ledger` 直接用连接串指向的库（`ai_gateway_test` 已有迁移）。若换用 `postgres` 超级用户跑过，
+留下的 `gw_*_test_*` 库属主是 `postgres`，`ai_gateway` 删不掉 —— 用 `postgres` 身份 `dropdb` 清掉即可。
+
+**HEAD 上已知的、与本地环境无关的既存问题（别当成自己搞坏的）**：
+
+- 前端 `npm run typecheck` / `npm run build` 失败：提交 634182c 引入了对 `@/shared/components/EmptyState` 与
+  `@/features/user-dashboard/components/AdminSetupChecklist` 的引用却没提交这两个文件。vite dev 能起、公开页（首页/登录/注册）正常，
+  但登录后各内容页会因动态 import 解析失败而报错。（前端只读，勿改。）
+- `cargo clippy --workspace --all-targets -- -D warnings`（即 `make lint`）在 `gw-provider/src/kiro.rs` 上因 `collapsible_if` 报错（既存，早于 634182c）。
+- `--ignored` 档里 `gw-panel` 的 `audit_chain::*` 6 条失败：`audit_logs.status_code` 是 `bigint`，但 `gw-panel/src/ops/audit_log.rs`
+  的校验路径按 `i32` 解码（违反 CONTRACT §3.5「整数列一律 i64」）。其余 `--ignored` 用例全绿。

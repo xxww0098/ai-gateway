@@ -113,11 +113,10 @@ GW_TEST_REDIS_URL=redis://127.0.0.1:6379 \
 `gw-authcore`/`gw-infra`/`gw-ledger` 直接用连接串指向的库（`ai_gateway_test` 已有迁移）。若换用 `postgres` 超级用户跑过，
 留下的 `gw_*_test_*` 库属主是 `postgres`，`ai_gateway` 删不掉 —— 用 `postgres` 身份 `dropdb` 清掉即可。
 
-**HEAD 上已知的、与本地环境无关的既存问题（别当成自己搞坏的）**：
+**当前状态**：`make lint`、`cargo test --workspace`（含 `--ignored` 全档）、`cargo xtask ci`、前端
+`npm run typecheck` / `npm test` / `npm run build` 全绿。
 
-- 前端 `npm run typecheck` / `npm run build` 失败：提交 634182c 引入了对 `@/shared/components/EmptyState` 与
-  `@/features/user-dashboard/components/AdminSetupChecklist` 的引用却没提交这两个文件。vite dev 能起、公开页（首页/登录/注册）正常，
-  但登录后各内容页会因动态 import 解析失败而报错。（前端只读，勿改。）
-- `cargo clippy --workspace --all-targets -- -D warnings`（即 `make lint`）在 `gw-provider/src/kiro.rs` 上因 `collapsible_if` 报错（既存，早于 634182c）。
-- `--ignored` 档里 `gw-panel` 的 `audit_chain::*` 6 条失败：`audit_logs.status_code` 是 `bigint`，但 `gw-panel/src/ops/audit_log.rs`
-  的校验路径按 `i32` 解码（违反 CONTRACT §3.5「整数列一律 i64」）。其余 `--ignored` 用例全绿。
+**仍待处理的既存 bug（与环境无关，未在本次修复范围内）**：`GET /api/panel/admin/audit-logs`
+（`gw-panel/src/ops/audit_log.rs` 的 `fetch_panel`/`fetch_sdk`/`fetch_balance`）把日期过滤参数按 `text` 绑定，
+无过滤时也会让 Postgres 报 `operator does not exist: timestamp with time zone >= text`，导致列表接口 500。
+测试档未覆盖该路径。修法：把查询里第二处 `created_at >= $3` / `<= $4` 也显式写成 `$3::timestamptz` / `$4::timestamptz`。

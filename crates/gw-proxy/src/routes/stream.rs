@@ -20,7 +20,7 @@ use std::time::Instant;
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Response;
-use futures::Stream;
+use futures_util::Stream;
 use gw_provider::types::{ProviderResponse, StreamChunk, StreamResponse, UsageRecord};
 use tokio_util::task::TaskTracker;
 

@@ -273,3 +273,30 @@ fn constant_time_eq_matches_plain_equality() {
         assert_eq!(constant_time_eq(left, right), left == right);
     }
 }
+
+#[test]
+fn verify_decodes_status_code_as_bigint() {
+    // 列是 bigint。这个类型签一旦退回 i32，连库 verify 会整表读失败。
+    fn as_i64(code: Option<i64>) -> i64 {
+        code.unwrap_or_default()
+    }
+    let row = AuditRow {
+        id: 1,
+        source: None,
+        actor_id: None,
+        actor_email: None,
+        actor_role: None,
+        action: None,
+        target: None,
+        method: None,
+        path: None,
+        status_code: Some(200),
+        ip_address: None,
+        request_id: None,
+        metadata: None,
+        created_at: at(0),
+        entry_hash: None,
+    };
+    assert_eq!(as_i64(row.status_code), 200);
+    assert_eq!(row.to_entry().status_code, 200);
+}

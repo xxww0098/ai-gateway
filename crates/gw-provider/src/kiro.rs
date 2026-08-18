@@ -108,10 +108,10 @@ impl KiroProvider {
     }
 
     fn token_endpoint(auth: &AuthRecord) -> String {
-        if let Some(endpoint) = string_from_map(&auth.metadata, META_TOKEN_ENDPOINT) {
-            if endpoint.starts_with("https://") {
-                return endpoint;
-            }
+        if let Some(endpoint) = string_from_map(&auth.metadata, META_TOKEN_ENDPOINT)
+            && endpoint.starts_with("https://")
+        {
+            return endpoint;
         }
         let region = string_from_map(&auth.metadata, META_REGION)
             .filter(|value| !value.is_empty())

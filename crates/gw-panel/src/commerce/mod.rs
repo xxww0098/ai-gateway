@@ -85,8 +85,13 @@ pub fn router() -> Router<PanelState> {
             post(subscription::admin_reset_quota),
         )
         // ── 订单与支付 ──
+        .route("/user/orders", get(payment::list_own))
         .route("/admin/orders", get(payment::admin_list_orders))
         .route("/admin/orders/{id}/confirm", put(payment::admin_confirm))
+        .route(
+            "/admin/payment-config",
+            get(payment::admin_list_payment_config).put(payment::admin_put_payment_config),
+        )
         .route("/payment/stripe/config", get(payment::stripe_config))
         .route("/payment/stripe/create", post(payment::stripe_create))
         .route("/payment/alipay/create", post(payment::alipay_create))

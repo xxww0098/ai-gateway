@@ -1,6 +1,6 @@
 // API functions for user API keys management
 import { apiClient } from "@/shared/api/client"
-import type { ApiKey, AvailableGroup, CreateKeyPayload, ModelInfo } from "./types"
+import type { ApiKey, ApiKeyCreated, AvailableGroup, CreateKeyPayload, ModelInfo } from "./types"
 
 interface ApiKeyListResponse {
   items: ApiKey[]
@@ -17,7 +17,7 @@ export function fetchApiKeys() {
 }
 
 export function createApiKey(payload: CreateKeyPayload) {
-  return apiClient.post<ApiKey>("/user/api-keys", payload)
+  return apiClient.post<ApiKeyCreated>("/user/api-keys", payload)
 }
 
 export function deleteApiKey(id: number) {

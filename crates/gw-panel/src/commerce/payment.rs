@@ -224,6 +224,88 @@ pub enum SettleError {
 
 // ── handlers ─────────────────────────────────────────────────────────────────
 
+/// 管理员查询里 `user_id = 0` 表示不过滤。用户路径绝不能落到这个哨兵，
+/// 否则 `?user_id=` 或漏绑会把全站订单交出去。
+const UNSCOPED_USER_ID: i64 = 0;
+
+/// 用户订单列表永远绑登录身份；查询串里的 `user_id` 无效。
+fn own_orders_user_id(auth_id: i64, _query_user_id: Option<&str>) -> i64 {
+    auth_id
+}
+
+async fn list_orders_page(
+    pg: &Db,
+    provider: &str,
+    status: &str,
+    user_id: i64,
+    page: i64,
+    page_size: i64,
+) -> Result<(Vec<OrderRow>, i64), sqlx::Error> {
+    let filter = "($1 = '' OR provider = $1) AND ($2 = '' OR status = $2) \
+         AND ($3 = 0 OR user_id = $3)";
+
+    let total: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*)::bigint FROM payment_orders WHERE {filter}"
+    ))
+    .bind(provider)
+    .bind(status)
+    .bind(user_id)
+    .fetch_one(pg)
+    .await?;
+
+    let rows: Vec<OrderRow> = sqlx::query_as(&format!(
+        "SELECT {ORDER_COLUMNS} FROM payment_orders WHERE {filter} \
+         ORDER BY id DESC LIMIT $4 OFFSET $5"
+    ))
+    .bind(provider)
+    .bind(status)
+    .bind(user_id)
+    .bind(page_size)
+    .bind(offset(page, page_size))
+    .fetch_all(pg)
+    .await?;
+
+    Ok((rows, total))
+}
+
+fn orders_response(
+    result: Result<(Vec<OrderRow>, i64), sqlx::Error>,
+    page: i64,
+    page_size: i64,
+) -> Response {
+    match result {
+        Ok((rows, total)) => ok(ListPage::new(
+            rows.into_iter().map(OrderRecord::from).collect(),
+            total,
+            page,
+            page_size,
+        )),
+        Err(error) => db_failure("list_orders", &error, "获取订单失败，请稍后重试"),
+    }
+}
+
+/// `GET /user/orders` —— 当前用户自己的订单分页。
+///
+/// 前端订单页调的就是这条。`?user_id=` 即使带了也丢掉，只看登录身份。
+pub async fn list_own(
+    State(state): State<PanelState>,
+    user: AuthUser,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let (page, page_size) = page_params(
+        params.get("page").map(String::as_str),
+        params.get("page_size").map(String::as_str),
+        ADMIN_ORDERS_DEFAULT_PAGE_SIZE,
+    );
+    let status = params.get("status").map(|s| s.trim()).unwrap_or_default();
+    let user_id = own_orders_user_id(user.user_id, params.get("user_id").map(String::as_str));
+    orders_response(
+        list_orders_page(&state.pg, "", status, user_id, page, page_size).await,
+        page,
+        page_size,
+    )
+}
+
 /// `GET /admin/orders` —— 分页 + provider/status/user_id 过滤。
 ///
 /// Ports `AdminListOrdersHandler`。注意 `user_id` 参数**解析失败时被忽略**
@@ -245,45 +327,13 @@ pub async fn admin_list_orders(
         .map(|s| s.trim())
         .and_then(|s| s.parse::<i64>().ok())
         .filter(|id| *id != 0)
-        .unwrap_or(0);
+        .unwrap_or(UNSCOPED_USER_ID);
 
-    let filter = "($1 = '' OR provider = $1) AND ($2 = '' OR status = $2) \
-         AND ($3 = 0 OR user_id = $3)";
-
-    let total: Result<i64, _> = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*)::bigint FROM payment_orders WHERE {filter}"
-    ))
-    .bind(provider)
-    .bind(status)
-    .bind(user_id)
-    .fetch_one(&state.pg)
-    .await;
-    let total = match total {
-        Ok(total) => total,
-        Err(error) => return db_failure("count_orders", &error, "统计订单失败，请稍后重试"),
-    };
-
-    let rows: Result<Vec<OrderRow>, _> = sqlx::query_as(&format!(
-        "SELECT {ORDER_COLUMNS} FROM payment_orders WHERE {filter} \
-         ORDER BY id DESC LIMIT $4 OFFSET $5"
-    ))
-    .bind(provider)
-    .bind(status)
-    .bind(user_id)
-    .bind(page_size)
-    .bind(offset(page, page_size))
-    .fetch_all(&state.pg)
-    .await;
-
-    match rows {
-        Ok(rows) => ok(ListPage::new(
-            rows.into_iter().map(OrderRecord::from).collect(),
-            total,
-            page,
-            page_size,
-        )),
-        Err(error) => db_failure("list_orders", &error, "获取订单失败，请稍后重试"),
-    }
+    orders_response(
+        list_orders_page(&state.pg, provider, status, user_id, page, page_size).await,
+        page,
+        page_size,
+    )
 }
 
 /// `PUT /admin/orders/{id}/confirm` —— 线下对账后的人工确认。
@@ -336,6 +386,36 @@ pub async fn admin_confirm(
     )
     .await;
     ok(serde_json::json!({ "confirmed": true }))
+}
+
+/// 系统设置里的三个渠道卡片。支付下单目前是本地模拟，这里不落库：
+/// GET 给出禁用桩，PUT 明确拒绝，避免管理员以为密钥已经存上了。
+const PAYMENT_CONFIG_PROVIDERS: [&str; 3] = [PROVIDER_STRIPE, PROVIDER_ALIPAY, PROVIDER_WECHAT];
+
+fn payment_config_stubs() -> Vec<serde_json::Value> {
+    PAYMENT_CONFIG_PROVIDERS
+        .iter()
+        .map(|provider| {
+            serde_json::json!({
+                "provider": provider,
+                "app_id": null,
+                "app_secret": "",
+                "webhook_secret": "",
+                "mode": "sandbox",
+                "enabled": false,
+            })
+        })
+        .collect()
+}
+
+/// `GET /admin/payment-config` —— 三个渠道的只读桩，全部未启用。
+pub async fn admin_list_payment_config(_admin: AdminUser) -> Response {
+    ok(payment_config_stubs())
+}
+
+/// `PUT /admin/payment-config` —— 渠道还是本地模拟，拒绝落库。
+pub async fn admin_put_payment_config(_admin: AdminUser) -> Response {
+    bad_request("支付渠道目前为本地模拟，配置不会落库")
 }
 
 /// `GET /payment/stripe/config` —— 前端用来决定是否显示 Stripe 入口。

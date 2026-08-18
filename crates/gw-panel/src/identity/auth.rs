@@ -281,7 +281,7 @@ pub async fn register(
                 None,
                 "auth.register",
                 &format!("user:{email}"),
-                i32::from(status),
+                i64::from(status),
                 Some(serde_json::json!({ "reason": reason })),
             )
             .await;
@@ -308,7 +308,7 @@ pub async fn register(
             None,
             "auth.register",
             &format!("user:{email}"),
-            i32::from(StatusCode::INTERNAL_SERVER_ERROR.as_u16()),
+            i64::from(StatusCode::INTERNAL_SERVER_ERROR.as_u16()),
             Some(serde_json::json!({ "reason": "create_failed" })),
         )
         .await;
@@ -349,7 +349,7 @@ pub async fn register(
         Some(&actor),
         "auth.register",
         &target,
-        i32::from(StatusCode::OK.as_u16()),
+        i64::from(StatusCode::OK.as_u16()),
         None,
     )
     .await;
@@ -400,7 +400,7 @@ pub async fn login(
                 None,
                 "auth.login",
                 &format!("user:{email}"),
-                i32::from(StatusCode::UNAUTHORIZED.as_u16()),
+                i64::from(StatusCode::UNAUTHORIZED.as_u16()),
                 Some(serde_json::json!({ "reason": "not_found" })),
             )
             .await;
@@ -436,7 +436,7 @@ pub async fn login(
             Some(&actor),
             "auth.login",
             &target,
-            i32::from(StatusCode::UNAUTHORIZED.as_u16()),
+            i64::from(StatusCode::UNAUTHORIZED.as_u16()),
             Some(serde_json::json!({ "reason": "bad_password" })),
         )
         .await;
@@ -479,7 +479,7 @@ pub async fn login(
         Some(&actor),
         "auth.login",
         &target,
-        i32::from(StatusCode::OK.as_u16()),
+        i64::from(StatusCode::OK.as_u16()),
         Some(serde_json::json!({ "role": role })),
     )
     .await;
@@ -514,7 +514,7 @@ pub async fn logout(
         Some(&actor),
         "auth.logout",
         &format!("user:{}", user.user_id),
-        i32::from(StatusCode::OK.as_u16()),
+        i64::from(StatusCode::OK.as_u16()),
         None,
     )
     .await;

@@ -47,8 +47,13 @@ function PageFallback() {
   )
 }
 
+function RouteErrorBoundary({ children }: { children: ReactNode }) {
+  const { pathname } = useLocation()
+  return <ErrorBoundary key={pathname}>{children}</ErrorBoundary>
+}
+
 function eb(children: ReactNode) {
-  return <ErrorBoundary>{children}</ErrorBoundary>
+  return <RouteErrorBoundary>{children}</RouteErrorBoundary>
 }
 
 function App() {

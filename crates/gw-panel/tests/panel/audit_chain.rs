@@ -10,6 +10,7 @@
 
 use chrono::{DateTime, SubsecRound as _, TimeDelta, Utc};
 use gw_panel::audit::{OperationEntry, SOURCE_PANEL, derive_audit_key, entry_hash};
+use gw_panel::identity::oplog::stored_metadata_bytes;
 use gw_panel::ops::audit_log::verify_audit_log;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -34,7 +35,8 @@ fn entry(action: &str, target: &str, metadata: Option<Value>) -> OperationEntry 
         status_code: 200,
         ip_address: "10.0.0.1".to_owned(),
         request_id: "trace-1".to_owned(),
-        // 与 handler 侧一致：先编成字节再哈希。
+        // 原始 metadata 字节，仅用于决定「有没有 metadata」并绑定入库；真正参与
+        // 哈希的是 Postgres 归一化后的 `::text`（见 `insert`）。
         metadata: metadata
             .as_ref()
             .map(|value| value.to_string().into_bytes())
@@ -51,6 +53,8 @@ async fn insert(pool: &PgPool, entry: &OperationEntry, hash_key: Option<&[u8]>) 
     } else {
         Some(serde_json::from_slice(&entry.metadata).expect("metadata 必须是合法 JSON"))
     };
+    let mut hashed = entry.clone();
+    hashed.metadata = stored_metadata_bytes(pool, metadata.as_ref()).await;
     sqlx::query_scalar(
         "INSERT INTO operation_logs (source, actor_id, actor_email, actor_role, action, target, \
           method, path, status_code, ip_address, request_id, metadata, created_at, entry_hash) \
@@ -64,12 +68,12 @@ async fn insert(pool: &PgPool, entry: &OperationEntry, hash_key: Option<&[u8]>) 
     .bind(&entry.target)
     .bind(&entry.method)
     .bind(&entry.path)
-    .bind(i64::from(entry.status_code))
+    .bind(entry.status_code)
     .bind(&entry.ip_address)
     .bind(&entry.request_id)
     .bind(&metadata)
     .bind(entry.created_at)
-    .bind(entry_hash(hash_key, entry))
+    .bind(entry_hash(hash_key, &hashed))
     .fetch_one(pool)
     .await
     .expect("insert operation_log")

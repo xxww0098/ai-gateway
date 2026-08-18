@@ -275,10 +275,10 @@ pub async fn auth_status(
         STATUS_FAILED => ok(json!({"status": "error", "provider": row.provider})),
         _ => {
             let config = session_config_of(&row);
-            if device::is_device_flow(&config) {
-                if let Some(provider) = Provider::parse(&row.provider) {
-                    return finish_device_poll(&state, provider, &row, config, true).await;
-                }
+            if device::is_device_flow(&config)
+                && let Some(provider) = Provider::parse(&row.provider)
+            {
+                return finish_device_poll(&state, provider, &row, config, true).await;
             }
             ok(device_wait_payload(&row.provider, &config))
         }
@@ -364,7 +364,7 @@ pub async fn auth_url(
                     let tokens = match device::parse_kiro_import(&start.token) {
                         Ok(tokens) => tokens,
                         Err(error) => {
-                            return err(StatusCode::BAD_REQUEST, ERR_BAD_REQUEST, &error.to_string());
+                            return err(StatusCode::BAD_REQUEST, ERR_BAD_REQUEST, error.to_string());
                         }
                     };
                     return persist_imported(state, provider, tokens).await;

@@ -88,17 +88,17 @@ impl Phase {
     #[must_use]
     pub const fn can_transition_to(self, next: Self) -> bool {
         use Phase::*;
-        match (self, next) {
-            (Received, Authenticated | Failed) => true,
-            (Authenticated, Inspected | Skipped | Failed) => true,
-            (Inspected, Gated | Failed) => true,
-            (Gated, Reserved | Skipped | Failed) => true,
-            (Reserved, Routed | Released | Failed) => true,
-            (Routed, Attempting | Failed) => true,
-            (Attempting, Relaying | Attempting | Failed) => true,
-            (Relaying, Settled | Released | StrictHeld | Failed) => true,
-            _ => false,
-        }
+        matches!(
+            (self, next),
+            (Received, Authenticated | Failed)
+                | (Authenticated, Inspected | Skipped | Failed)
+                | (Inspected, Gated | Failed)
+                | (Gated, Reserved | Skipped | Failed)
+                | (Reserved, Routed | Released | Failed)
+                | (Routed, Attempting | Failed)
+                | (Attempting, Relaying | Attempting | Failed)
+                | (Relaying, Settled | Released | StrictHeld | Failed)
+        )
     }
 }
 

@@ -64,7 +64,8 @@ struct AuditRow {
     target: Option<String>,
     method: Option<String>,
     path: Option<String>,
-    status_code: Option<i32>,
+    /// 列是 `bigint`。绑成 `i32` 时 verify 整表读失败。
+    status_code: Option<i64>,
     ip_address: Option<String>,
     request_id: Option<String>,
     metadata: Option<String>,

@@ -5,6 +5,7 @@ import { queryKeys } from "@/shared/api/query-keys"
 import { toast } from "sonner"
 import { Button } from "@/shared/components/ui/button"
 import { Textarea } from "@/shared/components/ui/textarea"
+import { EmptyState } from "@/shared/components/EmptyState"
 import {
   ChevronLeft,
   ChevronRight,
@@ -13,6 +14,7 @@ import {
   User,
   Shield,
   MessageSquare,
+  Ticket,
   XCircle,
 } from "lucide-react"
 import { TicketImageUploadButton } from "@/features/tickets/TicketImageUploadButton"
@@ -109,7 +111,7 @@ const UserComposePane = memo(function UserComposePane({ onCreated, onCancel }: U
           <div>
             <h3 className="text-sm font-medium text-gray-900 dark:text-white">新对话</h3>
             <p className="mt-0.5 text-xs text-gray-500 dark:text-dark-400">
-              像聊天一样输入即可，首条消息会作为工单说明。
+              输入您的问题详情，首条消息将作为工单初始内容。
             </p>
           </div>
           {onCancel && (
@@ -121,14 +123,14 @@ const UserComposePane = memo(function UserComposePane({ onCreated, onCancel }: U
       </header>
       <div className="flex min-h-0 flex-1 flex-col justify-end p-4">
         <div className="mb-4 rounded-lg border border-dashed border-border bg-gray-50/80 p-4 text-xs text-gray-500 dark:bg-dark-800/50 dark:text-dark-400">
-          从这里开始描述问题即可，无需再填单独表单。
+          请在此详细描述您遇到的问题或需求，支持插入截图。
         </div>
         <div className="mb-2 flex flex-wrap items-center gap-2">
           <TicketImageUploadButton
             disabled={sending}
             onInsert={(md) => setText((t) => (t ? `${t}\n` : "") + md)}
           />
-          <span className="text-[11px] text-gray-400 dark:text-dark-500">插入后可继续打字说明</span>
+          <span className="text-[11px] text-gray-400 dark:text-dark-500">插入截图后可继续输入文字说明</span>
         </div>
         <div className="flex gap-2">
           <Textarea
@@ -296,7 +298,12 @@ const UserTicketChatPane = memo(function UserTicketChatPane({
       <div className="flex min-h-0 flex-1 flex-col">
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
           {ticket.replies.length === 0 ? (
-            <p className="py-8 text-center text-xs text-gray-400 dark:text-dark-500">暂无消息</p>
+            <EmptyState
+              size="compact"
+              icon={MessageSquare}
+              title="还没有回复"
+              description="管理员回复后会出现在这里，你也可以先在下方补充信息。"
+            />
           ) : (
             ticket.replies.map((reply) => {
               const isStaff = reply.is_staff
@@ -520,12 +527,14 @@ export default function TicketsPage() {
             {listBusy && tickets.length === 0 ? (
               <div className="px-3 py-8 text-center text-xs text-gray-400 dark:text-dark-500">加载中</div>
             ) : tickets.length === 0 ? (
-              <div className="px-3 py-8 text-center text-xs text-gray-400 dark:text-dark-500">
-                暂无工单
-                <button type="button" className="mt-3 block w-full min-h-11 rounded-xl bg-primary-600 text-sm font-medium text-white" onClick={goCompose}>
-                  发起新对话
-                </button>
-              </div>
+              <EmptyState
+                size="compact"
+                tone="first-use"
+                icon={Ticket}
+                title="暂无工单记录"
+                description="如遇接口调用异常、计费疑问或模型需求，可随时发起新对话联系管理员。"
+                action={{ label: '发起新对话', onClick: goCompose }}
+              />
             ) : (
               <ul>
                 {tickets.map((ticket) => {

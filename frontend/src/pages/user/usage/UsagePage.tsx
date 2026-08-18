@@ -1,11 +1,9 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useCallback } from 'react'
 import { toast } from 'sonner'
-import type { TooltipData, UsageLog } from '@/features/user-usage/types'
+import type { UsageLog } from '@/features/user-usage/types'
 import { UsageStatsCards } from '@/features/user-usage/components/UsageStatsCards'
 import { UsageFilterBar } from '@/features/user-usage/components/UsageFilterBar'
 import { UsageTable } from '@/features/user-usage/components/UsageTable'
-import { UsageCostTooltip } from '@/features/user-usage/components/UsageCostTooltip'
-import { UsageTokenTooltip } from '@/features/user-usage/components/UsageTokenTooltip'
 import { useUsageLogs, useUserApiKeys } from '@/features/user-usage/hooks'
 import { fetchUsageLogs } from '@/features/user-usage/api'
 
@@ -50,11 +48,6 @@ export default function Usage() {
   // Export state
   const [exporting, setExporting] = useState(false)
 
-  // Tooltips
-  const [costTooltip, setCostTooltip] = useState<TooltipData | null>(null)
-  const [tokenTooltip, setTokenTooltip] = useState<TooltipData | null>(null)
-  const containerRef = useRef<HTMLDivElement>(null)
-
   // CSV Export
   const handleExport = useCallback(async () => {
     if (total === 0) { toast.warning('当前筛选条件下没有数据可导出'); return }
@@ -74,7 +67,7 @@ export default function Usage() {
           startDate: dates.startDate,
           endDate: dates.endDate,
         })
-        if (res?.items) allLogs.push(...res.items)
+        allLogs.push(...res.items)
       }
 
       const header = '时间,模型,API Key,类型,输入Tokens,输出Tokens,推理Tokens,缓存Tokens,标准费用,实际扣费,倍率,耗时(ms),状态\n'
@@ -91,7 +84,7 @@ export default function Usage() {
           l.total_cost.toFixed(6),
           l.actual_cost.toFixed(6),
           l.rate_multiplier,
-          l.duration_ms ?? '',
+          l.duration_ms,
           l.failed ? '失败' : '成功',
         ].join(',')
       ).join('\n')
@@ -113,7 +106,7 @@ export default function Usage() {
   }, [total, filterKeyId, filterModel, getEffectiveDates])
 
   return (
-    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500" style={{ willChange: 'transform, opacity' }} ref={containerRef}>
+    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500" style={{ willChange: 'transform, opacity' }}>
       {/* Header */}
       <div>
         <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">使用明细</h2>
@@ -136,7 +129,9 @@ export default function Usage() {
         onEndDateChange={setEndDate}
         onFilter={handleFilter}
         onRefresh={refresh}
-        onExport={handleExport}
+        onExport={() => {
+          void handleExport()
+        }}
         loading={loading}
         exporting={exporting}
         total={total}
@@ -151,12 +146,7 @@ export default function Usage() {
         totalPages={totalPages}
         onPageChange={handlePageChange}
         onPageSizeChange={handlePageSizeChange}
-        onCostTooltip={setCostTooltip}
-        onTokenTooltip={setTokenTooltip}
       />
-
-      {costTooltip && <UsageCostTooltip data={costTooltip} onClose={() => setCostTooltip(null)} />}
-      {tokenTooltip && <UsageTokenTooltip data={tokenTooltip} onClose={() => setTokenTooltip(null)} />}
     </div>
   )
 }

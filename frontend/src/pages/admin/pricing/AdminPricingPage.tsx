@@ -83,10 +83,10 @@ export default function Pricing() {
           <div className="space-y-1">
              <h3 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
                <Percent className="w-5 h-5 text-amber-500" />
-               用户分组计费倍率
+               分组计费倍率
              </h3>
              <p className="text-sm text-gray-500 max-w-2xl">
-               您可以创建不同的分组（如 vip, svip）并赋予它们不同的结算倍率。API Key 在创建时可以分配到这些组。
+               为不同用户分组（如 vip、internal）配置结算倍率。API 密钥创建时可绑定到指定分组。
              </p>
           </div>
           <Button 
@@ -97,43 +97,43 @@ export default function Pricing() {
                setOpenGroupForm(true)
              }}
           >
-            <Plus className="h-4 w-4" /> 新增特殊分组
+            <Plus className="h-4 w-4" /> 新建分组
           </Button>
         </div>
 
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {loading ? (
-             <div className="text-gray-500 col-span-3 text-sm p-4 text-center">加载分组中...</div>
+             <div className="text-muted-foreground col-span-3 text-sm p-4 text-center">加载中...</div>
           ) : userGroups.length === 0 ? (
-             <div className="text-gray-500 col-span-3 text-sm p-4 text-center border rounded-xl border-dashed">
-                尚未配置任何分组。系统所有计费将按原有 1.0 倍率标准执行。
+             <div className="text-muted-foreground col-span-3 text-sm p-4 text-center border rounded-xl border-dashed">
+                暂未配置任何自定义分组。系统将统一按照 1.0 倍基准单价结算。
              </div>
           ) : (
             userGroups.map((g) => (
-              <Card key={g.group_name} className={`relative overflow-hidden group transition-all hover:shadow-md ${g.group_name === 'default' ? 'border-primary/20 bg-primary/5 dark:bg-primary/10' : ''}`}>
+              <Card key={g.group_name} className={`relative overflow-hidden group transition-all border-border bg-card hover:border-gray-300 dark:hover:border-dark-600 ${g.group_name === 'default' ? 'ring-1 ring-primary/20' : ''}`}>
                  {g.group_name === 'default' && (
-                   <div className="absolute top-0 right-0 py-1 px-3 bg-primary text-primary-foreground text-[10px] uppercase font-bold tracking-wider rounded-bl-xl shadow-sm z-10">
-                      默认兜底组
+                   <div className="absolute top-0 right-0 py-0.5 px-2.5 bg-primary text-primary-foreground text-[10px] uppercase font-bold tracking-wider rounded-bl-lg z-10">
+                      默认组
                    </div>
                  )}
                  <CardContent className="p-5">
                    <div className="flex items-start justify-between">
                      <div className="flex items-center gap-3">
-                        <div className={`w-12 h-12 rounded-xl flex items-center justify-center font-bold text-xl shadow-inner border border-white/10 ${g.group_name === 'default' ? 'bg-gradient-to-br from-indigo-500 to-purple-600 text-white' : 'bg-gradient-to-br from-amber-400 to-orange-500 text-white'}`}>
+                        <div className="w-10 h-10 rounded-lg flex items-center justify-center font-bold text-sm bg-muted text-foreground">
                            {g.group_name.substring(0, 1).toUpperCase()}
                         </div>
                         <div>
-                           <h4 className="font-bold text-gray-900 dark:text-white text-lg leading-tight">
+                           <h4 className="font-bold text-foreground text-base leading-tight">
                              {g.group_name === 'default' ? 'Default' : g.group_name}
                            </h4>
                            <div className="flex items-center gap-1.5 mt-1">
-                             <Badge variant="secondary" className="font-mono text-xs font-semibold">
-                               x {g.discount_rate.toFixed(2)} 倍
+                             <Badge variant="secondary" className="font-mono text-xs font-semibold tabular-nums">
+                               ×{g.discount_rate.toFixed(2)} 倍
                              </Badge>
                              {g.discount_rate < 1 ? (
-                               <span className="text-[10px] text-emerald-500 font-medium border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/50 px-1 rounded">更便宜</span>
+                               <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium bg-emerald-500/10 px-1.5 py-0.5 rounded">优惠</span>
                              ) : g.discount_rate > 1 ? (
-                               <span className="text-[10px] text-red-500 font-medium border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/50 px-1 rounded">更贵</span>
+                               <span className="text-[10px] text-amber-600 dark:text-amber-400 font-medium bg-amber-500/10 px-1.5 py-0.5 rounded">溢价</span>
                              ) : null}
                            </div>
                         </div>

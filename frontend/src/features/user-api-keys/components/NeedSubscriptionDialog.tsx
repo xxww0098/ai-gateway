@@ -27,22 +27,22 @@ export function NeedSubscriptionDialog({ open, onOpenChange, groupName }: Props)
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md border-amber-200/80 dark:border-amber-900/40 bg-gradient-to-b from-amber-50/40 to-background dark:from-amber-950/20">
+      <DialogContent className="sm:max-w-md">
         <DialogHeader className="space-y-3">
-          <div className="mx-auto sm:mx-0 flex h-12 w-12 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/40">
-            <Crown className="h-6 w-6 text-amber-600 dark:text-amber-400" />
+          <div className="mx-auto sm:mx-0 flex h-10 w-10 items-center justify-center rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400">
+            <Crown className="h-5 w-5" />
           </div>
           <DialogTitle className="text-center sm:text-left">开通订阅后即可使用该分组</DialogTitle>
-          <DialogDescription className="text-center sm:text-left text-gray-600 dark:text-dark-300 space-y-2">
+          <DialogDescription className="text-center sm:text-left text-muted-foreground space-y-2">
             {groupName ? (
               <p>
                 分组「<span className="font-medium text-foreground">{groupName}</span>」为订阅类型，需要您在该分组下拥有
-                <span className="font-medium">有效订阅</span>
+                <span className="font-medium text-foreground"> 有效订阅 </span>
                 才能将 API Key 绑定到该分组。
               </p>
             ) : (
               <p>
-                所选分组为订阅类型，需要您在该分组下拥有<span className="font-medium">有效订阅</span>
+                所选分组为订阅类型，需要您在该分组下拥有<span className="font-medium text-foreground"> 有效订阅 </span>
                 后才能绑定 API Key。
               </p>
             )}
@@ -55,7 +55,7 @@ export function NeedSubscriptionDialog({ open, onOpenChange, groupName }: Props)
           <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
             稍后
           </Button>
-          <Button type="button" className="bg-amber-600 hover:bg-amber-700 text-white" onClick={goSubscriptions}>
+          <Button type="button" onClick={goSubscriptions}>
             前往我的订阅
           </Button>
         </DialogFooter>

@@ -35,10 +35,10 @@ export default function Subscriptions() {
         <div className="space-y-1">
           <h3 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
             <Crown className="w-5 h-5 text-amber-500" />
-            订阅管理
+            订阅套餐管理
           </h3>
           <p className="text-sm text-gray-500 max-w-2xl">
-            管理用户的月卡/套餐订阅。订阅类型的分组按5h/周/月限额计费，不扣用户余额。
+            管理订阅套餐及其配额规则。用户开通订阅后可在周期内享受独立配额。
           </p>
         </div>
 
@@ -71,13 +71,13 @@ export default function Subscriptions() {
         <Card className="border-dashed border-2 border-amber-200 dark:border-amber-800/40 bg-amber-50/30 dark:bg-amber-950/10">
           <CardContent className="flex flex-col items-center justify-center py-12 text-center">
             <PackagePlus className="w-12 h-12 text-amber-300 dark:text-amber-700 mb-4" />
-            <h4 className="text-lg font-semibold text-gray-700 dark:text-gray-300 mb-2">尚未创建订阅套餐</h4>
+            <h4 className="text-lg font-semibold text-gray-700 dark:text-gray-300 mb-2">暂无订阅套餐</h4>
             <p className="text-sm text-gray-500 max-w-md mb-4">
-              创建一个订阅类型的分组来启用月卡/套餐功能。订阅分组按5h/周/月限额计费，不扣用户余额。
+              创建订阅套餐后，用户即可在前端订阅页面开通对应周期的额度权益。
             </p>
             <Button className="gap-2 bg-amber-600 hover:bg-amber-700 text-white" onClick={openCreateGroup}>
               <PackagePlus className="h-4 w-4" />
-              创建第一个订阅套餐
+              新建套餐
             </Button>
           </CardContent>
         </Card>

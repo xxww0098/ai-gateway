@@ -7,6 +7,7 @@ import { Badge } from "@/shared/components/ui/badge"
 import { toast } from "sonner"
 import { Input } from "@/shared/components/ui/input"
 import { Trash2, Plus, Copy, Check, Gift } from "lucide-react"
+import { EmptyState } from "@/shared/components/EmptyState"
 import {
   Dialog,
   DialogContent,
@@ -104,10 +105,10 @@ export default function RedeemCodes() {
         <div className="space-y-1">
           <h3 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
             <Gift className="w-5 h-5 text-purple-500" />
-            充值兑换卡密
+            充值卡密
           </h3>
           <p className="text-sm text-gray-500 max-w-2xl">
-            生成含有预设余额的兑换码（如类似于礼品卡）。您可以将这些卡密发放给用户，用户在充值页面使用后，对应的金额将自动增加到他们的账户余额中。
+            批量生成指定面值的充值卡密。用户可在充值页面输入卡密兑换余额。
           </p>
         </div>
         
@@ -115,14 +116,14 @@ export default function RedeemCodes() {
           <DialogTrigger asChild>
             <Button className="gap-2 bg-purple-600 hover:bg-purple-700 text-white shadow-sm">
               <Plus className="h-4 w-4" />
-              批量生成
+              批量生成卡密
             </Button>
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>生成兑换卡密</DialogTitle>
+              <DialogTitle>批量生成卡密</DialogTitle>
               <DialogDescription>
-                指定生成的数量和每个卡密包含的余额（USD）。生成的卡密可以线下分发给用户。
+                指定生成数量与单张卡密面值（USD）。生成后可导出分发给用户。
               </DialogDescription>
             </DialogHeader>
             <form onSubmit={handleCreate} className="space-y-4 pt-4">
@@ -136,7 +137,7 @@ export default function RedeemCodes() {
                 />
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium">每个卡密的面值 ($)</label>
+                <label className="text-sm font-medium">单张面值 ($)</label>
                 <Input
                   type="number" step="0.01" min="0.01"
                   value={createForm.amount}
@@ -171,15 +172,18 @@ export default function RedeemCodes() {
           <TableBody>
             {loading ? (
               <TableRow>
-                <TableCell colSpan={7} className="h-32 text-center text-muted-foreground">正在加载卡密记录...</TableCell>
+                <TableCell colSpan={7} className="h-32 text-center text-muted-foreground">加载中...</TableCell>
               </TableRow>
             ) : codes.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} className="h-32 text-center text-muted-foreground">
-                  <div className="flex h-full min-h-32 w-full flex-col items-center justify-center gap-2">
-                    <Gift className="w-8 h-8 text-gray-300 dark:text-gray-700" />
-                    <p>您还没有生成任何兑换码。</p>
-                  </div>
+                <TableCell colSpan={7} className="p-0">
+                  <EmptyState
+                    size="compact"
+                    tone="first-use"
+                    icon={Gift}
+                    title="暂无充值卡密"
+                    description="卡密可用于线下分发、活动赠送或用户补偿。点击上方「批量生成卡密」开始创建。"
+                  />
                 </TableCell>
               </TableRow>
             ) : (

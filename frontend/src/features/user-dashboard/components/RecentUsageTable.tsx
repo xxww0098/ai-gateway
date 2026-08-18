@@ -1,5 +1,7 @@
 import { Link } from 'react-router-dom'
 import { Activity, ArrowRight, CheckCircle2, XCircle } from 'lucide-react'
+import { EmptyState } from '@/shared/components/EmptyState'
+import { userRoutes } from '@/shared/routes/user'
 import type { RecentUsageTableProps } from '../types'
 
 function fmtTokens(n: number): string {
@@ -27,17 +29,17 @@ function timeAgo(iso: string): string {
 
 export function RecentUsageTable({ recentUsage }: RecentUsageTableProps) {
   return (
-    <div className="glass-card overflow-hidden flex flex-col">
-      <div className="px-6 py-5 border-b border-border/50 flex items-center justify-between bg-gray-50/50 dark:bg-dark-800/50">
+    <div className="rounded-xl border border-border bg-card overflow-hidden flex flex-col">
+      <div className="px-5 py-4 border-b border-border flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Activity className="w-5 h-5 text-blue-500" />
-          <h3 className="text-sm font-bold uppercase tracking-wider text-gray-900 dark:text-white">
+          <Activity className="w-4 h-4 text-primary" />
+          <h3 className="text-sm font-semibold text-foreground">
             最近调用
           </h3>
         </div>
         <Link
           to="/usage"
-          className="text-xs text-primary-500 hover:text-primary-600 font-medium flex items-center gap-1 transition-colors"
+          className="text-xs text-primary hover:underline font-medium flex items-center gap-1 transition-colors"
         >
           查看全部
           <ArrowRight className="w-3 h-3" />
@@ -45,30 +47,36 @@ export function RecentUsageTable({ recentUsage }: RecentUsageTableProps) {
       </div>
       <div className="flex-1 p-0 overflow-y-auto max-h-[300px]">
         {recentUsage.length === 0 ? (
-          <div className="p-8 text-center text-gray-500 dark:text-dark-500 text-sm">暂无调用记录</div>
+          <EmptyState
+            size="compact"
+            icon={Activity}
+            title="最近没有调用"
+            description="跑一次请求，这里会按时间倒序列出每一笔，含模型、token 和实际花费。"
+            action={{ label: '看完整用量', to: userRoutes.usage }}
+          />
         ) : (
           <div className="divide-y divide-border/50">
             {recentUsage.map(log => (
-              <div key={log.id} className="px-6 py-3.5 flex items-center justify-between hover:bg-gray-50 dark:hover:bg-dark-900/30 transition-colors">
+              <div key={log.id} className="px-5 py-3 flex items-center justify-between hover:bg-muted/40 transition-colors">
                 <div className="flex items-center gap-3 min-w-0">
                   <div className="flex-shrink-0">
                     {log.failed ? (
                       <XCircle className="w-4 h-4 text-red-500" />
                     ) : (
-                      <CheckCircle2 className="w-4 h-4 text-green-500" />
+                      <CheckCircle2 className="w-4 h-4 text-emerald-500" />
                     )}
                   </div>
                   <div className="min-w-0">
-                    <p className="text-sm font-medium text-gray-900 dark:text-white truncate font-mono">{log.model}</p>
-                    <p className="text-[11px] text-gray-400 dark:text-dark-500 mt-0.5">
-                      {log.api_key_name && <span className="mr-2">{log.api_key_name}</span>}
+                    <p className="text-xs font-medium text-foreground truncate font-mono">{log.model}</p>
+                    <p className="text-[11px] text-muted-foreground mt-0.5 tabular-nums">
+                      {log.api_key_name && <span className="mr-2 font-sans">{log.api_key_name}</span>}
                       ↓{fmtTokens(log.input_tokens)} · ↑{fmtTokens(log.output_tokens)}
                     </p>
                   </div>
                 </div>
                 <div className="text-right flex-shrink-0 ml-3">
-                  <p className="text-sm font-medium text-green-600 dark:text-green-400 tabular-nums">{fmtCost(log.actual_cost)}</p>
-                  <p className="text-[11px] text-gray-400 dark:text-dark-500 mt-0.5">{timeAgo(log.created_at)}</p>
+                  <p className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 tabular-nums">{fmtCost(log.actual_cost)}</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">{timeAgo(log.created_at)}</p>
                 </div>
               </div>
             ))}

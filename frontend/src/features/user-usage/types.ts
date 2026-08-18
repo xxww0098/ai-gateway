@@ -39,12 +39,6 @@ export interface ApiKey {
   name: string
 }
 
-export interface TooltipData {
-  log: UsageLog
-  x: number
-  y: number
-}
-
 // ── Component prop types ────────────────────────────────────────────────────
 
 export interface UsageStatsCardsProps {
@@ -80,16 +74,4 @@ export interface UsageTableProps {
   totalPages: number
   onPageChange: (p: number) => void
   onPageSizeChange: (s: number) => void
-  onCostTooltip: (data: TooltipData | null) => void
-  onTokenTooltip: (data: TooltipData | null) => void
-}
-
-export interface UsageCostTooltipProps {
-  data: TooltipData
-  onClose: () => void
-}
-
-export interface UsageTokenTooltipProps {
-  data: TooltipData
-  onClose: () => void
 }

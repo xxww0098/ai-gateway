@@ -3,6 +3,8 @@ import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip,
   ResponsiveContainer, PieChart, Pie
 } from 'recharts'
+import { EmptyState } from '@/shared/components/EmptyState'
+import { userRoutes } from '@/shared/routes/user'
 import type { UserDashboardChartsProps, ModelStat } from '../types'
 
 const CHART_COLORS = [
@@ -19,13 +21,13 @@ function fmtCost(n: number): string {
 function CustomAreaTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ value: number; dataKey: string }>; label?: string }) {
   if (!active || !payload?.length) return null
   return (
-    <div className="rounded-xl border border-gray-200 dark:border-dark-600 bg-white dark:bg-dark-900 px-4 py-3 shadow-xl text-xs">
-      <p className="font-semibold text-gray-900 dark:text-white mb-1.5">{label}</p>
+    <div className="rounded-lg border border-border bg-popover text-popover-foreground px-3.5 py-2.5 shadow-sm text-xs">
+      <p className="font-semibold text-foreground mb-1.5">{label}</p>
       {payload.map((p, i) => (
         <div key={i} className="flex items-center gap-2">
           <div className="w-2 h-2 rounded-full" style={{ backgroundColor: p.dataKey === 'requests' ? '#14b8a6' : '#3b82f6' }} />
-          <span className="text-gray-500">{p.dataKey === 'requests' ? '请求' : '费用'}</span>
-          <span className="font-medium text-gray-900 dark:text-white tabular-nums ml-auto">
+          <span className="text-muted-foreground">{p.dataKey === 'requests' ? '请求' : '费用'}</span>
+          <span className="font-medium text-foreground tabular-nums ml-auto">
             {p.dataKey === 'cost' ? `$${p.value.toFixed(4)}` : p.value}
           </span>
         </div>
@@ -34,26 +36,26 @@ function CustomAreaTooltip({ active, payload, label }: { active?: boolean; paylo
   )
 }
 
-const cellClassName = "transition-opacity duration-200 hover:opacity-80 cursor-pointer"
+const cellClassName = "transition-opacity duration-150 hover:opacity-80 cursor-pointer"
 
 function CustomDoughnutTooltip({ active, payload }: { active?: boolean; payload?: Array<{ name: string; value: number; payload: ModelStat }> }) {
   if (!active || !payload?.length) return null
   const data = payload[0]
   return (
-    <div className="rounded-xl border border-gray-700/80 bg-gray-900/95 backdrop-blur-xl px-4 py-3 shadow-2xl text-xs text-white min-w-[180px]">
-      <p className="font-semibold text-white mb-1.5 truncate max-w-[200px]">{data.name}</p>
+    <div className="rounded-lg border border-border bg-popover text-popover-foreground px-3.5 py-2.5 shadow-sm text-xs min-w-[180px]">
+      <p className="font-semibold text-foreground mb-1.5 truncate max-w-[200px]">{data.name}</p>
       <div className="space-y-1">
         <div className="flex justify-between gap-4">
-          <span className="text-gray-400">请求数</span>
-          <span className="font-medium text-white tabular-nums">{data.payload.requests} 次</span>
+          <span className="text-muted-foreground">请求数</span>
+          <span className="font-medium text-foreground tabular-nums">{data.payload.requests} 次</span>
         </div>
         <div className="flex justify-between gap-4">
-          <span className="text-gray-400">Tokens</span>
-          <span className="font-medium text-white tabular-nums">{(data.payload.tokens / 1000).toFixed(1)}K</span>
+          <span className="text-muted-foreground">Tokens</span>
+          <span className="font-medium text-foreground tabular-nums">{(data.payload.tokens / 1000).toFixed(1)}K</span>
         </div>
-        <div className="flex justify-between gap-4 border-t border-gray-700 pt-1">
-          <span className="text-gray-400">费用</span>
-          <span className="font-semibold text-green-400 tabular-nums">{fmtCost(data.payload.cost)}</span>
+        <div className="flex justify-between gap-4 border-t border-border pt-1">
+          <span className="text-muted-foreground">费用</span>
+          <span className="font-semibold text-emerald-600 dark:text-emerald-400 tabular-nums">{fmtCost(data.payload.cost)}</span>
         </div>
       </div>
     </div>
@@ -69,23 +71,23 @@ export function UserDashboardCharts({
   return (
     <div className="grid gap-6 lg:grid-cols-3">
       {/* Usage Trend (takes 2 cols) */}
-      <div className="glass-card overflow-hidden lg:col-span-2">
-        <div className="px-6 py-5 border-b border-border/50 flex items-center justify-between bg-gray-50/50 dark:bg-dark-800/50">
+      <div className="rounded-xl border border-border bg-card overflow-hidden lg:col-span-2">
+        <div className="px-5 py-4 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <TrendingUp className="w-5 h-5 text-primary-500" />
-            <h3 className="text-sm font-bold uppercase tracking-wider text-gray-900 dark:text-white">
+            <TrendingUp className="w-4 h-4 text-primary" />
+            <h3 className="text-sm font-semibold text-foreground">
               用量趋势
             </h3>
           </div>
-          <div className="flex gap-1 p-0.5 bg-gray-100 dark:bg-dark-800 rounded-lg">
+          <div className="flex gap-1 p-0.5 bg-muted rounded-lg">
             {([7, 30] as const).map(d => (
               <button
                 key={d}
                 onClick={() => onTrendDaysChange(d)}
-                className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${
+                className={`px-2.5 py-1 rounded-md text-xs font-medium transition-all ${
                   trendDays === d
-                    ? 'bg-white dark:bg-dark-700 text-gray-900 dark:text-white shadow-sm'
-                    : 'text-gray-500 dark:text-dark-400 hover:text-gray-700'
+                    ? 'bg-background text-foreground shadow-xs'
+                    : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
                 {d}天
@@ -93,58 +95,59 @@ export function UserDashboardCharts({
             ))}
           </div>
         </div>
-        <div className="p-6">
+        <div className="p-5">
           {trendData.length === 0 ? (
-            <div className="flex items-center justify-center h-[200px] text-gray-400 dark:text-dark-500 text-sm">
-              暂无趋势数据
-            </div>
+            <EmptyState
+              size="compact"
+              tone="no-results"
+              icon={TrendingUp}
+              title={`最近 ${trendDays} 天暂无调用记录`}
+              description="可调整时间范围查看历史数据，或发起 API 请求生成图表。"
+              className="h-[200px]"
+            />
           ) : (
             <ResponsiveContainer width="100%" height={220}>
               <AreaChart data={trendData} margin={{ top: 5, right: 5, left: -20, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="userReqGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#14b8a6" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="#14b8a6" stopOpacity={0} />
-                  </linearGradient>
-                  <linearGradient id="userCostGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="currentColor" className="text-gray-100 dark:text-dark-800" />
+                <CartesianGrid strokeDasharray="3 3" stroke="currentColor" className="text-border/50" />
                 <XAxis dataKey="date" tick={{ fontSize: 11, fill: '#9ca3af' }} axisLine={false} tickLine={false} />
                 <YAxis yAxisId="left" tick={{ fontSize: 11, fill: '#9ca3af' }} axisLine={false} tickLine={false} />
                 <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11, fill: '#9ca3af' }} axisLine={false} tickLine={false} tickFormatter={(v: number) => `$${v.toFixed(2)}`} />
                 <RechartsTooltip content={<CustomAreaTooltip />} />
-                <Area yAxisId="left" type="monotone" dataKey="requests" stroke="#14b8a6" strokeWidth={2} fill="url(#userReqGrad)" dot={false} activeDot={{ r: 4, strokeWidth: 2 }} />
-                <Area yAxisId="right" type="monotone" dataKey="cost" stroke="#3b82f6" strokeWidth={2} fill="url(#userCostGrad)" dot={false} activeDot={{ r: 4, strokeWidth: 2 }} />
+                <Area yAxisId="left" type="monotone" dataKey="requests" stroke="#14b8a6" strokeWidth={2} fill="#14b8a6" fillOpacity={0.08} dot={false} activeDot={{ r: 4, strokeWidth: 2 }} />
+                <Area yAxisId="right" type="monotone" dataKey="cost" stroke="#3b82f6" strokeWidth={2} fill="#3b82f6" fillOpacity={0.08} dot={false} activeDot={{ r: 4, strokeWidth: 2 }} />
               </AreaChart>
             </ResponsiveContainer>
           )}
-          <div className="flex items-center justify-center gap-6 mt-3 text-xs text-gray-500 dark:text-dark-400">
+          <div className="flex items-center justify-center gap-6 mt-3 text-xs text-muted-foreground">
             <span className="flex items-center gap-1.5">
-              <span className="w-3 h-0.5 rounded-full bg-primary-500 inline-block" /> 请求数
+              <span className="w-2.5 h-2.5 rounded-full bg-[#14b8a6] inline-block" /> 请求数
             </span>
             <span className="flex items-center gap-1.5">
-              <span className="w-3 h-0.5 rounded-full bg-blue-500 inline-block" /> 费用 ($)
+              <span className="w-2.5 h-2.5 rounded-full bg-[#3b82f6] inline-block" /> 费用 ($)
             </span>
           </div>
         </div>
       </div>
 
       {/* Model Distribution (1 col) */}
-      <div className="glass-card overflow-hidden">
-        <div className="px-6 py-5 border-b border-border/50 flex items-center gap-2 bg-gray-50/50 dark:bg-dark-800/50">
-          <Flame className="w-5 h-5 text-amber-500" />
-          <h3 className="text-sm font-bold uppercase tracking-wider text-gray-900 dark:text-white">
+      <div className="rounded-xl border border-border bg-card overflow-hidden">
+        <div className="px-5 py-4 border-b border-border flex items-center gap-2">
+          <Flame className="w-4 h-4 text-amber-500" />
+          <h3 className="text-sm font-semibold text-foreground">
             模型分布
           </h3>
         </div>
         <div className="p-4">
           {modelData.length === 0 ? (
-            <div className="flex items-center justify-center h-[260px] text-gray-400 dark:text-dark-500 text-sm">
-              暂无模型数据
-            </div>
+            <EmptyState
+              size="compact"
+              tone="no-results"
+              icon={Flame}
+              title="暂无模型用量数据"
+              description="发起 API 请求后，此处将按模型维度统计调用次数与费用分布。"
+              action={{ label: '查看可用模型', to: userRoutes.models }}
+              className="h-[260px]"
+            />
           ) : (
             <div className="flex flex-col items-center gap-4">
               <div className="relative w-[180px] h-[180px]">

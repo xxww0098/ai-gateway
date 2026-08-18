@@ -1,6 +1,8 @@
 import { RefreshCw, ChevronLeft, ChevronRight, ShoppingCart } from "lucide-react"
 import { OrderStatusBadge } from "./OrderStatusBadge"
 import { getProviderInfo, fmtAmount, fmtLocalAmount, fmtDateTime } from "../constants"
+import { EmptyState, EmptyStateRow } from "@/shared/components/EmptyState"
+import { userRoutes } from "@/shared/routes/user"
 import type { PaymentOrder } from "../types"
 
 interface Props {
@@ -67,15 +69,20 @@ export function OrdersTable({
       {/* Mobile cards */}
       <div className="md:hidden space-y-3">
         {loading ? (
-          <div className="glass-card flex h-32 items-center justify-center gap-2 text-gray-400 text-sm">
-            <RefreshCw className="w-4 h-4 animate-spin text-primary-500" />
+          <div className="rounded-xl border border-border bg-card flex h-32 items-center justify-center gap-2 text-muted-foreground text-sm">
+            <RefreshCw className="w-4 h-4 animate-spin text-primary" />
             加载中...
           </div>
         ) : orders.length === 0 ? (
-          <div className="glass-card flex h-32 flex-col items-center justify-center gap-2 text-gray-400 text-sm">
-            <ShoppingCart className="w-10 h-10 opacity-30" />
-            暂无充值订单记录
-          </div>
+          <EmptyState
+            bordered
+            size="compact"
+            tone="first-use"
+            icon={ShoppingCart}
+            title="暂无充值订单"
+            description="在线充值后将在此记录订单信息。支付确认后余额将自动入账。"
+            action={{ label: '前往充值', to: userRoutes.financeTopup }}
+          />
         ) : (
           orders.map((order) => {
             const pInfo = getProviderInfo(order.provider)
@@ -84,23 +91,23 @@ export function OrdersTable({
                 key={order.id}
                 type="button"
                 onClick={() => onSelectOrder(order)}
-                className="w-full text-left rounded-xl border border-border bg-white dark:bg-dark-900 p-3 shadow-sm active:bg-gray-50 dark:active:bg-dark-800 space-y-2"
+                className="w-full text-left rounded-xl border border-border bg-card p-3 shadow-xs active:bg-muted space-y-2"
               >
                 <div className="flex items-center justify-between gap-2">
                   <span className={`text-sm font-medium ${pInfo.color}`}>{pInfo.label}</span>
                   <OrderStatusBadge order={order} />
                 </div>
                 <div className="flex items-baseline justify-between">
-                  <span className="text-lg font-bold tabular-nums text-gray-900 dark:text-white">
+                  <span className="text-base font-bold tabular-nums text-foreground">
                     {fmtAmount(order.amount_usd)}
                   </span>
                   <span className="text-xs text-muted-foreground tabular-nums">
                     {fmtLocalAmount(order.amount_local, order.currency)}
                   </span>
                 </div>
-                <div className="text-[11px] text-muted-foreground tabular-nums">
-                  {fmtDateTime(order.created_at)}
-                  {order.transaction_id ? ` · ${order.transaction_id.slice(0, 12)}…` : ''}
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span className="tabular-nums">{fmtDateTime(order.created_at)}</span>
+                  <span className="font-mono truncate max-w-[120px]">{order.transaction_id || order.id}</span>
                 </div>
               </button>
             )
@@ -109,7 +116,7 @@ export function OrdersTable({
       </div>
 
       {/* Desktop table */}
-      <div className="glass-card overflow-hidden hidden md:block">
+      <div className="rounded-xl border border-border bg-card overflow-hidden hidden md:block">
         <div className="overflow-x-auto">
           <table className="table">
             <thead>
@@ -133,14 +140,14 @@ export function OrdersTable({
                   </td>
                 </tr>
               ) : orders.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="h-40 text-center text-gray-400 dark:text-dark-500">
-                    <div className="flex flex-col items-center gap-2">
-                      <ShoppingCart className="w-10 h-10 opacity-30" />
-                      <span>暂无充值订单记录</span>
-                    </div>
-                  </td>
-                </tr>
+                <EmptyStateRow
+                  colSpan={6}
+                  tone="first-use"
+                  icon={ShoppingCart}
+                  title="暂无充值订单"
+                  description="在线充值后将在此记录订单信息。支付确认后余额将自动入账。"
+                  action={{ label: '前往充值', to: userRoutes.financeTopup }}
+                />
               ) : (
                 orders.map(order => {
                   const pInfo = getProviderInfo(order.provider)

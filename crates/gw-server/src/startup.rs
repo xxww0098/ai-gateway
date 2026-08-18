@@ -1,5 +1,5 @@
-//! Boot-time validation and logging setup: JWT secret strength, the sslmode
-//! warning, and logger initialization.
+//! Boot-time validation and logging setup: JWT secret strength, credential
+//! encryption key, the sslmode warning, and logger initialization.
 
 use tracing::warn;
 
@@ -7,21 +7,53 @@ use tracing::warn;
 /// brute-forceable.
 pub const MIN_JWT_SECRET_BYTES: usize = 32;
 
+/// Env flag: when truthy (`1`/`true`/`yes`/`on`), empty JWT secret or empty
+/// credential encryption key refuses to boot.
+pub const STRICT_SECRETS_ENV: &str = "AI_GATEWAY_STRICT_SECRETS";
+
 /// A misconfiguration that must stop the process before it serves traffic.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StartupError {
     #[error("auth.jwt.secret is too weak: {bytes} bytes, need at least {minimum}")]
     WeakJwtSecret { bytes: usize, minimum: usize },
+    #[error(
+        "auth.jwt.secret is empty — set auth.jwt.secret / JWT_SECRET (or unset AI_GATEWAY_STRICT_SECRETS)"
+    )]
+    MissingJwtSecret,
+    #[error(
+        "CREDENTIAL_ENCRYPTION_KEY is empty — upstream credentials would be stored in cleartext; set a 32-byte key (hex/base64) or unset AI_GATEWAY_STRICT_SECRETS"
+    )]
+    MissingCredentialEncryptionKey,
+}
+
+/// Whether [`STRICT_SECRETS_ENV`] demands fail-closed secret checks.
+#[must_use]
+pub fn strict_secrets_enabled() -> bool {
+    matches!(
+        std::env::var(STRICT_SECRETS_ENV)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 /// Reject an unacceptably weak JWT secret.
 ///
-/// An empty secret is tolerated — `gw-authcore` fails closed at request time,
-/// and the shipped example config carries no secret so dev/CI can still boot —
-/// but a non-empty secret shorter than [`MIN_JWT_SECRET_BYTES`] is a hard
-/// error: it boots and then silently accepts brute-forceable HS256 tokens.
+/// An empty secret is tolerated unless [`strict_secrets_enabled`] — then it is
+/// a hard error. A non-empty secret shorter than [`MIN_JWT_SECRET_BYTES`] is
+/// always a hard error.
 pub fn validate_jwt_secret(secret: &str) -> Result<(), StartupError> {
+    validate_jwt_secret_with(secret, strict_secrets_enabled())
+}
+
+/// Testable form of [`validate_jwt_secret`].
+pub fn validate_jwt_secret_with(secret: &str, strict: bool) -> Result<(), StartupError> {
     if secret.is_empty() {
+        if strict {
+            return Err(StartupError::MissingJwtSecret);
+        }
         warn!(
             "JWT secret is empty — panel auth will fail closed; set auth.jwt.secret or JWT_SECRET before serving traffic"
         );
@@ -33,6 +65,35 @@ pub fn validate_jwt_secret(secret: &str) -> Result<(), StartupError> {
             minimum: MIN_JWT_SECRET_BYTES,
         });
     }
+    Ok(())
+}
+
+/// Reject a missing credential encryption key when production discipline applies.
+///
+/// Rules:
+/// * `strict` (from [`STRICT_SECRETS_ENV`]) → empty is a hard error;
+/// * otherwise, if JWT is already configured (non-empty) → empty CEK is a hard
+///   error (partial secret setup must not store upstream tokens in cleartext);
+/// * both empty → warn only so example/dev configs still boot.
+pub fn validate_credential_encryption_key(key: &str, jwt_secret: &str) -> Result<(), StartupError> {
+    validate_credential_encryption_key_with(key, jwt_secret, strict_secrets_enabled())
+}
+
+/// Testable form of [`validate_credential_encryption_key`].
+pub fn validate_credential_encryption_key_with(
+    key: &str,
+    jwt_secret: &str,
+    strict: bool,
+) -> Result<(), StartupError> {
+    if !key.is_empty() {
+        return Ok(());
+    }
+    if strict || !jwt_secret.is_empty() {
+        return Err(StartupError::MissingCredentialEncryptionKey);
+    }
+    warn!(
+        "CREDENTIAL_ENCRYPTION_KEY not set — upstream provider credentials will be stored in cleartext; set a 32-byte key (hex/base64) to encrypt auth_records.metadata at rest"
+    );
     Ok(())
 }
 

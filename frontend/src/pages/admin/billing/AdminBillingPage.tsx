@@ -33,19 +33,12 @@ export default function Billing() {
       </div>
 
       <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
-        <TabsList className="relative flex w-full max-w-[600px] h-auto p-1.5 bg-gray-100/80 dark:bg-dark-800/80 rounded-full mb-4">
-          <div
-            className="absolute top-1.5 bottom-1.5 w-[calc((100%-12px)/3)] bg-white dark:bg-dark-700 rounded-full shadow-sm transition-transform duration-300 ease-out"
-            style={{
-              transform: `translateX(${tabs.findIndex((t) => t.id === activeTab) * 100}%)`,
-              left: '6px',
-            }}
-          />
+        <TabsList className="grid h-auto w-full max-w-md grid-cols-3 gap-1 p-1 bg-muted rounded-xl mb-6">
           {tabs.map((tab) => (
             <TabsTrigger
               key={tab.id}
               value={tab.id}
-              className="relative z-10 flex flex-1 items-center justify-center gap-2 py-3 px-4 text-sm font-medium text-gray-600 hover:text-gray-900 dark:text-dark-300 dark:hover:text-dark-50 data-[state=active]:text-gray-900 dark:data-[state=active]:text-white data-[state=active]:bg-transparent dark:data-[state=active]:bg-transparent data-[state=active]:shadow-none rounded-full transition-colors"
+              className="py-2.5 px-3 text-sm font-medium data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs rounded-lg flex items-center justify-center gap-1.5"
             >
               <tab.icon className="h-4 w-4" />
               {tab.label}
@@ -53,7 +46,7 @@ export default function Billing() {
           ))}
         </TabsList>
 
-        <div className="bg-white dark:bg-dark-900 border border-gray-200 dark:border-dark-800 rounded-2xl p-6 shadow-sm min-h-[500px]">
+        <div className="w-full">
           <TabsContent value="pricing" className="mt-0 focus-visible:outline-none">
             <Pricing />
           </TabsContent>

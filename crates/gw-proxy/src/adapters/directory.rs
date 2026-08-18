@@ -11,6 +11,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use gw_infra::{ApiKeyCache, CachedKey, Db, UserStatusCache};
+use tracing::Instrument as _;
 
 use crate::ports::{ApiKeyRow, Id, SubscriptionQuota, TenantDirectory};
 
@@ -185,16 +186,22 @@ impl TenantDirectory for SqlTenantDirectory {
         // one at shutdown costs a timestamp, not money.
         let db = self.db.clone();
         if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::spawn(async move {
-                let write = sqlx::query("UPDATE api_keys SET last_used_at = NOW() WHERE id = $1")
-                    .bind(api_key_id)
-                    .execute(&db);
-                match tokio::time::timeout(Duration::from_secs(2), write).await {
-                    Ok(Err(err)) => tracing::debug!(%err, api_key_id, "last_used_at bump failed"),
-                    Err(_) => tracing::debug!(api_key_id, "last_used_at bump timed out"),
-                    Ok(Ok(_)) => {}
+            tokio::spawn(
+                async move {
+                    let write =
+                        sqlx::query("UPDATE api_keys SET last_used_at = NOW() WHERE id = $1")
+                            .bind(api_key_id)
+                            .execute(&db);
+                    match tokio::time::timeout(Duration::from_secs(2), write).await {
+                        Ok(Err(err)) => {
+                            tracing::debug!(%err, api_key_id, "last_used_at bump failed");
+                        }
+                        Err(_) => tracing::debug!(api_key_id, "last_used_at bump timed out"),
+                        Ok(Ok(_)) => {}
+                    }
                 }
-            });
+                .in_current_span(),
+            );
         }
     }
 }

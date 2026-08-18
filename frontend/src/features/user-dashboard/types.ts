@@ -86,6 +86,10 @@ export interface RecentUsageTableProps {
 
 export interface QuickIntegrationPanelProps {
   apiKeyCount: number
+  /** 累计成功调用数。0 表示还没跑通，面板切到引导态。 */
+  totalRequests: number
+  /** 可用余额。为 0 时请求会在预扣阶段被 402 拒掉，引导态要先把这一步点出来。 */
+  balance?: number
   integrationTab: IntegrationTab
   onIntegrationTabChange: (tab: IntegrationTab) => void
 }

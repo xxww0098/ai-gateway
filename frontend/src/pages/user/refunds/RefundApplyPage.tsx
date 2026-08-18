@@ -205,7 +205,7 @@ export default function RefundApply() {
     <div className="max-w-2xl mx-auto space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
       <Button variant="ghost" className="gap-1 -ml-3" onClick={() => navigate(userRoutes.subscriptions)}>
         <ArrowLeft className="w-4 h-4" />
-        返回订阅
+        返回我的订阅
       </Button>
 
       <div>
@@ -214,7 +214,7 @@ export default function RefundApply() {
           申请退订
         </h2>
         <p className="text-gray-500 dark:text-dark-300 mt-1">
-            选择要退订的订单，系统将自动计算可退金额。审核通过后将取消对应订阅权益，并按规则调整账户余额。
+          选择要退订的订阅，系统将根据剩余天数自动计算可退金额。退订后对应订阅权益将取消，款项将退回您的账户余额。
         </p>
       </div>
 
@@ -224,11 +224,11 @@ export default function RefundApply() {
             <Calculator className="w-5 h-5 text-primary" />
             退订计算
           </CardTitle>
-          <CardDescription>选择订单后，系统将根据剩余天数自动计算可退金额。</CardDescription>
+          <CardDescription>选择订阅后，系统将根据已用天数与剩余天数自动计算应退金额。</CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
           <div className="space-y-2">
-            <label className="text-sm font-medium">选择订单</label>
+            <label className="text-sm font-medium">选择要退订的订阅</label>
             <div className="grid gap-2">
               {refundableSubs.map((s) => (
                 <button

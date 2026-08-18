@@ -10,6 +10,8 @@ import {
 import { ModelCatalogCard } from '@/features/pricing/components/ModelCatalogCard'
 import { getProviderStyle } from '@/features/pricing/modelCatalogUtils'
 import { useModels } from '@/features/pricing/hooks'
+import { EmptyState } from '@/shared/components/EmptyState'
+import { userRoutes } from '@/shared/routes/user'
 
 // ── Main Component ──────────────────────────────────────────────────────────
 
@@ -127,10 +129,23 @@ export default function Models() {
           <span className="ml-3 text-gray-500 dark:text-dark-400">加载模型列表...</span>
         </div>
       ) : filtered.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-20 text-gray-400 dark:text-dark-500">
-          <Cpu className="h-12 w-12 mb-3 opacity-50" />
-          <p className="text-sm">{models.length === 0 ? '暂无可用模型' : '没有匹配的模型'}</p>
-        </div>
+        models.length === 0 ? (
+          <EmptyState
+            bordered
+            icon={Cpu}
+            title="暂无可用模型"
+            description="网关当前未开放任何上游模型。如需特定模型支持，可提交工单联系管理员。"
+            action={{ label: '提交工单咨询', to: userRoutes.tickets }}
+          />
+        ) : (
+          <EmptyState
+            bordered
+            tone="no-results"
+            icon={Cpu}
+            title="未找到匹配的模型"
+            description="请尝试调整搜索关键词，或清除提供商筛选条件。"
+          />
+        )
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {filtered.map(m => (

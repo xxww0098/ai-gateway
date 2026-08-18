@@ -10,20 +10,20 @@ const buttonVariants = cva(
     variants: {
       variant: {
         default:
-          "bg-primary text-primary-foreground shadow hover:bg-primary/90",
+          "bg-primary text-primary-foreground hover:bg-[#0d9488] active:bg-[#0f766e] active:scale-[0.98]",
         destructive:
-          "bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90",
+          "bg-destructive text-destructive-foreground hover:bg-destructive/90 active:scale-[0.98]",
         outline:
-          "border border-input bg-background shadow-sm hover:bg-accent hover:text-accent-foreground",
+          "border border-input bg-background hover:bg-accent hover:text-accent-foreground active:scale-[0.98]",
         secondary:
-          "bg-secondary text-secondary-foreground shadow-sm hover:bg-secondary/80",
-        ghost: "hover:bg-accent hover:text-accent-foreground",
+          "bg-secondary text-secondary-foreground hover:bg-secondary/80 active:scale-[0.98]",
+        ghost: "hover:bg-accent hover:text-accent-foreground active:scale-[0.98]",
         link: "text-primary underline-offset-4 hover:underline",
         /**
          * 列表/表格内仅图标的删除：圆形微标、细边浅底，悬停才带一点玫瑰色，避免大块纯色。
          */
         dangerIcon:
-          "!h-8 !w-8 !min-h-0 shrink-0 gap-0 rounded-full border border-zinc-200/90 bg-white p-0 text-zinc-400 shadow-[0_1px_2px_rgba(0,0,0,0.04)] transition-[color,background-color,border-color,box-shadow,transform] duration-200 hover:border-rose-200/90 hover:bg-rose-50/95 hover:text-rose-600 hover:shadow-[0_2px_6px_rgba(225,29,72,0.08)] active:scale-[0.97] dark:border-zinc-700 dark:bg-zinc-900/90 dark:text-zinc-500 dark:hover:border-rose-900/45 dark:hover:bg-rose-950/35 dark:hover:text-rose-400 [&_svg]:!size-[15px]",
+          "!h-8 !w-8 !min-h-0 shrink-0 gap-0 rounded-full border border-border bg-background p-0 text-muted-foreground transition-all duration-200 hover:border-red-200 hover:bg-red-50 hover:text-red-600 active:scale-[0.97] dark:hover:border-red-900/50 dark:hover:bg-red-950/30 dark:hover:text-red-400 [&_svg]:!size-[15px]",
       },
       size: {
         default: "h-9 px-4 py-2",

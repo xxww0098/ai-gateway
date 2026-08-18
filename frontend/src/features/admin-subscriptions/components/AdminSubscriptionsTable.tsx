@@ -3,6 +3,7 @@ import { Button } from "@/shared/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/shared/components/ui/table"
 import { Card } from "@/shared/components/ui/card"
 import { CalendarPlus, RotateCcw, Trash2, Crown, Clock, Undo2 } from "lucide-react"
+import { EmptyState } from "@/shared/components/EmptyState"
 import { confirmModal } from "@/shared/confirm-modal"
 import { AdminSubscriptionStatusBadge } from "./AdminSubscriptionStatusBadge"
 import { AdminSubscriptionUsageBar } from "./AdminSubscriptionUsageBar"
@@ -61,11 +62,14 @@ export const AdminSubscriptionsTable = memo(function AdminSubscriptionsTable({
             </TableRow>
           ) : subs.length === 0 ? (
             <TableRow>
-              <TableCell colSpan={7} className="h-32 text-center text-muted-foreground">
-                <div className="flex flex-col items-center gap-2">
-                  <Crown className="w-8 h-8 text-gray-300 dark:text-gray-700" />
-                  <p>暂无订阅记录</p>
-                </div>
+              <TableCell colSpan={7} className="p-0">
+                <EmptyState
+                  size="compact"
+                  tone="first-use"
+                  icon={Crown}
+                  title="暂无用户订阅记录"
+                  description="用户开通订阅套餐后将在此列出，支持在此进行额度重置、手动续期与撤销操作。"
+                />
               </TableCell>
             </TableRow>
           ) : (
@@ -114,7 +118,7 @@ export const AdminSubscriptionsTable = memo(function AdminSubscriptionsTable({
                   <div className="flex justify-end gap-1">
                     <Button size="icon" variant="ghost" title="续期"
                       onClick={() => onExtend(s.id)}
-                      className="h-8 w-8 text-gray-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/50">
+                      className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted">
                       <CalendarPlus className="h-4 w-4" />
                     </Button>
                     <Button

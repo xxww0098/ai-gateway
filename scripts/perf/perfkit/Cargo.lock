@@ -866,7 +866,6 @@ dependencies = [
  "dashmap",
  "gw-config",
  "gw-model",
- "once_cell",
  "parking_lot",
  "redis",
  "serde",
@@ -970,7 +969,6 @@ dependencies = [
  "bytes",
  "chrono",
  "dashmap",
- "futures",
  "futures-util",
  "gw-authcore",
  "gw-config",
@@ -994,7 +992,6 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tower",
- "tower-http",
  "tracing",
  "uuid",
 ]
@@ -1005,7 +1002,6 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "bytes",
- "futures",
  "futures-util",
  "http",
  "http-body",
@@ -2888,12 +2884,10 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
- "http-body-util",
  "pin-project-lite",
  "tower",
  "tower-layer",
  "tower-service",
- "tracing",
  "url",
 ]
 

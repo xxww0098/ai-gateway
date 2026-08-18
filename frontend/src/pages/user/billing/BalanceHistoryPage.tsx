@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { fetchApi } from '@/shared/api/client'
+import { EmptyState, EmptyStateRow } from '@/shared/components/EmptyState'
+import { userRoutes } from '@/shared/routes/user'
 import { toast } from 'sonner'
 import {
   Wallet, ArrowUpRight, RefreshCw,
@@ -99,8 +101,8 @@ export default function BalanceHistory({ embedded = false }: BalanceHistoryProps
     >
       {!embedded && (
         <div>
-          <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">余额流水</h2>
-          <p className="text-gray-500 dark:text-dark-300 mt-1">查看每笔余额变动的详细记录，包括充值、扣费、退款等。</p>
+          <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">余额明细</h2>
+          <p className="text-gray-500 dark:text-dark-300 mt-1">查看账户资金变动记录，包括充值入账、API 调用扣费与退款调整。</p>
         </div>
       )}
 
@@ -138,15 +140,20 @@ export default function BalanceHistory({ embedded = false }: BalanceHistoryProps
       {/* Mobile cards */}
       <div className="md:hidden space-y-3">
         {loading ? (
-          <div className="glass-card flex h-32 items-center justify-center gap-2 text-gray-400 text-sm">
-            <RefreshCw className="w-4 h-4 animate-spin text-primary-500" />
+          <div className="rounded-xl border border-border bg-card flex h-32 items-center justify-center gap-2 text-muted-foreground text-sm">
+            <RefreshCw className="w-4 h-4 animate-spin text-primary" />
             加载中...
           </div>
         ) : entries.length === 0 ? (
-          <div className="glass-card flex h-32 flex-col items-center justify-center gap-2 text-gray-400 text-sm">
-            <Wallet className="w-10 h-10 opacity-30" />
-            暂无余额变动记录
-          </div>
+          <EmptyState
+            bordered
+            size="compact"
+            tone="first-use"
+            icon={Wallet}
+            title="暂无余额变动记录"
+            description="充值入账、卡密兑换、API 调用扣费与退款等资金明细均将在此实时记录。"
+            action={{ label: '前往充值', to: userRoutes.financeTopup }}
+          />
         ) : (
           entries.map((entry) => {
             const kind = entry.kind ?? entry.type ?? 'unknown'
@@ -224,7 +231,7 @@ export default function BalanceHistory({ embedded = false }: BalanceHistoryProps
       </div>
 
       {/* Desktop table */}
-      <div className="glass-card overflow-hidden hidden md:block">
+      <div className="rounded-xl border border-border bg-card overflow-hidden hidden md:block">
         <div className="overflow-x-auto">
           <table className="table">
             <thead>
@@ -248,14 +255,14 @@ export default function BalanceHistory({ embedded = false }: BalanceHistoryProps
                   </td>
                 </tr>
               ) : entries.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="h-40 text-center text-gray-400 dark:text-dark-500">
-                    <div className="flex flex-col items-center gap-2">
-                      <Wallet className="w-10 h-10 opacity-30" />
-                      <span>暂无余额变动记录</span>
-                    </div>
-                  </td>
-                </tr>
+                <EmptyStateRow
+                  colSpan={6}
+                  tone="first-use"
+                  icon={Wallet}
+                  title="暂无余额变动记录"
+                  description="充值入账、卡密兑换、API 调用扣费与退款等资金明细均将在此实时记录。"
+                  action={{ label: '前往充值', to: userRoutes.financeTopup }}
+                />
               ) : (
                 entries.map((entry) => {
                   const kind = entry.kind ?? entry.type ?? 'unknown'

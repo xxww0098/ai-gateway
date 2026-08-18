@@ -1,5 +1,6 @@
 import * as DialogPrimitive from '@radix-ui/react-dialog'
-import { X } from 'lucide-react'
+import { X, Wallet } from 'lucide-react'
+import { EmptyState } from '@/shared/components/EmptyState'
 import { useUserBalanceHistory } from '../hooks'
 import type { UserItem } from '../types'
 
@@ -42,9 +43,13 @@ export function AdminUserHistoryDialog({ open, onOpenChange, user }: Props) {
                 ))}
               </div>
             ) : entries.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-gray-200 dark:border-dark-600 px-6 py-10 text-center text-sm text-gray-500 dark:text-dark-400">
-                暂无余额变动记录
-              </div>
+              <EmptyState
+                bordered
+                size="compact"
+                icon={Wallet}
+                title="这个账户的余额没有动过"
+                description="充值、兑换、扣费、退款都会在这里留一条带请求号的流水。"
+              />
             ) : (
               <div className="overflow-x-auto rounded-xl border border-gray-200 dark:border-dark-600">
                 <table className="table">

@@ -30,7 +30,9 @@ export function AuthFileModelsPanel({ models, loading, onRefresh }: AuthFileMode
           </div>
         )}
         {models && models.length === 0 && !loading && (
-          <p className="text-xs text-gray-500 dark:text-dark-400 text-center py-2">此凭证暂无已注册模型</p>
+          <p className="py-2 text-center text-xs text-muted-foreground">
+            这个凭证下没探测到模型。多半是上游侧还没授权，或凭证已过期 —— 刷新一次再看。
+          </p>
         )}
         {models && models.length > 0 && (
           <div className="grid grid-cols-1 gap-1.5 max-h-[200px] overflow-y-auto">

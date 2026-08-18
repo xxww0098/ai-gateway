@@ -17,6 +17,7 @@ import {
 } from "@/shared/components/ui/dialog"
 import { Crown, Clock, CalendarDays, Zap, Wallet, ArrowLeftRight, AlertCircle } from "lucide-react"
 import { toast } from "sonner"
+import { EmptyState } from "@/shared/components/EmptyState"
 import { useSubscriptionOrders, calculateRefund } from "@/features/user-orders"
 import { userRoutes, userRefundApplyPath } from "@/shared/routes/user"
 
@@ -239,17 +240,13 @@ export default function Subscriptions() {
       </div>
 
       {subs.length === 0 ? (
-        <Card className="border-dashed border-2 border-amber-200 dark:border-amber-800/40 bg-amber-50/30 dark:bg-amber-950/10">
-          <CardContent className="flex flex-col items-center justify-center py-16 text-center">
-            <div className="w-16 h-16 bg-amber-100 dark:bg-amber-900/50 rounded-full flex items-center justify-center mb-4">
-              <Crown className="w-8 h-8 text-amber-500" />
-            </div>
-            <h4 className="text-lg font-semibold text-gray-700 dark:text-gray-300 mb-2">暂无可用订阅</h4>
-            <p className="text-sm text-gray-500 max-w-md">
-              您当前没有任何有效的订阅套餐。若下方有开放中的套餐，可直接使用账户余额自行开通。
-            </p>
-          </CardContent>
-        </Card>
+        <EmptyState
+          bordered
+          tone="first-use"
+          icon={Crown}
+          title="暂无生效中的订阅"
+          description="订阅套餐提供固定周期内的调用额度。可在下方套餐列表中使用账户余额自助开通。"
+        />
       ) : (
         <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
           {subs.map((s) => {
@@ -272,7 +269,7 @@ export default function Subscriptions() {
             return (
               <Card
                 key={s.id}
-                className="relative overflow-hidden group/card transition-all hover:shadow-lg border-amber-100 dark:border-amber-900/30 bg-amber-50/30 dark:bg-dark-900 flex flex-col"
+                className="relative overflow-hidden group/card transition-all border-border bg-card flex flex-col"
               >
                 <CardContent className="p-6 flex-1 flex flex-col">
                   <div className="flex justify-between items-start mb-6">
@@ -392,7 +389,7 @@ export default function Subscriptions() {
               return (
                 <Card
                   key={pkg.id}
-                  className="bg-gradient-to-br from-amber-50/50 to-orange-50/30 dark:from-amber-950/20 dark:to-orange-950/10 border-amber-100/50 dark:border-amber-900/20 shadow-sm transition-all hover:shadow-md flex flex-col"
+                  className="border-border bg-card transition-all hover:border-gray-300 dark:hover:border-dark-600 flex flex-col"
                 >
                   <CardContent className="p-5 flex flex-col flex-1">
                     <div className="flex items-start justify-between mb-4 gap-2">

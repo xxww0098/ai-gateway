@@ -4,8 +4,9 @@ import { toast } from 'sonner'
 import {
   RefreshCw, Search, ChevronLeft, ChevronRight,
   CheckCircle2, XCircle, Clock, AlertCircle,
-  Download
+  Download, ClipboardList
 } from 'lucide-react'
+import { EmptyStateRow } from '@/shared/components/EmptyState'
 
 interface PaymentOrder {
   id: number
@@ -141,11 +142,11 @@ export default function AdminOrders({ embedded = false }: AdminOrdersProps) {
         )}
         <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
           <span className="rounded-md border border-gray-200 dark:border-dark-600 bg-gray-50 dark:bg-dark-800 px-2 py-1 font-medium tabular-nums">
-            {loading ? '同步中...' : `${totalOrders} 笔订单`}
+            {loading ? '加载中...' : `${totalOrders} 笔订单`}
           </span>
           <button className="btn btn-secondary h-9 px-3 text-sm" onClick={handleExport}>
             <Download className="h-4 w-4" />
-            导出
+            导出 CSV
           </button>
         </div>
       </div>
@@ -194,7 +195,7 @@ export default function AdminOrders({ embedded = false }: AdminOrdersProps) {
         </div>
       </div>
 
-      <div className="glass-card overflow-hidden">
+      <div className="rounded-xl border border-border bg-card overflow-hidden">
         <div className="overflow-x-auto">
           <table className="table">
             <thead>
@@ -217,11 +218,23 @@ export default function AdminOrders({ embedded = false }: AdminOrdersProps) {
                   </td>
                 </tr>
               ) : orders.length === 0 ? (
-                <tr>
-                  <td colSpan={8} className="h-40 text-center text-gray-500">
-                    {debouncedSearch || filterStatus || filterProvider ? '无匹配结果，请调整筛选条件' : '暂无订单'}
-                  </td>
-                </tr>
+                debouncedSearch || filterStatus || filterProvider ? (
+                  <EmptyStateRow
+                    colSpan={8}
+                    tone="no-results"
+                    icon={ClipboardList}
+                    title="未找到匹配的订单"
+                    description="请尝试调整搜索关键词，或清除状态与渠道筛选条件。"
+                  />
+                ) : (
+                  <EmptyStateRow
+                    colSpan={8}
+                    tone="first-use"
+                    icon={ClipboardList}
+                    title="暂无充值订单"
+                    description="用户发起在线充值后将在此生成订单记录。系统核对到账后将自动为用户账户充值。"
+                  />
+                )
               ) : (
                 orders.map((o) => {
                   const sInfo = getStatusInfo(o.status)

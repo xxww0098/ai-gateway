@@ -27,19 +27,19 @@ export default function AdminCommercePage() {
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-7xl mx-auto">
       <div>
-        <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">交易</h2>
+        <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">交易管理</h2>
         <p className="text-gray-500 dark:text-dark-300 mt-1 text-sm">
-          支付订单与退款审核，一处处理资金单据。
+          集中处理全站用户的在线充值订单与订阅退款申请。
         </p>
       </div>
 
       <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
-        <TabsList className="grid h-auto w-full max-w-md grid-cols-2 gap-1 p-1 bg-gray-100/80 dark:bg-dark-800/80 rounded-xl">
+        <TabsList className="grid h-auto w-full max-w-md grid-cols-2 gap-1 p-1 bg-muted rounded-xl">
           {tabs.map((tab) => (
             <TabsTrigger
               key={tab.id}
               value={tab.id}
-              className="flex items-center justify-center gap-2 py-2.5 px-3 text-sm font-medium data-[state=active]:bg-white dark:data-[state=active]:bg-dark-700 data-[state=active]:shadow-sm rounded-lg"
+              className="flex items-center justify-center gap-2 py-2.5 px-3 text-sm font-medium data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs rounded-lg"
             >
               <tab.icon className="h-4 w-4" />
               {tab.label}

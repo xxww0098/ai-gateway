@@ -7,9 +7,14 @@ import { QueryStateWrapper } from '@/shared/components/QueryStateWrapper'
 import { toast } from 'sonner'
 import {
   Search, RefreshCw, Download,
-  ChevronLeft, ChevronRight, CheckCircle2, XCircle,
-  ArrowDownCircle, ArrowUpCircle, X, Info, Database, Brain
+  ChevronLeft, ChevronRight, X, Check, Copy,
 } from 'lucide-react'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/shared/components/ui/dialog'
 
 function fmtDuration(ms: number | null): string {
   if (ms == null) return '-'
@@ -54,91 +59,103 @@ function getDateRange(preset: DateRangePreset): { startDate: string; endDate: st
   return { startDate, endDate }
 }
 
-// Token detail tooltip
-interface TokenTooltipData { log: AdminUsageLog; x: number; y: number }
-
-function TokenTooltip({ data }: { data: TokenTooltipData }) {
-  const { log } = data
-  const totalTokens = log.input_tokens + log.output_tokens
+function StatusPill({ failed }: { failed: boolean }) {
   return (
-    <div className="fixed z-[9999] pointer-events-none" style={{ left: data.x + 12, top: data.y - 20 }}>
-      <div className="whitespace-nowrap rounded-xl border border-gray-700/80 bg-gray-900/95 backdrop-blur-xl px-4 py-3 text-xs text-white shadow-2xl min-w-[260px]">
-        <div className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-2">Token 明细</div>
-        <div className="space-y-1.5">
-          <div className="flex justify-between gap-6">
-            <span className="text-gray-400 flex items-center gap-1.5"><ArrowDownCircle className="w-3 h-3 text-emerald-400" /> 输入 Tokens</span>
-            <span className="font-medium text-white tabular-nums">{log.input_tokens.toLocaleString()}</span>
-          </div>
-          <div className="flex justify-between gap-6">
-            <span className="text-gray-400 flex items-center gap-1.5"><ArrowUpCircle className="w-3 h-3 text-violet-400" /> 输出 Tokens</span>
-            <span className="font-medium text-white tabular-nums">{log.output_tokens.toLocaleString()}</span>
-          </div>
-          {log.reasoning_tokens > 0 && (
-            <div className="flex justify-between gap-6">
-              <span className="text-gray-400 flex items-center gap-1.5"><Brain className="w-3 h-3 text-amber-400" /> 推理 Tokens</span>
-              <span className="font-medium text-amber-300 tabular-nums">{log.reasoning_tokens.toLocaleString()}</span>
-            </div>
-          )}
-          {log.cached_tokens > 0 && (
-            <div className="flex justify-between gap-6">
-              <span className="text-gray-400 flex items-center gap-1.5"><Database className="w-3 h-3 text-sky-400" /> 缓存命中</span>
-              <span className="font-medium text-sky-300 tabular-nums">{log.cached_tokens.toLocaleString()}</span>
-            </div>
-          )}
-          <div className="border-t border-gray-700 pt-1.5 flex justify-between gap-6">
-            <span className="text-gray-400">总 Tokens</span>
-            <span className="font-semibold text-blue-400 tabular-nums">{totalTokens.toLocaleString()}</span>
-          </div>
-          {log.cached_tokens > 0 && (
-            <div className="flex justify-between gap-6">
-              <span className="text-gray-400">缓存命中率</span>
-              <span className="font-semibold text-sky-400 tabular-nums">
-                {((log.cached_tokens / (log.input_tokens || 1)) * 100).toFixed(1)}%
-              </span>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${
+        failed
+          ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300'
+          : 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-300'
+      }`}
+    >
+      <span className={`h-1.5 w-1.5 rounded-full ${failed ? 'bg-red-500' : 'bg-emerald-500'}`} />
+      {failed ? '失败' : '成功'}
+    </span>
   )
 }
 
-// Cost tooltip
-interface CostTooltipData { log: AdminUsageLog; x: number; y: number }
+function AdminLogDetail({ log }: { log: AdminUsageLog }) {
+  const [copied, setCopied] = useState(false)
 
-function CostTooltip({ data }: { data: CostTooltipData }) {
-  const { log } = data
+  const copyRequestId = async () => {
+    await navigator.clipboard.writeText(log.request_id)
+    setCopied(true)
+    window.setTimeout(() => {
+      setCopied(false)
+    }, 1500)
+  }
+
   return (
-    <div className="fixed z-[9999] pointer-events-none" style={{ left: data.x + 12, top: data.y - 20 }}>
-      <div className="whitespace-nowrap rounded-xl border border-gray-700/80 bg-gray-900/95 backdrop-blur-xl px-4 py-3 text-xs text-white shadow-2xl min-w-[230px]">
-        <div className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-2">费用明细</div>
-        <div className="space-y-1.5">
-          {log.input_cost > 0 && (
-            <div className="flex justify-between gap-6">
-              <span className="text-gray-400">输入费用</span>
-              <span className="font-medium text-emerald-300 tabular-nums">{fmtCost(log.input_cost)}</span>
-            </div>
-          )}
-          {log.output_cost > 0 && (
-            <div className="flex justify-between gap-6">
-              <span className="text-gray-400">输出费用</span>
-              <span className="font-medium text-violet-300 tabular-nums">{fmtCost(log.output_cost)}</span>
-            </div>
-          )}
-          <div className="border-t border-gray-700 pt-1.5">
-            <div className="flex justify-between gap-6">
-              <span className="text-gray-400">标准费用</span>
-              <span className="font-medium text-white tabular-nums">{fmtCost(log.total_cost)}</span>
-            </div>
-            <div className="flex justify-between gap-6 mt-1">
-              <span className="text-gray-400">倍率</span>
-              <span className="font-semibold text-blue-400 tabular-nums">{log.rate_multiplier}x</span>
-            </div>
-            <div className="flex justify-between gap-6 mt-1 border-t border-gray-700 pt-1.5">
-              <span className="text-gray-400">实际扣费</span>
-              <span className="font-bold text-green-400 tabular-nums">{fmtCost(log.actual_cost)}</span>
-            </div>
+    <div className="space-y-4 text-sm">
+      <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs">
+        <span className="text-muted-foreground">用户</span>
+        <span className="truncate text-right" title={log.user_email}>{log.user_email || `UID:${log.user_id}`}</span>
+        <span className="text-muted-foreground">API Key</span>
+        <span className="truncate text-right">{log.api_key_name || `#${log.api_key_id}`}</span>
+        <span className="text-muted-foreground">模型</span>
+        <span className="break-all text-right font-mono">{log.model}</span>
+        <span className="text-muted-foreground">Provider</span>
+        <span className="text-right font-mono">{log.provider || '-'}</span>
+        <span className="text-muted-foreground">耗时</span>
+        <span className="text-right tabular-nums">{fmtDuration(log.duration_ms)} · {log.stream ? 'Stream' : 'Sync'}</span>
+        <span className="text-muted-foreground">时间</span>
+        <span className="text-right tabular-nums">{fmtDateTime(log.created_at)}</span>
+        <span className="text-muted-foreground">状态</span>
+        <span className="text-right"><StatusPill failed={log.failed} /></span>
+        <span className="self-center text-muted-foreground">请求 ID</span>
+        <span className="flex min-w-0 items-center justify-end gap-2">
+          <code className="truncate font-mono text-[11px]" title={log.request_id}>{log.request_id}</code>
+          <button
+            type="button"
+            onClick={() => void copyRequestId()}
+            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-border text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-label={copied ? '请求 ID 已复制' : '复制请求 ID'}
+          >
+            {copied ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+          </button>
+        </span>
+      </div>
+
+      <div className="rounded-lg border border-border p-3">
+        <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Tokens</div>
+        {[
+          ['输入', log.input_tokens],
+          ['输出', log.output_tokens],
+          ...(log.cached_tokens > 0 ? [['缓存', log.cached_tokens] as const] : []),
+          ...(log.reasoning_tokens > 0 ? [['推理', log.reasoning_tokens] as const] : []),
+        ].map(([label, value]) => (
+          <div key={label} className="flex justify-between gap-4 py-0.5">
+            <span className="text-muted-foreground">{label}</span>
+            <span className="tabular-nums">{value.toLocaleString()}</span>
           </div>
+        ))}
+      </div>
+
+      <div className="rounded-lg border border-border p-3">
+        <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">费用</div>
+        {log.input_cost > 0 && (
+          <div className="flex justify-between gap-4 py-0.5">
+            <span className="text-muted-foreground">输入</span>
+            <span className="tabular-nums">{fmtCost(log.input_cost)}</span>
+          </div>
+        )}
+        {log.output_cost > 0 && (
+          <div className="flex justify-between gap-4 py-0.5">
+            <span className="text-muted-foreground">输出</span>
+            <span className="tabular-nums">{fmtCost(log.output_cost)}</span>
+          </div>
+        )}
+        <div className="flex justify-between gap-4 py-0.5">
+          <span className="text-muted-foreground">倍率</span>
+          <span className="tabular-nums">{log.rate_multiplier}x</span>
+        </div>
+        <div className="flex justify-between gap-4 py-0.5">
+          <span className="text-muted-foreground">标准费用</span>
+          <span className="tabular-nums">{fmtCost(log.total_cost)}</span>
+        </div>
+        <div className="mt-1 flex justify-between gap-4 border-t border-border pt-2">
+          <span className="font-medium">实际扣费</span>
+          <span className="font-bold tabular-nums">{fmtCost(log.actual_cost)}</span>
         </div>
       </div>
     </div>
@@ -158,9 +175,7 @@ export default function AdminUsageLogs() {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(30)
 
-  // Tooltips
-  const [costTooltip, setCostTooltip] = useState<CostTooltipData | null>(null)
-  const [tokenTooltip, setTokenTooltip] = useState<TokenTooltipData | null>(null)
+  const [detail, setDetail] = useState<AdminUsageLog | null>(null)
 
   // Export state
   const [exporting, setExporting] = useState(false)
@@ -208,7 +223,7 @@ export default function AdminUsageLogs() {
           startDate,
           endDate,
         })
-        if (res?.items) allLogs.push(...res.items)
+        allLogs.push(...res.items)
       }
       const header = '时间,用户,API Key,模型,Provider,类型,输入Tokens,输出Tokens,推理Tokens,缓存Tokens,标准费用,实际扣费,倍率,耗时(ms),状态\n'
       const rows = allLogs.map(l => [
@@ -216,7 +231,7 @@ export default function AdminUsageLogs() {
         l.model, l.provider, l.stream ? 'Stream' : 'Sync',
         l.input_tokens, l.output_tokens, l.reasoning_tokens, l.cached_tokens,
         l.total_cost.toFixed(6), l.actual_cost.toFixed(6),
-        l.rate_multiplier, l.duration_ms ?? '', l.failed ? '失败' : '成功',
+        l.rate_multiplier, l.duration_ms, l.failed ? '失败' : '成功',
       ].join(',')).join('\n')
       const blob = new Blob(['\ufeff' + header + rows], { type: 'text/csv;charset=utf-8;' })
       const url = URL.createObjectURL(blob)
@@ -245,12 +260,12 @@ export default function AdminUsageLogs() {
             <label className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1 block">模型</label>
             <div className="relative">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
-              <input type="text" value={filterModel} onChange={e => setFilterModel(e.target.value)}
+              <input type="text" value={filterModel} onChange={e => { setFilterModel(e.target.value) }}
                 placeholder="搜索模型..." className="input h-9 text-sm pl-8"
                 onKeyDown={e => { if (e.key === 'Enter') handleFilter() }}
               />
               {filterModel && (
-                <button onClick={() => setFilterModel('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                <button onClick={() => { setFilterModel('') }} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
                   <X className="w-3.5 h-3.5" />
                 </button>
               )}
@@ -277,43 +292,53 @@ export default function AdminUsageLogs() {
             </div>
           </div>
           <div className="ml-auto flex items-center gap-2">
-            <button onClick={() => { invalidateUsageLogs(); refetch() }} disabled={loading} className="btn btn-secondary h-9 px-3 text-xs">
+            <button onClick={() => { invalidateUsageLogs(); void refetch() }} disabled={loading} className="btn btn-secondary h-9 px-3 text-xs">
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> 刷新
             </button>
-            <button onClick={handleExport} disabled={exporting || total === 0} className="btn btn-primary h-9 px-3 text-xs">
+            <button onClick={() => { void handleExport() }} disabled={exporting || total === 0} className="btn btn-primary h-9 px-3 text-xs">
               {exporting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-              CSV
+              {exporting ? '导出中...' : '导出 CSV'}
             </button>
           </div>
         </div>
       </div>
 
       {/* Table */}
-      <div className="glass-card overflow-hidden">
+      <div className="rounded-xl border border-border bg-card overflow-hidden">
         <QueryStateWrapper
           isLoading={loading}
           isEmpty={!loading && logs.length === 0}
-          onRetry={() => { invalidateUsageLogs(); refetch() }}
-          emptyMessage="暂无使用记录"
+          onRetry={() => { invalidateUsageLogs(); void refetch() }}
+          empty={{
+            tone: 'no-results',
+            title: '当前筛选条件下暂无调用记录',
+            description: '请尝试调整时间范围或清除筛选条件。全站 API 调用的 Token 消耗与计费数据将在此实时记录。',
+          }}
         >
         <div className="overflow-x-auto">
           <table className="table">
             <thead>
               <tr>
+                <th className="w-[120px]">时间</th>
                 <th className="w-[140px]">用户</th>
                 <th className="w-[90px]">API Key</th>
                 <th>模型</th>
-                <th className="w-[60px]">类型</th>
-                <th className="w-[220px]">Tokens</th>
-                <th className="w-[100px]">费用</th>
-                <th className="w-[70px]">耗时</th>
-                <th className="w-[120px]">时间</th>
-                <th className="w-[40px]">状态</th>
+                <th className="w-[180px]">Tokens</th>
+                <th className="w-[100px] text-right">实际扣费</th>
+                <th className="w-[100px]">耗时</th>
+                <th className="w-[84px]">状态</th>
               </tr>
             </thead>
             <tbody>
               {logs.map(log => (
-                <tr key={log.id} className="group">
+                <tr
+                  key={log.id}
+                  className="cursor-pointer hover:bg-muted/50"
+                  onClick={() => {
+                    setDetail(log)
+                  }}
+                >
+                  <td><span className="whitespace-nowrap text-sm text-muted-foreground tabular-nums">{fmtDateTime(log.created_at)}</span></td>
                   <td>
                     <span className="text-sm text-gray-900 dark:text-white truncate block max-w-[140px]" title={log.user_email}>
                       {log.user_email || `UID:${log.user_id}`}
@@ -333,59 +358,27 @@ export default function AdminUsageLogs() {
                     </div>
                   </td>
                   <td>
-                    <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-semibold ${
-                      log.stream ? 'bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400' : 'bg-gray-100 dark:bg-dark-800 text-gray-600 dark:text-gray-400'
-                    }`}>{log.stream ? 'Stream' : 'Sync'}</span>
-                  </td>
-                  <td>
-                    <div className="flex items-center gap-1">
-                      {/* Input/Output tokens */}
-                      <div className="flex items-center gap-1 text-sm">
-                        <ArrowDownCircle className="w-3 h-3 text-emerald-500 flex-shrink-0" />
-                        <span className="font-medium text-gray-900 dark:text-white tabular-nums">{fmtTokens(log.input_tokens)}</span>
-                        <ArrowUpCircle className="w-3 h-3 text-violet-500 flex-shrink-0 ml-0.5" />
-                        <span className="font-medium text-gray-900 dark:text-white tabular-nums">{fmtTokens(log.output_tokens)}</span>
+                    <div className="space-y-0.5">
+                      <div className="flex items-center gap-2 text-sm tabular-nums">
+                        <span className="font-medium">↓ {fmtTokens(log.input_tokens)}</span>
+                        <span className="font-medium">↑ {fmtTokens(log.output_tokens)}</span>
                       </div>
-                      {/* Cache & Reasoning badges */}
-                      {log.cached_tokens > 0 && (
-                        <span className="inline-flex items-center gap-0.5 rounded px-1 py-px text-[10px] font-semibold leading-tight bg-sky-100 text-sky-700 ring-1 ring-inset ring-sky-200 dark:bg-sky-500/20 dark:text-sky-300 dark:ring-sky-500/30 ml-0.5" title={`缓存命中 ${log.cached_tokens.toLocaleString()} tokens`}>
-                          <Database className="w-2.5 h-2.5" />
-                          {fmtTokens(log.cached_tokens)}
-                        </span>
+                      {(log.cached_tokens > 0 || log.reasoning_tokens > 0) && (
+                        <div className="flex gap-2 text-[11px] text-muted-foreground">
+                          {log.cached_tokens > 0 && <span>缓存 {fmtTokens(log.cached_tokens)}</span>}
+                          {log.reasoning_tokens > 0 && <span>推理 {fmtTokens(log.reasoning_tokens)}</span>}
+                        </div>
                       )}
-                      {log.reasoning_tokens > 0 && (
-                        <span className="inline-flex items-center gap-0.5 rounded px-1 py-px text-[10px] font-semibold leading-tight bg-amber-100 text-amber-700 ring-1 ring-inset ring-amber-200 dark:bg-amber-500/20 dark:text-amber-300 dark:ring-amber-500/30" title={`推理 ${log.reasoning_tokens.toLocaleString()} tokens`}>
-                          <Brain className="w-2.5 h-2.5" />
-                          {fmtTokens(log.reasoning_tokens)}
-                        </span>
-                      )}
-                      {/* Token detail icon */}
-                      <div
-                        className="flex h-4 w-4 cursor-help items-center justify-center rounded-full bg-gray-100 dark:bg-dark-800 opacity-0 group-hover:opacity-100 transition flex-shrink-0"
-                        onMouseEnter={e => setTokenTooltip({ log, x: e.clientX, y: e.clientY })}
-                        onMouseLeave={() => setTokenTooltip(null)}
-                      >
-                        <Info className="w-2.5 h-2.5 text-gray-400" />
-                      </div>
                     </div>
                   </td>
+                  <td className="text-right">
+                    <span className="font-semibold tabular-nums text-sm">{fmtCost(log.actual_cost)}</span>
+                  </td>
                   <td>
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-medium text-green-600 dark:text-green-400 tabular-nums text-sm">{fmtCost(log.actual_cost)}</span>
-                      <div
-                        className="flex h-4 w-4 cursor-help items-center justify-center rounded-full bg-gray-100 dark:bg-dark-800 opacity-0 group-hover:opacity-100 transition"
-                        onMouseEnter={e => setCostTooltip({ log, x: e.clientX, y: e.clientY })}
-                        onMouseLeave={() => setCostTooltip(null)}
-                      >
-                        <Info className="w-2.5 h-2.5 text-gray-400" />
-                      </div>
-                    </div>
+                    <div className="text-sm tabular-nums">{fmtDuration(log.duration_ms)}</div>
+                    <div className="text-[11px] text-muted-foreground">{log.stream ? 'Stream' : 'Sync'}</div>
                   </td>
-                  <td><span className="text-sm text-gray-500 tabular-nums">{fmtDuration(log.duration_ms)}</span></td>
-                  <td><span className="text-sm text-gray-500 tabular-nums">{fmtDateTime(log.created_at)}</span></td>
-                  <td className="text-center">
-                    {log.failed ? <XCircle className="w-4 h-4 text-red-500 inline-block" /> : <CheckCircle2 className="w-4 h-4 text-green-500 inline-block" />}
-                  </td>
+                  <td><StatusPill failed={log.failed} /></td>
                 </tr>
               ))}
             </tbody>
@@ -403,12 +396,12 @@ export default function AdminUsageLogs() {
               >
                 {[30, 50, 100].map(n => <option key={n} value={n}>{n} 条/页</option>)}
               </select>
-              <button disabled={page <= 1} onClick={() => handlePageChange(page - 1)}
+              <button disabled={page <= 1} onClick={() => { handlePageChange(page - 1) }}
                 className="h-8 w-8 rounded-lg border border-border bg-white dark:bg-dark-900 flex items-center justify-center disabled:opacity-30 transition-colors">
                 <ChevronLeft className="w-4 h-4" />
               </button>
               <span className="px-2 text-xs text-gray-500 tabular-nums">{page}/{totalPages}</span>
-              <button disabled={page >= totalPages} onClick={() => handlePageChange(page + 1)}
+              <button disabled={page >= totalPages} onClick={() => { handlePageChange(page + 1) }}
                 className="h-8 w-8 rounded-lg border border-border bg-white dark:bg-dark-900 flex items-center justify-center disabled:opacity-30 transition-colors">
                 <ChevronRight className="w-4 h-4" />
               </button>
@@ -417,8 +410,19 @@ export default function AdminUsageLogs() {
         )}
       </div>
 
-      {costTooltip && <CostTooltip data={costTooltip} />}
-      {tokenTooltip && <TokenTooltip data={tokenTooltip} />}
+      <Dialog
+        open={!!detail}
+        onOpenChange={(open) => {
+          if (!open) setDetail(null)
+        }}
+      >
+        <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>请求详情</DialogTitle>
+          </DialogHeader>
+          {detail && <AdminLogDetail log={detail} />}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

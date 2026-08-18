@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
-import { Button } from '@/shared/components/ui/button'
-import { Loader2, AlertCircle, Inbox } from 'lucide-react'
+import { Loader2, Inbox, AlertCircle } from 'lucide-react'
+import { EmptyState, type EmptyStateProps } from '@/shared/components/EmptyState'
 
 export interface QueryStateWrapperProps {
   /** Whether the query is currently loading */
@@ -11,7 +11,15 @@ export interface QueryStateWrapperProps {
   isEmpty?: boolean
   /** Callback to retry the failed query */
   onRetry?: () => void
-  /** Custom message for the empty state */
+  /**
+   * 完整的空状态描述：这里将出现什么、为什么值得填满它、现在该点哪。
+   * 优先于 `emptyMessage`。新代码一律用这个。
+   */
+  empty?: EmptyStateProps
+  /**
+   * 只给一行标题的简写。
+   * @deprecated 一行「暂无 XXX」是死胡同，用 `empty` 把下一步写清楚。
+   */
   emptyMessage?: string
   /** Custom message for the loading state */
   loadingMessage?: string
@@ -32,7 +40,8 @@ export function QueryStateWrapper({
   error,
   isEmpty,
   onRetry,
-  emptyMessage = '暂无数据',
+  empty,
+  emptyMessage,
   loadingMessage = '加载中...',
   children,
   className,
@@ -48,33 +57,25 @@ export function QueryStateWrapper({
 
   if (error) {
     return (
-      <div className={className ?? 'flex flex-col items-center justify-center py-16 gap-4'}>
-        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-destructive/10">
-          <AlertCircle className="h-6 w-6 text-destructive" />
-        </div>
-        <div className="text-center space-y-1">
-          <p className="text-sm font-medium text-foreground">加载失败</p>
-          <p className="text-xs text-muted-foreground max-w-sm">
-            {error.message || '请求异常，请稍后重试'}
-          </p>
-        </div>
-        {onRetry && (
-          <Button variant="outline" size="sm" onClick={onRetry}>
-            重试
-          </Button>
-        )}
-      </div>
+      <EmptyState
+        className={className}
+        tone="error"
+        icon={AlertCircle}
+        title="没能加载出来"
+        description={error.message || '请求异常。检查网络后重试，若持续失败请提交工单。'}
+        action={onRetry ? { label: '重试', onClick: onRetry } : undefined}
+      />
     )
   }
 
   if (isEmpty) {
     return (
-      <div className={className ?? 'flex flex-col items-center justify-center py-16 gap-3'}>
-        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
-          <Inbox className="h-6 w-6 text-muted-foreground" />
-        </div>
-        <p className="text-sm text-muted-foreground">{emptyMessage}</p>
-      </div>
+      <EmptyState
+        className={className}
+        icon={Inbox}
+        title={emptyMessage ?? '这里还是空的'}
+        {...empty}
+      />
     )
   }
 

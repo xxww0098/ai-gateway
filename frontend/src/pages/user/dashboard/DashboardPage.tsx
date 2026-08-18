@@ -3,6 +3,7 @@ import { useAuthStore } from '@/features/auth/auth_store'
 import type { IntegrationTab } from '@/features/user-dashboard/types'
 import { DashboardAnnouncements } from '@/features/user-dashboard/components/DashboardAnnouncements'
 import { AdminDashboardOverview } from '@/features/user-dashboard/components/AdminDashboardOverview'
+import { AdminSetupChecklist } from '@/features/user-dashboard/components/AdminSetupChecklist'
 import { AdminDashboardCharts } from '@/features/user-dashboard/components/AdminDashboardCharts'
 import { UserDashboardHero } from '@/features/user-dashboard/components/UserDashboardHero'
 import { UserDashboardCharts } from '@/features/user-dashboard/components/UserDashboardCharts'
@@ -34,6 +35,13 @@ export default function Dashboard() {
   const recentUsage = recentUsageQuery.data || []
   const announcements = announcementsQuery.data || []
 
+  const apiKeyCount = stats?.api_keys?.total || 0
+  const totalRequests = usageStats?.total_requests || 0
+  /** 一次都没调用成功过 —— 图表、最近调用、模型分布全都是空的，铺出来只是四个空盒子。 */
+  const isFirstRun = !isAdmin && totalRequests === 0
+  /** 新装的样子：除管理员外无人注册，窗口内也没有任何转发。 */
+  const adminLooksNew = isAdmin && (stats?.users?.total || 0) <= 1 && trendData.length === 0
+
   if (statsLoading) {
     return <DashboardSkeleton />
   }
@@ -45,6 +53,13 @@ export default function Dashboard() {
       {/* Admin Dashboard */}
       {isAdmin && (
         <>
+          {/* 除了管理员没有别人、窗口内也没有任何转发 —— 这台网关显然还没开张。可永久关掉。 */}
+          {adminLooksNew && (
+            <AdminSetupChecklist
+              userCount={stats?.users?.total || 0}
+              hasTraffic={trendData.length > 0}
+            />
+          )}
           <AdminDashboardOverview stats={stats} />
           <AdminDashboardCharts
             trendData={trendData}
@@ -59,20 +74,37 @@ export default function Dashboard() {
       {!isAdmin && (
         <div className="space-y-8">
           <UserDashboardHero email={user?.email} stats={stats} usageStats={usageStats} />
-          <UserDashboardCharts
-            trendData={trendData}
-            modelData={modelData}
-            trendDays={trendDays}
-            onTrendDaysChange={setTrendDays}
-          />
-          <div className="grid gap-6 lg:grid-cols-2">
-            <RecentUsageTable recentUsage={recentUsage} />
+
+          {/* 一次都还没调用过：不铺三张空图表，把整屏让给「跑通第一次调用」。
+              趋势、模型分布、最近调用会在有数据之后自己出现。 */}
+          {isFirstRun ? (
             <QuickIntegrationPanel
-              apiKeyCount={stats?.api_keys?.total || 0}
+              apiKeyCount={apiKeyCount}
+              totalRequests={totalRequests}
+              balance={stats?.balance}
               integrationTab={integrationTab}
               onIntegrationTabChange={setIntegrationTab}
             />
-          </div>
+          ) : (
+            <>
+              <UserDashboardCharts
+                trendData={trendData}
+                modelData={modelData}
+                trendDays={trendDays}
+                onTrendDaysChange={setTrendDays}
+              />
+              <div className="grid gap-6 lg:grid-cols-2">
+                <RecentUsageTable recentUsage={recentUsage} />
+                <QuickIntegrationPanel
+                  apiKeyCount={apiKeyCount}
+                  totalRequests={totalRequests}
+                  balance={stats?.balance}
+                  integrationTab={integrationTab}
+                  onIntegrationTabChange={setIntegrationTab}
+                />
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>

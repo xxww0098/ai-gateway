@@ -36,6 +36,7 @@ import {
   Search,
   AlertTriangle,
 } from "lucide-react"
+import { EmptyState } from "@/shared/components/EmptyState"
 
 interface RefundRecord {
   id: number
@@ -217,11 +218,13 @@ export default function AdminRefunds({ embedded = false }: AdminRefundsProps) {
               </TableRow>
             ) : records.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} className="h-32 text-center text-muted-foreground">
-                  <div className="flex flex-col items-center gap-2">
-                    <ArrowLeftRight className="w-8 h-8 text-gray-300 dark:text-gray-700" />
-                    <p>暂无退款记录</p>
-                  </div>
+                <TableCell colSpan={7} className="p-0">
+                  <EmptyState
+                    size="compact"
+                    icon={ArrowLeftRight}
+                    title="暂无退款申请"
+                    description="用户提交订阅退款申请后将在此处展示。管理员审核通过后将取消对应权益并退款至账户余额。"
+                  />
                 </TableCell>
               </TableRow>
             ) : (

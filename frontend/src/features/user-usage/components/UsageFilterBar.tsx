@@ -102,7 +102,7 @@ export const UsageFilterBar = memo(function UsageFilterBar({
             </button>
             <button onClick={onExport} disabled={exporting || total === 0} className="btn btn-primary h-9 px-3 text-xs">
               {exporting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-              {exporting ? '导出中...' : 'CSV'}
+              {exporting ? '导出中...' : '导出 CSV'}
             </button>
           </div>
         </div>

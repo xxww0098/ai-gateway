@@ -1,29 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%" fill="none">
-  <!-- Clean White Background -->
-  <rect width="512" height="512" rx="112" fill="#FFFFFF"/>
-  <rect x="2" y="2" width="508" height="508" rx="110" stroke="#E2E8F0" stroke-width="3" fill="none"/>
-
-  <!-- Outer Gateway Arc 'C' -->
-  <path d="M 360 152 A 148 148 0 1 0 360 360"
-        stroke="#0F172A"
-        stroke-width="26"
-        stroke-linecap="round"
-        stroke-linejoin="round"/>
-
-  <!-- Inner Concentric Stream Conduit -->
-  <path d="M 315 197 A 84 84 0 1 0 315 315"
-        stroke="#0D9488"
-        stroke-width="20"
-        stroke-linecap="round"
-        stroke-linejoin="round"/>
-
-  <!-- Central Precision Data Beam -->
-  <path d="M 180 256 L 275 256"
-        stroke="#0F172A"
-        stroke-width="18"
-        stroke-linecap="round"/>
-
-  <!-- Focal Core Node -->
-  <circle cx="308" cy="256" r="14" fill="#0D9488"/>
-  <circle cx="308" cy="256" r="6" fill="#FFFFFF"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none" role="img" aria-label="ai-gateway">
+  <defs>
+    <linearGradient id="gw-bg" x1="22%" y1="8%" x2="78%" y2="96%">
+      <stop offset="0%" stop-color="#14B887"/>
+      <stop offset="100%" stop-color="#0B8F68"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="114" fill="url(#gw-bg)"/>
+  <path d="M 373.02 351.42 A 146 146 0 1 1 373.02 148.58"
+        stroke="#F7FFFB" stroke-width="42" stroke-linecap="round"/>
+  <path d="M 328.42 308.35 A 84 84 0 1 1 328.42 191.65"
+        stroke="#F7FFFB" stroke-width="30" stroke-linecap="round"/>
+  <circle cx="352" cy="250" r="17" fill="#F7FFFB"/>
 </svg>

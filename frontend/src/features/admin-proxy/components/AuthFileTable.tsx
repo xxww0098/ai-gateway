@@ -4,6 +4,7 @@ import {
   Clock, MoreHorizontal, Play, Pause, AlertTriangle,
   FileJson, Activity, Download, Pencil
 } from 'lucide-react'
+import { EmptyStateRow } from '@/shared/components/EmptyState'
 import { resolveAuthFileIdentity } from '../authFileViewUtils'
 import type { AuthFileTableProps } from '../types'
 import { AuthProviderBrandIcon } from './AuthProviderBrandIcon'
@@ -85,16 +86,23 @@ export function AuthFileTable({
                 </td>
               </tr>
             ) : files.length === 0 ? (
-              <tr>
-                <td colSpan={8} className="h-40 text-center">
-                  <div className="space-y-2">
-                    <FileJson className="h-8 w-8 mx-auto text-gray-300 dark:text-dark-500" />
-                    <p className="text-sm text-gray-500 dark:text-dark-400">
-                      {totalCount === 0 ? '暂无凭证文件，请通过 OAuth 登录或手动导入' : '无匹配结果，请调整筛选条件'}
-                    </p>
-                  </div>
-                </td>
-              </tr>
+              totalCount === 0 ? (
+                <EmptyStateRow
+                  colSpan={8}
+                  tone="first-use"
+                  icon={FileJson}
+                  title="暂无凭证文件"
+                  description="凭证用于网关访问上游服务。支持通过 OAuth 授权自动生成或直接导入凭证文件。"
+                />
+              ) : (
+                <EmptyStateRow
+                  colSpan={8}
+                  tone="no-results"
+                  icon={FileJson}
+                  title="未找到匹配的凭证"
+                  description="请清除筛选条件以查看全部凭证文件。"
+                />
+              )
             ) : files.map((file, i) => {
               const si = stateInfo(file)
               const identity = resolveAuthFileIdentity(file)

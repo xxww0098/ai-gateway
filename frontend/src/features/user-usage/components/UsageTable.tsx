@@ -1,7 +1,7 @@
 import { memo, useState } from 'react'
 import {
   FileText, RefreshCw, ChevronLeft, ChevronRight,
-  ArrowDownCircle, ArrowUpCircle, CheckCircle2, XCircle, Info,
+  Check, Copy,
 } from 'lucide-react'
 import {
   Dialog,
@@ -9,6 +9,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/shared/components/ui/dialog'
+import { EmptyState, EmptyStateRow } from '@/shared/components/EmptyState'
 import type { UsageLog, UsageTableProps } from '../types'
 
 function fmtDuration(ms: number | null): string {
@@ -36,10 +37,35 @@ function fmtDateTime(iso: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
+function StatusPill({ failed }: { failed: boolean }) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${
+        failed
+          ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300'
+          : 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-300'
+      }`}
+    >
+      <span className={`h-1.5 w-1.5 rounded-full ${failed ? 'bg-red-500' : 'bg-emerald-500'}`} />
+      {failed ? '失败' : '成功'}
+    </span>
+  )
+}
+
 function LogDetailBody({ log }: { log: UsageLog }) {
+  const [copied, setCopied] = useState(false)
+
+  const copyRequestId = async () => {
+    await navigator.clipboard.writeText(log.request_id)
+    setCopied(true)
+    window.setTimeout(() => {
+      setCopied(false)
+    }, 1500)
+  }
+
   return (
     <div className="space-y-4 text-sm">
-      <div className="grid grid-cols-2 gap-2 text-xs">
+      <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs">
         <div className="text-muted-foreground">模型</div>
         <div className="font-mono text-right break-all">{log.model}</div>
         <div className="text-muted-foreground">Key</div>
@@ -51,32 +77,40 @@ function LogDetailBody({ log }: { log: UsageLog }) {
         <div className="text-muted-foreground">时间</div>
         <div className="text-right tabular-nums">{fmtDateTime(log.created_at)}</div>
         <div className="text-muted-foreground">状态</div>
-        <div className="text-right">{log.failed ? '失败' : '成功'}</div>
+        <div className="text-right"><StatusPill failed={log.failed} /></div>
+        <div className="self-center text-muted-foreground">请求 ID</div>
+        <div className="flex min-w-0 items-center justify-end gap-2">
+          <code className="truncate font-mono text-[11px]" title={log.request_id}>{log.request_id}</code>
+          <button
+            type="button"
+            onClick={() => void copyRequestId()}
+            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-border text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-label={copied ? '请求 ID 已复制' : '复制请求 ID'}
+          >
+            {copied ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+          </button>
+        </div>
       </div>
 
       <div className="rounded-lg border border-border p-3 space-y-2">
         <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Tokens</div>
         <div className="flex justify-between gap-4">
-          <span className="text-muted-foreground inline-flex items-center gap-1">
-            <ArrowDownCircle className="w-3.5 h-3.5 text-emerald-500" /> 输入
-          </span>
+          <span className="text-muted-foreground">输入</span>
           <span className="tabular-nums font-medium">{log.input_tokens.toLocaleString()}</span>
         </div>
         <div className="flex justify-between gap-4">
-          <span className="text-muted-foreground inline-flex items-center gap-1">
-            <ArrowUpCircle className="w-3.5 h-3.5 text-violet-500" /> 输出
-          </span>
+          <span className="text-muted-foreground">输出</span>
           <span className="tabular-nums font-medium">{log.output_tokens.toLocaleString()}</span>
         </div>
         {log.cached_tokens > 0 && (
-          <div className="flex justify-between gap-4 text-sky-600 dark:text-sky-400">
-            <span>缓存</span>
+          <div className="flex justify-between gap-4">
+            <span className="text-muted-foreground">缓存</span>
             <span className="tabular-nums">{fmtTokens(log.cached_tokens)}</span>
           </div>
         )}
         {log.reasoning_tokens > 0 && (
-          <div className="flex justify-between gap-4 text-amber-600 dark:text-amber-400">
-            <span>推理</span>
+          <div className="flex justify-between gap-4">
+            <span className="text-muted-foreground">推理</span>
             <span className="tabular-nums">{fmtTokens(log.reasoning_tokens)}</span>
           </div>
         )}
@@ -87,13 +121,13 @@ function LogDetailBody({ log }: { log: UsageLog }) {
         {log.input_cost > 0 && (
           <div className="flex justify-between gap-4">
             <span className="text-muted-foreground">输入</span>
-            <span className="tabular-nums text-emerald-600">{fmtCost(log.input_cost)}</span>
+            <span className="tabular-nums">{fmtCost(log.input_cost)}</span>
           </div>
         )}
         {log.output_cost > 0 && (
           <div className="flex justify-between gap-4">
             <span className="text-muted-foreground">输出</span>
-            <span className="tabular-nums text-violet-600">{fmtCost(log.output_cost)}</span>
+            <span className="tabular-nums">{fmtCost(log.output_cost)}</span>
           </div>
         )}
         <div className="flex justify-between gap-4">
@@ -106,9 +140,7 @@ function LogDetailBody({ log }: { log: UsageLog }) {
         </div>
         <div className="flex justify-between gap-4 border-t border-border pt-2">
           <span className="font-medium">实际扣费</span>
-          <span className="tabular-nums font-bold text-green-600 dark:text-green-400">
-            {fmtCost(log.actual_cost)}
-          </span>
+          <span className="tabular-nums font-bold">{fmtCost(log.actual_cost)}</span>
         </div>
       </div>
     </div>
@@ -154,7 +186,9 @@ function PaginationBar({
         <button
           type="button"
           disabled={page <= 1}
-          onClick={() => onPageChange(page - 1)}
+          onClick={() => {
+            onPageChange(page - 1)
+          }}
           className="h-9 w-9 rounded-lg border border-border bg-white dark:bg-dark-900 flex items-center justify-center disabled:opacity-30"
           aria-label="上一页"
         >
@@ -163,7 +197,9 @@ function PaginationBar({
         <button
           type="button"
           disabled={page >= totalPages}
-          onClick={() => onPageChange(page + 1)}
+          onClick={() => {
+            onPageChange(page + 1)
+          }}
           className="h-9 w-9 rounded-lg border border-border bg-white dark:bg-dark-900 flex items-center justify-center disabled:opacity-30"
           aria-label="下一页"
         >
@@ -183,16 +219,11 @@ export const UsageTable = memo(function UsageTable({
   totalPages,
   onPageChange,
   onPageSizeChange,
-  onCostTooltip,
-  onTokenTooltip,
 }: UsageTableProps) {
   const [detail, setDetail] = useState<UsageLog | null>(null)
 
   const openDetail = (log: UsageLog) => {
     setDetail(log)
-    // Clear floating tooltips if parent still mounts them
-    onCostTooltip(null)
-    onTokenTooltip(null)
   }
 
   return (
@@ -200,51 +231,51 @@ export const UsageTable = memo(function UsageTable({
       {/* Mobile cards */}
       <div className="md:hidden space-y-3">
         {loading ? (
-          <div className="glass-card flex h-32 items-center justify-center gap-2 text-gray-400 text-sm">
-            <RefreshCw className="w-4 h-4 animate-spin text-primary-500" />
+          <div className="rounded-xl border border-border bg-card flex h-32 items-center justify-center gap-2 text-muted-foreground text-sm">
+            <RefreshCw className="w-4 h-4 animate-spin text-primary" />
             加载中...
           </div>
         ) : logs.length === 0 ? (
-          <div className="glass-card flex h-32 flex-col items-center justify-center gap-2 text-gray-400 text-sm">
-            <FileText className="w-10 h-10 opacity-30" />
-            所选范围内暂无使用记录
-          </div>
+          <EmptyState
+            bordered
+            size="compact"
+            tone="no-results"
+            icon={FileText}
+            title="当前筛选条件下暂无调用记录"
+            description="请尝试调整时间范围或清除筛选条件。每次成功请求都会在此记录 Token 消耗与扣费明细。"
+          />
         ) : (
           logs.map((log) => (
             <button
               key={log.id}
               type="button"
-              onClick={() => openDetail(log)}
-              className="w-full text-left rounded-xl border border-border bg-white dark:bg-dark-900 p-3 shadow-sm active:bg-gray-50 dark:active:bg-dark-800 space-y-2"
+              onClick={() => {
+                openDetail(log)
+              }}
+              className="w-full space-y-2 rounded-xl border border-border bg-card p-3 text-left hover:bg-muted/40 active:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <div className="font-mono text-xs font-medium truncate">{log.model}</div>
                   <div className="text-[11px] text-muted-foreground mt-0.5">
-                    {log.api_key_name || '-'} · {log.stream ? 'Stream' : 'Sync'}
+                    {fmtDuration(log.duration_ms)} · {log.stream ? 'Stream' : 'Sync'}
                   </div>
                 </div>
-                {log.failed ? (
-                  <XCircle className="w-4 h-4 text-red-500 shrink-0" />
-                ) : (
-                  <CheckCircle2 className="w-4 h-4 text-green-500 shrink-0" />
-                )}
+                <StatusPill failed={log.failed} />
               </div>
               <div className="flex items-center justify-between text-sm">
                 <span className="tabular-nums text-muted-foreground">
                   ↓{fmtTokens(log.input_tokens)} ↑{fmtTokens(log.output_tokens)}
                 </span>
-                <span className="font-semibold tabular-nums text-green-600 dark:text-green-400">
+                <span className="font-semibold tabular-nums">
                   {fmtCost(log.actual_cost)}
                 </span>
               </div>
-              <div className="text-[11px] text-muted-foreground tabular-nums">
-                {fmtDateTime(log.created_at)} · {fmtDuration(log.duration_ms)}
-              </div>
+              <div className="text-[11px] text-muted-foreground tabular-nums">{fmtDateTime(log.created_at)}</div>
             </button>
           ))
         )}
-        <div className="glass-card overflow-hidden">
+        <div className="rounded-xl border border-border bg-card overflow-hidden">
           <PaginationBar
             total={total}
             page={page}
@@ -257,26 +288,24 @@ export const UsageTable = memo(function UsageTable({
       </div>
 
       {/* Desktop table */}
-      <div className="glass-card overflow-hidden hidden md:block">
+      <div className="rounded-xl border border-border bg-card overflow-hidden hidden md:block">
         <div className="overflow-x-auto">
           <table className="table">
             <thead>
               <tr>
+                <th className="w-[160px]">时间</th>
                 <th className="w-[120px]">API Key</th>
                 <th>模型</th>
-                <th className="w-[60px]">类型</th>
                 <th className="w-[180px]">Tokens</th>
-                <th className="w-[120px]">费用</th>
-                <th className="w-[80px]">耗时</th>
-                <th className="w-[160px]">时间</th>
-                <th className="w-[50px]">状态</th>
-                <th className="w-[44px]"></th>
+                <th className="w-[120px] text-right">实际扣费</th>
+                <th className="w-[100px]">耗时</th>
+                <th className="w-[84px]">状态</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={9} className="h-40 text-center">
+                  <td colSpan={7} className="h-40 text-center">
                     <div className="flex items-center justify-center gap-2 text-gray-400">
                       <RefreshCw className="w-4 h-4 animate-spin text-primary-500" />
                       加载中...
@@ -284,21 +313,27 @@ export const UsageTable = memo(function UsageTable({
                   </td>
                 </tr>
               ) : logs.length === 0 ? (
-                <tr>
-                  <td colSpan={9} className="h-40 text-center text-gray-400 dark:text-dark-500">
-                    <div className="flex flex-col items-center gap-2">
-                      <FileText className="w-10 h-10 opacity-30" />
-                      <span>所选范围内暂无使用记录</span>
-                    </div>
-                  </td>
-                </tr>
+                <EmptyStateRow
+                  colSpan={7}
+                  tone="no-results"
+                  icon={FileText}
+                  title="当前筛选条件下暂无调用记录"
+                  description="请尝试调整时间范围或清除筛选条件。每次成功请求都会在此记录 Token 消耗与扣费明细。"
+                />
               ) : (
                 logs.map((log) => (
                   <tr
                     key={log.id}
                     className="cursor-pointer hover:bg-gray-50 dark:hover:bg-dark-800/40"
-                    onClick={() => openDetail(log)}
+                    onClick={() => {
+                      openDetail(log)
+                    }}
                   >
+                    <td>
+                      <span className="text-sm text-muted-foreground tabular-nums whitespace-nowrap">
+                        {fmtDateTime(log.created_at)}
+                      </span>
+                    </td>
                     <td>
                       <span
                         className="text-sm font-medium text-gray-900 dark:text-white truncate block max-w-[120px]"
@@ -318,78 +353,34 @@ export const UsageTable = memo(function UsageTable({
                       )}
                     </td>
                     <td>
-                      <span
-                        className={`inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-semibold ${
-                          log.stream
-                            ? 'bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400'
-                            : 'bg-gray-100 dark:bg-dark-800 text-gray-600 dark:text-gray-400'
-                        }`}
-                      >
-                        {log.stream ? 'Stream' : 'Sync'}
-                      </span>
-                    </td>
-                    <td>
-                      <div className="flex items-center gap-1.5">
-                        <div className="space-y-0.5">
-                          <div className="flex items-center gap-2 text-sm">
-                            <div className="inline-flex items-center gap-0.5">
-                              <ArrowDownCircle className="w-3 h-3 text-emerald-500" />
-                              <span className="font-medium tabular-nums">{log.input_tokens.toLocaleString()}</span>
-                            </div>
-                            <div className="inline-flex items-center gap-0.5">
-                              <ArrowUpCircle className="w-3 h-3 text-violet-500" />
-                              <span className="font-medium tabular-nums">{log.output_tokens.toLocaleString()}</span>
-                            </div>
-                          </div>
+                      <div className="space-y-0.5">
+                        <div className="flex items-center gap-2 text-sm tabular-nums">
+                          <span className="font-medium">↓ {log.input_tokens.toLocaleString()}</span>
+                          <span className="font-medium">↑ {log.output_tokens.toLocaleString()}</span>
+                        </div>
                           {(log.cached_tokens > 0 || log.reasoning_tokens > 0) && (
-                            <div className="flex items-center gap-2 text-[11px]">
+                            <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
                               {log.cached_tokens > 0 && (
-                                <span className="text-sky-500 tabular-nums">缓存 {fmtTokens(log.cached_tokens)}</span>
+                                <span className="tabular-nums">缓存 {fmtTokens(log.cached_tokens)}</span>
                               )}
                               {log.reasoning_tokens > 0 && (
-                                <span className="text-amber-500 tabular-nums">
-                                  推理 {fmtTokens(log.reasoning_tokens)}
-                                </span>
+                                <span className="tabular-nums">推理 {fmtTokens(log.reasoning_tokens)}</span>
                               )}
                             </div>
                           )}
-                        </div>
                       </div>
                     </td>
-                    <td>
-                      <span className="font-medium text-green-600 dark:text-green-400 tabular-nums text-sm">
+                    <td className="text-right">
+                      <span className="font-semibold tabular-nums text-sm">
                         {fmtCost(log.actual_cost)}
                       </span>
                     </td>
                     <td>
-                      <span className="text-sm text-gray-500 dark:text-gray-400 tabular-nums">
-                        {fmtDuration(log.duration_ms)}
-                      </span>
+                      <div className="text-sm tabular-nums">{fmtDuration(log.duration_ms)}</div>
+                      <div className="text-[11px] text-muted-foreground">{log.stream ? 'Stream' : 'Sync'}</div>
                     </td>
                     <td>
-                      <span className="text-sm text-gray-500 dark:text-gray-400 tabular-nums">
-                        {fmtDateTime(log.created_at)}
-                      </span>
-                    </td>
-                    <td className="text-center">
-                      {log.failed ? (
-                        <XCircle className="w-4 h-4 text-red-500 inline-block" />
-                      ) : (
-                        <CheckCircle2 className="w-4 h-4 text-green-500 inline-block" />
-                      )}
-                    </td>
-                    <td>
-                      <button
-                        type="button"
-                        className="flex h-8 w-8 items-center justify-center rounded-full bg-gray-100 dark:bg-dark-800 hover:bg-primary-50 dark:hover:bg-primary-900/30"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          openDetail(log)
-                        }}
-                        aria-label="查看明细"
-                      >
-                        <Info className="w-3.5 h-3.5 text-gray-500" />
-                      </button>
+                      <StatusPill failed={log.failed} />
                     </td>
                   </tr>
                 ))
@@ -407,7 +398,12 @@ export const UsageTable = memo(function UsageTable({
         />
       </div>
 
-      <Dialog open={!!detail} onOpenChange={(o) => !o && setDetail(null)}>
+      <Dialog
+        open={!!detail}
+        onOpenChange={(open) => {
+          if (!open) setDetail(null)
+        }}
+      >
         <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-md">
           <DialogHeader>
             <DialogTitle>用量明细</DialogTitle>

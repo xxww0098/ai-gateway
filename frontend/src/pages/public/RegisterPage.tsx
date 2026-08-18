@@ -35,7 +35,7 @@ export default function Register() {
     <>
       <div className="text-center mb-8">
         <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">创建新账户</h2>
-        <p className="text-gray-500 dark:text-gray-400">加入平台，管理您的 API 服务</p>
+        <p className="text-gray-500 dark:text-gray-400">创建您的开发者账户</p>
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-5">
@@ -99,7 +99,7 @@ export default function Register() {
           className="btn btn-primary w-full mt-2"
         >
           {registerMutation.isPending ? (
-            <><Loader2 className="w-5 h-5 animate-spin mr-2" /> 提交中...</>
+            <><Loader2 className="w-5 h-5 animate-spin mr-2" /> 注册中...</>
           ) : (
             <>立即注册 <ArrowRight className="w-4 h-4 ml-1" /></>
           )}
@@ -107,9 +107,9 @@ export default function Register() {
       </form>
 
       <div className="mt-6 text-center text-sm text-gray-600 dark:text-gray-400">
-        已有账户?{' '}
+        已有账户？{' '}
         <Link to="/login" className="font-semibold text-primary-600 hover:text-primary-500 transition-colors">
-          返回登录
+          直接登录
         </Link>
       </div>
     </>

@@ -557,7 +557,7 @@ export function ProviderModelsDialog({
             <div className="min-h-0 flex-1 overflow-y-auto pr-1">
               {probeLoading ? renderLoading('正在向上游服务探测当前凭证可用模型...') :
                probeError ? renderError(probeError) :
-               probeModels.length === 0 ? renderEmpty('暂无发现任何模型支持或探测超时。') :
+               probeModels.length === 0 ? renderEmpty('没探测到任何模型。多半是凭证已失效、上游未授权，或这次探测超时了 —— 重新探测一次再看。') :
                filteredProbe.length === 0 ? renderEmpty(`没有匹配 "${search}" 的模型。`) : (
                 <div className="space-y-2">
                   {filteredProbe.map((entry) => renderModelRow(entry, 'probe'))}

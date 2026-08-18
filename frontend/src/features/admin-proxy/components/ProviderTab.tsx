@@ -9,13 +9,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/shared/components/ui/dialog'
-import { Loader2, RefreshCcw, Plus, Trash2, Globe, Search, Pencil, Activity } from 'lucide-react'
+import { Loader2, RefreshCcw, Plus, Trash2, Globe, Search, Pencil, Activity, KeyRound } from 'lucide-react'
 import { toast } from 'sonner'
 import { fetchProviderConfig, updateProviderConfig, fetchApiKeyUsage } from '../api'
 import { Input } from '@/shared/components/ui/input'
 import { Textarea } from '@/shared/components/ui/textarea'
 import { Switch } from '@/shared/components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/shared/components/ui/table'
+import { EmptyState } from '@/shared/components/EmptyState'
 import { cn } from '@/shared/utils/utils'
 import {
   buildProviderAddArray,
@@ -314,7 +315,15 @@ export function ProviderTab({ providerKind, endpoint, refreshSignal, onOpenModel
               </TableRow>
             ) : items.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={isOpenAI ? 6 : 5} className="h-24 text-center text-muted-foreground">暂无凭证</TableCell>
+                <TableCell colSpan={isOpenAI ? 6 : 5} className="p-0">
+                  <EmptyState
+                    size="compact"
+                    tone="first-use"
+                    icon={KeyRound}
+                    title="暂无上游凭证"
+                    description="添加 API 密钥或凭证后，发往该上游的请求将自动完成身份鉴权与多账号故障转移。"
+                  />
+                </TableCell>
               </TableRow>
             ) : (
               items.map((item) => (

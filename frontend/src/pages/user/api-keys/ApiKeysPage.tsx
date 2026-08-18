@@ -37,6 +37,9 @@ export default function Keys() {
         groupsLoading={groupsLoading}
         rebindingId={rebindingId}
         onRebindGroup={handleRebindGroup}
+        emptyAction={
+          <CreateApiKeyDialog onCreate={handleCreate} groups={groups} groupsLoading={groupsLoading} />
+        }
       />
 
       <NeedSubscriptionDialog

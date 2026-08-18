@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback } from "react"
-import { Link } from "react-router-dom"
 import { errorMessage, fetchApi } from "@/shared/api/client"
 import { Card, CardContent } from "@/shared/components/ui/card"
 import { Badge } from "@/shared/components/ui/badge"
@@ -7,6 +6,7 @@ import { Button } from "@/shared/components/ui/button"
 import { toast } from "sonner"
 import { ArrowLeftRight, Clock, CalendarDays, AlertCircle, CheckCircle2, XCircle } from "lucide-react"
 import { userRoutes } from "@/shared/routes/user"
+import { EmptyState } from "@/shared/components/EmptyState"
 
 interface RefundRecord {
   id: number
@@ -101,20 +101,13 @@ export default function Refunds() {
       </div>
 
       {records.length === 0 ? (
-        <Card className="border-dashed border-2 border-gray-200 dark:border-dark-700 bg-gray-50/30 dark:bg-dark-900/30">
-          <CardContent className="flex flex-col items-center justify-center py-16 text-center">
-            <div className="w-16 h-16 bg-gray-100 dark:bg-dark-800 rounded-full flex items-center justify-center mb-4">
-              <ArrowLeftRight className="w-8 h-8 text-gray-400" />
-            </div>
-            <h4 className="text-lg font-semibold text-gray-700 dark:text-gray-300 mb-2">暂无退款记录</h4>
-            <p className="text-sm text-gray-500 max-w-md mb-4">
-              您还没有提交过退订申请。
-            </p>
-            <Button asChild variant="outline" size="sm">
-              <Link to={userRoutes.subscriptions}>前往订阅</Link>
-            </Button>
-          </CardContent>
-        </Card>
+        <EmptyState
+          bordered
+          icon={ArrowLeftRight}
+          title="暂无退款申请记录"
+          description="提交订阅退款申请后，审核进度与退回金额将在此处展示。"
+          action={{ label: '前往我的订阅', to: userRoutes.subscriptions }}
+        />
       ) : (
         <div className="space-y-4">
           {records.map((r) => (

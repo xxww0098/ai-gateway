@@ -494,7 +494,7 @@ export default function AdminProxyOAuthPage() {
           const showManual = provider.manualCallbackMode !== 'none' && provider.key !== 'kiro'
 
           return (
-            <div key={provider.key} className="glass-card flex flex-col group overflow-hidden">
+            <div key={provider.key} className="rounded-xl border border-border bg-card flex flex-col group overflow-hidden">
               <div className="p-6 flex-1 flex flex-col">
                 <div className="flex items-center justify-between mb-4">
                   <div className="flex items-center gap-3">

@@ -8,6 +8,7 @@ import { Input } from "@/shared/components/ui/input"
 import { Tabs, TabsList, TabsTrigger } from "@/shared/components/ui/tabs"
 import { toast } from "sonner"
 import { ShieldAlert, RefreshCcw, Search } from "lucide-react"
+import { EmptyState } from "@/shared/components/EmptyState"
 
 type LogSource = "all" | "panel" | "sdk" | "balance"
 
@@ -96,10 +97,10 @@ export default function AdminAuditLogsPage() {
         <div>
           <h2 className="text-3xl font-bold tracking-tight text-foreground flex items-center gap-2">
             <ShieldAlert className="h-8 w-8 text-primary" />
-            系统操作日志
+            审计日志
           </h2>
           <p className="text-muted-foreground mt-1">
-            统一聚合面板操作、SDK /v1/* 调用与余额变动；管理员审计入口。
+            记录管理员操作、接口调用与资金变动流水，保障系统安全与可追溯性。
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={loadLogs} disabled={loading}>
@@ -108,7 +109,7 @@ export default function AdminAuditLogsPage() {
         </Button>
       </div>
 
-      <Card className="p-4 space-y-4">
+      <Card className="p-4 border-border bg-card">
         <div className="flex flex-col md:flex-row gap-4 items-stretch md:items-center justify-between">
           <Tabs value={source} onValueChange={(v) => { setSource(v as LogSource); setPage(1) }}>
             <TabsList>
@@ -133,7 +134,7 @@ export default function AdminAuditLogsPage() {
         </div>
       </Card>
 
-      <Card className="shadow-sm border-border overflow-hidden">
+      <Card className="border-border bg-card overflow-hidden">
         <Table>
           <TableHeader className="bg-secondary/50">
             <TableRow>
@@ -152,7 +153,14 @@ export default function AdminAuditLogsPage() {
               </TableRow>
             ) : logs.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6} className="h-32 text-center text-muted-foreground">暂无记录</TableCell>
+                <TableCell colSpan={6} className="p-0">
+                  <EmptyState
+                    size="compact"
+                    icon={ShieldAlert}
+                    title="暂无审计记录"
+                    description="管理员的价格调整、配额分配、凭证修改及资金变动均将在此实时记录。"
+                  />
+                </TableCell>
               </TableRow>
             ) : (
               logs.map((l) => (

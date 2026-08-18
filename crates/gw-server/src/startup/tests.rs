@@ -4,12 +4,20 @@ use super::*;
 fn an_empty_jwt_secret_boots_with_a_warning() {
     // The shipped config.example.yaml has `secret: ""`; refusing to boot on it
     // would break every dev/CI run.
-    assert_eq!(validate_jwt_secret(""), Ok(()));
+    assert_eq!(validate_jwt_secret_with("", false), Ok(()));
+}
+
+#[test]
+fn strict_mode_refuses_an_empty_jwt_secret() {
+    assert_eq!(
+        validate_jwt_secret_with("", true),
+        Err(StartupError::MissingJwtSecret)
+    );
 }
 
 #[test]
 fn a_short_jwt_secret_refuses_to_boot() {
-    let err = validate_jwt_secret("short").expect_err("5 bytes must be rejected");
+    let err = validate_jwt_secret_with("short", false).expect_err("5 bytes must be rejected");
     assert_eq!(
         err.to_string(),
         "auth.jwt.secret is too weak: 5 bytes, need at least 32"
@@ -19,8 +27,8 @@ fn a_short_jwt_secret_refuses_to_boot() {
 #[test]
 fn jwt_secret_acceptance_flips_exactly_at_the_hmac_key_size() {
     let boundary = "x".repeat(MIN_JWT_SECRET_BYTES);
-    assert!(validate_jwt_secret(&boundary).is_ok());
-    assert!(validate_jwt_secret(&boundary[..MIN_JWT_SECRET_BYTES - 1]).is_err());
+    assert!(validate_jwt_secret_with(&boundary, false).is_ok());
+    assert!(validate_jwt_secret_with(&boundary[..MIN_JWT_SECRET_BYTES - 1], false).is_err());
 }
 
 #[test]
@@ -30,7 +38,32 @@ fn jwt_secret_length_is_measured_in_bytes_not_characters() {
     let cjk = "密钥".repeat(8);
     assert_eq!(cjk.chars().count(), 16);
     assert!(cjk.len() >= MIN_JWT_SECRET_BYTES);
-    assert!(validate_jwt_secret(&cjk).is_ok());
+    assert!(validate_jwt_secret_with(&cjk, false).is_ok());
+}
+
+#[test]
+fn empty_cek_warns_only_when_jwt_is_also_empty() {
+    assert_eq!(
+        validate_credential_encryption_key_with("", "", false),
+        Ok(())
+    );
+}
+
+#[test]
+fn empty_cek_is_rejected_once_jwt_is_configured() {
+    let jwt = "x".repeat(MIN_JWT_SECRET_BYTES);
+    assert_eq!(
+        validate_credential_encryption_key_with("", &jwt, false),
+        Err(StartupError::MissingCredentialEncryptionKey)
+    );
+}
+
+#[test]
+fn strict_mode_rejects_empty_cek_even_without_jwt() {
+    assert_eq!(
+        validate_credential_encryption_key_with("", "", true),
+        Err(StartupError::MissingCredentialEncryptionKey)
+    );
 }
 
 #[test]

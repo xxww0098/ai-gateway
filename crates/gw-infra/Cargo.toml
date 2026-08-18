@@ -23,5 +23,4 @@ thiserror.workspace = true
 tracing = { workspace = true, features = ["std"] }
 dashmap.workspace = true
 parking_lot.workspace = true
-once_cell.workspace = true
 anyhow.workspace = true

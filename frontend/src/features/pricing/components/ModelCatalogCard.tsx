@@ -375,7 +375,7 @@ export function ModelCatalogCard({
   }, [model.id, onCopy])
 
   return (
-    <div className={`group relative rounded-xl border ${style.border} bg-white dark:bg-dark-900 p-4 transition-all hover:shadow-md dark:hover:shadow-dark-800/20`}>
+    <div className="group relative rounded-xl border border-border bg-card p-4 transition-all hover:border-gray-300 dark:hover:border-dark-600">
       <div className="mb-3 flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           <div className="mb-1 flex items-center gap-2">

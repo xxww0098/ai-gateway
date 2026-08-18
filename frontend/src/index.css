@@ -125,111 +125,95 @@
 @utility btn {
   @apply inline-flex items-center justify-center gap-2;
   @apply rounded-xl px-4 py-2.5 text-sm font-medium;
-  @apply transition-all duration-200 ease-out;
-  @apply focus:outline-hidden focus:ring-2 focus:ring-primary-500/50 focus:ring-offset-2;
+  @apply transition-all duration-150 ease-out;
+  @apply focus:outline-hidden focus:ring-1 focus:ring-ring focus:ring-offset-2;
   @apply disabled:transform-none disabled:cursor-not-allowed disabled:opacity-50;
   @apply active:scale-[0.98];
 }
 
 @utility btn-primary {
-  @apply bg-primary-600;
-  @apply text-white shadow-md shadow-primary-500/25;
-  @apply hover:bg-primary-700 hover:shadow-lg hover:shadow-primary-500/30;
-  @apply active:bg-primary-800;
-  @apply dark:shadow-primary-500/20;
+  @apply bg-primary text-primary-foreground;
+  @apply hover:bg-[#0d9488] active:bg-[#0f766e];
+  @apply shadow-none;
 }
 
 @utility btn-secondary {
   @apply bg-secondary text-secondary-foreground;
   @apply border border-border;
-  @apply shadow-xs hover:bg-secondary/80;
+  @apply hover:bg-secondary/80;
 }
 
 @utility btn-ghost {
-  @apply bg-transparent text-gray-600 dark:text-gray-300;
-  @apply hover:bg-muted dark:hover:bg-dark-800;
+  @apply bg-transparent text-muted-foreground;
+  @apply hover:bg-muted hover:text-foreground;
 }
 
 @utility btn-danger {
-  @apply bg-destructive text-destructive-foreground shadow-xs;
+  @apply bg-destructive text-destructive-foreground;
   @apply hover:bg-destructive/90;
 }
 
 @utility btn-success {
-  @apply bg-linear-to-r from-emerald-500 to-emerald-600;
-  @apply text-white shadow-md shadow-emerald-500/25;
-  @apply hover:from-emerald-600 hover:to-emerald-700 hover:shadow-lg hover:shadow-emerald-500/30;
-  @apply dark:shadow-emerald-500/20;
+  @apply bg-emerald-600 text-white;
+  @apply hover:bg-emerald-700 active:bg-emerald-800;
 }
 
 @utility btn-warning {
-  @apply bg-linear-to-r from-amber-500 to-amber-600;
-  @apply text-white shadow-md shadow-amber-500/25;
-  @apply hover:from-amber-600 hover:to-amber-700 hover:shadow-lg hover:shadow-amber-500/30;
-  @apply dark:shadow-amber-500/20;
+  @apply bg-amber-600 text-white;
+  @apply hover:bg-amber-700 active:bg-amber-800;
 }
 
 /* ============ INPUTS ============ */
 @utility input {
-  @apply w-full rounded-xl px-4 py-2.5 text-sm;
-  @apply bg-white dark:bg-dark-800;
-  @apply border border-gray-200 dark:border-dark-600;
-  @apply text-gray-900 dark:text-gray-100;
-  @apply placeholder:text-gray-400 dark:placeholder:text-dark-400;
-  @apply transition-all duration-200;
-  @apply focus:border-primary-500 focus:outline-hidden focus:ring-2 focus:ring-primary-500/30;
-  @apply disabled:cursor-not-allowed disabled:bg-gray-100 dark:disabled:bg-dark-900;
+  @apply w-full rounded-xl px-3.5 py-2 text-sm;
+  @apply bg-background;
+  @apply border border-border;
+  @apply text-foreground;
+  @apply placeholder:text-muted-foreground;
+  @apply transition-colors duration-150;
+  @apply focus:border-ring focus:outline-hidden focus:ring-1 focus:ring-ring;
+  @apply disabled:cursor-not-allowed disabled:opacity-50;
 }
 
 @utility input-label {
-  @apply mb-1.5 block text-sm font-medium text-gray-700 dark:text-gray-300;
+  @apply mb-1.5 block text-xs font-semibold uppercase tracking-wider text-muted-foreground;
 }
 
 @utility input-error {
-  @apply border-red-500 focus:border-red-500 focus:ring-red-500/30;
+  @apply border-destructive focus:border-destructive focus:ring-destructive/30;
 }
 
 @utility input-error-text {
-  @apply mt-1 text-xs text-red-500;
+  @apply mt-1 text-xs text-destructive;
 }
 
-/* ============ GLASS & CARDS ============ */
+/* ============ SURFACES & CARDS ============ */
 @utility glass {
-  @apply bg-white/80 backdrop-blur-xl dark:bg-dark-800/80;
+  @apply bg-background/95 backdrop-blur-md;
 }
 
 @utility glass-card {
-  @apply bg-white/70 dark:bg-dark-800/70;
-  @apply backdrop-blur-xl;
-  @apply rounded-2xl;
-  @apply border border-white/20 dark:border-dark-700/50;
-  @apply shadow-glass;
-  @apply transition-all duration-300;
+  @apply bg-card rounded-xl border border-border transition-colors;
 }
 
 @utility card {
-  @apply bg-white dark:bg-dark-800/50;
-  @apply rounded-2xl;
-  @apply border border-border;
-  @apply shadow-card;
-  @apply transition-all duration-300;
+  @apply bg-card rounded-xl border border-border transition-colors;
 }
 
 @utility card-hover {
-  @apply hover:-translate-y-0.5 hover:shadow-card-hover;
-  @apply hover:border-gray-200 dark:hover:border-dark-600;
+  @apply hover:-translate-y-px hover:border-gray-300 dark:hover:border-dark-600 transition-all;
 }
 
 /* ============ STAT CARDS ============ */
 @utility stat-card {
-  @apply card p-5;
+  @apply rounded-xl border border-border bg-card p-5;
   @apply flex items-start gap-4;
 }
 
 @utility stat-icon {
-  @apply h-12 w-12 rounded-xl;
+  @apply h-10 w-10 rounded-lg;
   @apply flex items-center justify-center;
-  @apply text-xl;
+  @apply text-muted-foreground bg-muted;
 }
 
 /* ============ TABLES ============ */
@@ -238,7 +222,7 @@
 }
 
 @utility text-gradient {
-  @apply bg-linear-to-r from-primary-500 to-accent-500 bg-clip-text text-transparent;
+  @apply text-primary font-bold;
 }
 
 @utility scrollbar-hide {
@@ -252,17 +236,17 @@
 /* Table element styles that can't be pure utilities (descendants) */
 @layer components {
   .table th {
-    @apply border-b border-border bg-gray-50 px-4 py-3 font-medium;
-    @apply text-gray-600 dark:bg-dark-800/50 dark:text-dark-300;
+    @apply border-b border-border bg-muted/40 px-4 py-3 font-medium;
+    @apply text-muted-foreground text-xs uppercase tracking-wider;
   }
 
   .table td {
     @apply border-b border-border/50 px-4 py-3;
-    @apply text-gray-700 dark:text-gray-300;
+    @apply text-foreground;
   }
 
   .table tbody tr {
     @apply transition-colors duration-150;
-    @apply hover:bg-gray-50/50 dark:hover:bg-dark-800/30;
+    @apply hover:bg-muted/30;
   }
 }

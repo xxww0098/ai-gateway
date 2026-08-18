@@ -1,6 +1,6 @@
 //! 迁移入口 —— 把既有 schema 推到最新版本。
 //!
-//! SQL 放在 `rust/migrations/`，由 [`MIGRATOR`] 在**编译期**嵌进二进制
+//! SQL 放在 `migrations/`，由 [`MIGRATOR`] 在**编译期**嵌进二进制
 //! （`sqlx::migrate!`），所以部署时不需要额外带 .sql 文件，文件名/版本号写错也是
 //! 编译错误而不是运行时错误。
 //!
@@ -12,7 +12,7 @@
 use sqlx::PgPool;
 use sqlx::migrate::{MigrateError, Migrator};
 
-/// `rust/migrations/*.sql` 的编译期快照。
+/// `migrations/*.sql` 的编译期快照。
 ///
 /// 版本号即文件名前缀（0001、0002…），已应用的版本记在 `_sqlx_migrations` 表里，
 /// 重复启动只会跑没跑过的那些。

@@ -18,7 +18,6 @@ url.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 tracing = { workspace = true, features = ["std"] }
-futures = { workspace = true, features = ["std", "async-await"] }
 futures-util = { workspace = true, features = ["std", "async-await"] }
 tokio = { workspace = true, features = ["rt", "macros", "time", "sync", "io-util"] }
 reqwest = { workspace = true, features = ["stream", "rustls-tls", "http2"] }

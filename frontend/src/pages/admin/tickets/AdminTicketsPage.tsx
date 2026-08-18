@@ -12,7 +12,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/shared/components/ui/select"
-import { ChevronLeft, ChevronRight, Send, Loader2, User, Shield } from "lucide-react"
+import { ChevronLeft, ChevronRight, Send, Loader2, User, Shield, MessageSquare, Ticket } from "lucide-react"
+import { EmptyState } from "@/shared/components/EmptyState"
 import { TicketRichContent } from "@/features/tickets/TicketRichContent"
 import {
   useAdminTickets,
@@ -247,7 +248,12 @@ const TicketChatPane = memo(function TicketChatPane({
         <div className="flex min-h-0 min-w-0 flex-1 flex-col lg:border-r border-border">
           <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
             {ticket.replies.length === 0 ? (
-              <p className="py-8 text-center text-xs text-gray-400 dark:text-dark-500">暂无回复</p>
+              <EmptyState
+                size="compact"
+                icon={MessageSquare}
+                title="暂无回复记录"
+                description="当前工单尚未进行任何回复。您可在下方输入内容并发送给用户。"
+              />
             ) : (
               ticket.replies.map((reply) => {
                 const isStaff = reply.is_staff
@@ -483,7 +489,12 @@ export default function AdminTickets() {
             {listBusy && tickets.length === 0 ? (
               <div className="px-3 py-8 text-center text-xs text-gray-400 dark:text-dark-500">加载中</div>
             ) : tickets.length === 0 ? (
-              <div className="px-3 py-8 text-center text-xs text-gray-400 dark:text-dark-500">暂无工单</div>
+              <EmptyState
+                size="compact"
+                icon={Ticket}
+                title="暂无工单"
+                description="用户提交工单后将按状态列出。可切换上方状态标签查看全部记录。"
+              />
             ) : (
               <ul>
                 {tickets.map((ticket) => {

@@ -42,12 +42,12 @@ export default function AdminSettings() {
       </div>
 
       <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
-        <TabsList className="grid h-auto w-full max-w-4xl grid-cols-2 gap-1 p-1 sm:grid-cols-3 lg:grid-cols-5 bg-gray-100/80 dark:bg-dark-800/80 rounded-xl">
+        <TabsList className="grid h-auto w-full max-w-4xl grid-cols-2 gap-1 p-1 sm:grid-cols-3 lg:grid-cols-5 bg-muted rounded-xl">
           {tabs.map(tab => (
             <TabsTrigger
               key={tab.id}
               value={tab.id}
-              className="flex items-center gap-2 py-2.5 px-3 text-sm font-medium data-[state=active]:bg-white dark:data-[state=active]:bg-dark-700 data-[state=active]:shadow-sm rounded-lg transition-all"
+              className="flex items-center gap-2 py-2.5 px-3 text-sm font-medium data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs rounded-lg transition-all"
             >
               <tab.icon className="h-4 w-4" />
               {tab.label}

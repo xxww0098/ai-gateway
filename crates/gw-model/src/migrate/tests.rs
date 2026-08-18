@@ -13,6 +13,23 @@ fn migrations_are_ordered_and_unique() {
         versions.windows(2).all(|w| w[0] < w[1]),
         "版本号必须严格递增：{versions:?}"
     );
+
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+    let mut on_disk: Vec<i64> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("读不到 {}: {e}", dir.display()))
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name().into_string().ok()?;
+            if !name.ends_with(".sql") {
+                return None;
+            }
+            name.split('_').next()?.parse().ok()
+        })
+        .collect();
+    on_disk.sort();
+    assert_eq!(
+        on_disk, versions,
+        "嵌进二进制的迁移必须和 migrations/*.sql 一一对应；对不上说明 cargo 没重编"
+    );
 }
 
 /// 这份迁移的硬要求：能直接跑在「已经建过表」的库上。

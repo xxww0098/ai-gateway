@@ -129,17 +129,22 @@ export function useUsageLogs(opts: UseUsageLogsOptions = {}) {
 export function useUserApiKeys() {
   const apiKeysQuery = useQuery({
     queryKey: queryKeys.apiKeys.list(),
-    queryFn: async () => {
-      const res = await fetchUserApiKeys()
-      // Backend may return array directly or { items: [...] }
+    queryFn: fetchUserApiKeys,
+    // 这个 key 与「API 密钥」页共用。命中缓存时本 hook 的 queryFn 不会跑，拿到的
+    // 是对端写进缓存的原始形态（分页对象 `{ items }` 而非数组）。所以归一化放在
+    // `select` 里 —— 它对缓存里的任意形态都会执行，保证消费方永远拿到数组，
+    // 否则 UsageFilterBar 的 `apiKeys.map` 会在拿到对象时崩溃。
+    select: (res): ApiKey[] => {
       if (Array.isArray(res)) return res
-      if (res && typeof res === 'object' && 'items' in res) return (res as { items: ApiKey[] }).items
+      if (res && typeof res === 'object' && 'items' in res) {
+        return (res as { items: ApiKey[] }).items
+      }
       return []
     },
   })
 
   return {
-    apiKeys: apiKeysQuery.data || [],
+    apiKeys: apiKeysQuery.data ?? [],
     loading: apiKeysQuery.isLoading,
   }
 }

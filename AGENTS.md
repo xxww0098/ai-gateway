@@ -114,9 +114,4 @@ GW_TEST_REDIS_URL=redis://127.0.0.1:6379 \
 留下的 `gw_*_test_*` 库属主是 `postgres`，`ai_gateway` 删不掉 —— 用 `postgres` 身份 `dropdb` 清掉即可。
 
 **当前状态**：`make lint`、`cargo test --workspace`（含 `--ignored` 全档）、`cargo xtask ci`、前端
-`npm run typecheck` / `npm test` / `npm run build` 全绿。
-
-**仍待处理的既存 bug（与环境无关，未在本次修复范围内）**：`GET /api/panel/admin/audit-logs`
-（`gw-panel/src/ops/audit_log.rs` 的 `fetch_panel`/`fetch_sdk`/`fetch_balance`）把日期过滤参数按 `text` 绑定，
-无过滤时也会让 Postgres 报 `operator does not exist: timestamp with time zone >= text`，导致列表接口 500。
-测试档未覆盖该路径。修法：把查询里第二处 `created_at >= $3` / `<= $4` 也显式写成 `$3::timestamptz` / `$4::timestamptz`。
+`npm run typecheck` / `npm test` / `npm run build` 全绿；面板登录后各页（含仪表盘/密钥/模型/用量/审计日志）均可正常渲染。

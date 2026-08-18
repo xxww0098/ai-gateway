@@ -407,8 +407,8 @@ async fn fetch_panel(
          FROM operation_logs \
          WHERE ($1::text IS NULL OR action = $1) \
            AND ($2::bigint IS NULL OR actor_id = $2) \
-           AND ($3::timestamptz IS NULL OR created_at >= $3) \
-           AND ($4::timestamptz IS NULL OR created_at <= $4) \
+           AND ($3::timestamptz IS NULL OR created_at >= $3::timestamptz) \
+           AND ($4::timestamptz IS NULL OR created_at <= $4::timestamptz) \
            AND ($5::text IS NULL OR action ILIKE $5 OR target ILIKE $5 OR actor_email ILIKE $5) \
          ORDER BY created_at DESC LIMIT $6",
     )
@@ -464,8 +464,8 @@ async fn fetch_sdk(
          FROM usage_logs \
          WHERE ($1::text IS NULL OR provider = $1) \
            AND ($2::bigint IS NULL OR user_id = $2) \
-           AND ($3::timestamptz IS NULL OR created_at >= $3) \
-           AND ($4::timestamptz IS NULL OR created_at <= $4) \
+           AND ($3::timestamptz IS NULL OR created_at >= $3::timestamptz) \
+           AND ($4::timestamptz IS NULL OR created_at <= $4::timestamptz) \
            AND ($5::text IS NULL OR model ILIKE $5 OR provider ILIKE $5 OR request_id ILIKE $5) \
          ORDER BY created_at DESC LIMIT $6",
     )
@@ -580,8 +580,8 @@ async fn fetch_balance(
          FROM balance_logs \
          WHERE ($1::text IS NULL OR type = $1) \
            AND ($2::bigint IS NULL OR user_id = $2) \
-           AND ($3::timestamptz IS NULL OR created_at >= $3) \
-           AND ($4::timestamptz IS NULL OR created_at <= $4) \
+           AND ($3::timestamptz IS NULL OR created_at >= $3::timestamptz) \
+           AND ($4::timestamptz IS NULL OR created_at <= $4::timestamptz) \
            AND ($5::text IS NULL OR type ILIKE $5 OR reference ILIKE $5) \
          ORDER BY created_at DESC LIMIT $6",
     )

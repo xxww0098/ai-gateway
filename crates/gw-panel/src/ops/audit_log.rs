@@ -64,7 +64,7 @@ struct AuditRow {
     target: Option<String>,
     method: Option<String>,
     path: Option<String>,
-    status_code: Option<i32>,
+    status_code: Option<i64>,
     ip_address: Option<String>,
     request_id: Option<String>,
     metadata: Option<String>,

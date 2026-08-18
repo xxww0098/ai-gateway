@@ -106,6 +106,18 @@ const INSERT_OPERATION_LOG: &str = "INSERT INTO operation_logs \
       status_code, ip_address, request_id, metadata, created_at, entry_hash) \
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)";
 
+/// 用 Postgres 自己把 `value` 归一化成它存进 `jsonb` 后 `::text` 会返回的字节。
+///
+/// 审计哈希必须覆盖这串字节，才能和 verify 侧读回的 `metadata::text` 对得上 ——
+/// serde 的紧凑序列化（键序、`":"` 无空格）跟 Postgres 的 jsonb 渲染不一致。
+async fn normalize_jsonb(pool: &sqlx::PgPool, value: &Value) -> Result<Vec<u8>, sqlx::Error> {
+    let text: String = sqlx::query_scalar("SELECT $1::jsonb::text")
+        .bind(value)
+        .fetch_one(pool)
+        .await?;
+    Ok(text.into_bytes())
+}
+
 /// 写一条面板操作审计。Ports `PanelRouter.recordOperation`。
 ///
 /// `actor` 传 `None` 表示尚未认证的事件（注册、登录失败）—— 旧实现在那里把
@@ -121,12 +133,26 @@ pub async fn record(
     status_code: i32,
     extras: Option<Value>,
 ) {
-    // 对应 `json.Marshal(extras)`，失败时把 Metadata 留成 nil。canonical 里参与
-    // 哈希的就是这串原始字节，所以先算出来再传给 entry_hash。
-    let metadata = extras
-        .as_ref()
-        .and_then(|v| serde_json::to_vec(v).ok())
-        .unwrap_or_default();
+    // metadata 落进 `jsonb` 后，Postgres 会重排键、重渲染空白；审计哈希覆盖的是
+    // 「列里最终存的字节」—— verify 读的正是 `metadata::text`。所以这里先让 Postgres
+    // 归一化一遍，再对归一化后的字节做 HMAC，否则任何带 metadata 的行经过一次 jsonb
+    // 往返就验不过（既有实现的 verify 同样读 `::text`，这样才能跨实现对上）。
+    let metadata = match extras.as_ref() {
+        Some(value) => match normalize_jsonb(&state.pg, value).await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                tracing::warn!(
+                    event = "operation_log_write_failed",
+                    action = action,
+                    target = target,
+                    error = %err,
+                    "record_operation_metadata_normalize_failed"
+                );
+                return;
+            }
+        },
+        None => Vec::new(),
+    };
 
     let entry = OperationEntry {
         source: SOURCE_PANEL.to_owned(),
@@ -137,7 +163,7 @@ pub async fn record(
         target: target.to_owned(),
         method: meta.method.clone(),
         path: meta.path.clone(),
-        status_code,
+        status_code: i64::from(status_code),
         ip_address: meta.ip_address.clone(),
         request_id: meta.request_id.clone(),
         metadata,
@@ -155,7 +181,7 @@ pub async fn record(
         .bind(&entry.target)
         .bind(&entry.method)
         .bind(&entry.path)
-        .bind(i64::from(entry.status_code))
+        .bind(entry.status_code)
         .bind(&entry.ip_address)
         .bind(&entry.request_id)
         .bind(extras)

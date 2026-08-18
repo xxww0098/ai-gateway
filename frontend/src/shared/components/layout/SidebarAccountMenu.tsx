@@ -52,7 +52,7 @@ export function SidebarAccountMenu({ collapsed, onNavigate }: SidebarAccountMenu
 
   const go = (path: string) => {
     onNavigate()
-    navigate(path)
+    void navigate(path)
   }
 
   const handleLogout = async () => {
@@ -64,7 +64,7 @@ export function SidebarAccountMenu({ collapsed, onNavigate }: SidebarAccountMenu
     logout()
     queryClient.clear()
     onNavigate()
-    navigate('/login')
+    void navigate('/login')
   }
 
   return (
@@ -117,33 +117,37 @@ export function SidebarAccountMenu({ collapsed, onNavigate }: SidebarAccountMenu
           <p className="text-xs text-muted-foreground">{roleLabel}</p>
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
-        <DropdownMenuItem className="cursor-pointer rounded-lg" onSelect={() => go(userRoutes.finance)}>
+        <DropdownMenuItem className="cursor-pointer rounded-lg" onSelect={() => { go(userRoutes.finance) }}>
           <Wallet />
           财务中心
         </DropdownMenuItem>
-        <DropdownMenuItem className="cursor-pointer rounded-lg" onSelect={() => go(userRoutes.tickets)}>
+        <DropdownMenuItem className="cursor-pointer rounded-lg" onSelect={() => { go(userRoutes.tickets) }}>
           <Ticket />
           我的工单
         </DropdownMenuItem>
-        <DropdownMenuItem className="cursor-pointer rounded-lg" onSelect={() => go(userRoutes.keys)}>
+        <DropdownMenuItem className="cursor-pointer rounded-lg" onSelect={() => { go(userRoutes.keys) }}>
           <Key />
           API 密钥
         </DropdownMenuItem>
         <DropdownMenuSeparator />
-        <DropdownMenuItem className="cursor-pointer rounded-lg" onSelect={() => go(docsRoutes.root)}>
+        <DropdownMenuItem className="cursor-pointer rounded-lg" onSelect={() => { go(docsRoutes.root) }}>
           <BookOpen />
           接入指南
         </DropdownMenuItem>
         <DropdownMenuItem
           className="cursor-pointer rounded-lg"
-          onSelect={() => setTheme(toggleTheme())}
+          onSelect={() => {
+            setTheme(toggleTheme())
+          }}
         >
           {theme === 'dark' ? <Sun className="text-amber-500" /> : <Moon />}
           {theme === 'dark' ? '亮色模式' : '暗色模式'}
         </DropdownMenuItem>
         <DropdownMenuItem
           className="hidden cursor-pointer rounded-lg lg:flex"
-          onSelect={() => toggleSidebar()}
+          onSelect={() => {
+            toggleSidebar()
+          }}
         >
           {sidebarCollapsed ? <PanelLeft /> : <PanelLeftClose />}
           {sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}

@@ -7,7 +7,7 @@ import { SidebarAccountMenu } from './SidebarAccountMenu'
 import { useAuthStore } from '@/features/auth/auth_store'
 import { userRoutes } from '@/shared/routes/user'
 
-const serverLogout = vi.fn(async () => ({ ok: true }))
+const serverLogout = vi.fn(() => Promise.resolve({ ok: true }))
 
 vi.mock('@/features/auth/api', () => ({
   logout: () => serverLogout(),
@@ -70,8 +70,8 @@ function triggerOf(container: HTMLElement): HTMLButtonElement {
   return btn
 }
 
-async function openMenu(trigger: HTMLElement) {
-  await act(async () => {
+function openMenu(trigger: HTMLElement) {
+  act(() => {
     trigger.dispatchEvent(
       new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse', button: 0 }),
     )
@@ -110,27 +110,27 @@ describe('SidebarAccountMenu', () => {
     expect(menuItems()).toHaveLength(0)
   })
 
-  it('opens a popup whose destinations include finance, tickets, keys, and docs', async () => {
+  it('opens a popup whose destinations include finance, tickets, keys, and docs', () => {
     const container = mount()
-    await openMenu(triggerOf(container))
+    openMenu(triggerOf(container))
 
     const menu = document.querySelector('[role="menu"]')
     expect(menu).not.toBeNull()
     expect(menu?.textContent).toContain(fixtureUser.email)
 
-    const labels = menuItems().map((el) => el.textContent ?? '')
+    const labels = menuItems().map((el) => el.textContent || '')
     expect(labels.some((t) => t.includes('财务'))).toBe(true)
     expect(labels.some((t) => t.includes('工单'))).toBe(true)
     expect(labels.some((t) => t.includes('密钥'))).toBe(true)
     expect(labels.some((t) => t.includes('接入'))).toBe(true)
   })
 
-  it('navigates to the finance route from the popup', async () => {
+  it('navigates to the finance route from the popup', () => {
     const container = mount()
-    await openMenu(triggerOf(container))
-    const finance = menuItems().find((el) => (el.textContent ?? '').includes('财务'))
+    openMenu(triggerOf(container))
+    const finance = menuItems().find((el) => (el.textContent || '').includes('财务'))
     expect(finance).toBeTruthy()
-    await act(async () => {
+    act(() => {
       finance?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }))
       finance?.click()
     })
@@ -139,8 +139,8 @@ describe('SidebarAccountMenu', () => {
 
   it('signs out through the popup and lands on login', async () => {
     const container = mount()
-    await openMenu(triggerOf(container))
-    const logoutItem = menuItems().find((el) => (el.textContent ?? '').includes('退出'))
+    openMenu(triggerOf(container))
+    const logoutItem = menuItems().find((el) => (el.textContent || '').includes('退出'))
     expect(logoutItem).toBeTruthy()
     await act(async () => {
       logoutItem?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }))

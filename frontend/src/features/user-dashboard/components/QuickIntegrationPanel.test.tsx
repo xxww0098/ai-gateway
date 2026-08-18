@@ -14,6 +14,7 @@ function renderPanel(tab: IntegrationTab): { container: HTMLDivElement; root: Ro
     root.render(
       createElement(QuickIntegrationPanel, {
         apiKeyCount: 1,
+        totalRequests: 0,
         integrationTab: tab,
         onIntegrationTabChange: () => {},
       }),

@@ -1,23 +1,19 @@
-import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { useQueryClient } from '@tanstack/react-query'
+import { Link, useLocation } from 'react-router-dom'
 import { useAuthStore } from '@/features/auth/auth_store'
-import { logout as serverLogout } from '@/features/auth/api'
 import { useAppStore } from '@/shared/store/app_store'
 import {
-  LayoutDashboard, Key, LogOut,
-  Settings, PanelLeftClose, PanelLeft,
-  Sun, Moon, Cpu, FileBarChart, Crown,
+  LayoutDashboard, Key,
+  Settings, Cpu, FileBarChart, Crown,
   ShoppingCart, Ticket, Wallet,
   Users, Network, CreditCard, BarChart3,
-  ClipboardList, ShieldAlert, BookOpen,
+  ClipboardList, ShieldAlert,
 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { cn } from '@/shared/utils/utils'
-import { currentTheme, toggleTheme, type Theme } from '@/shared/theme'
 import { adminRoutes } from '@/shared/routes/admin'
 import { userRoutes } from '@/shared/routes/user'
-import { docsRoutes } from '@/shared/routes/docs'
+import { SidebarAccountMenu } from './SidebarAccountMenu'
 
 type NavLinkItem = {
   label: string
@@ -28,18 +24,11 @@ type NavLinkItem = {
 }
 
 export function Sidebar() {
-  const logout = useAuthStore(s => s.logout)
   const user = useAuthStore(s => s.user)
-  const queryClient = useQueryClient()
   const sidebarCollapsed = useAppStore(s => s.sidebarCollapsed)
   const mobileOpen = useAppStore(s => s.mobileOpen)
   const setMobileOpen = useAppStore(s => s.setMobileOpen)
-  const toggleSidebar = useAppStore(s => s.toggleSidebar)
   const location = useLocation()
-  const navigate = useNavigate()
-  
-  const [theme, setTheme] = useState<Theme>(() => currentTheme())
-  const handleToggleTheme = () => setTheme(toggleTheme())
 
   // Lock body scroll while the mobile drawer is open
   useEffect(() => {
@@ -165,9 +154,6 @@ export function Sidebar() {
         : 'text-gray-400 dark:text-dark-500 group-hover:text-gray-600 dark:group-hover:text-dark-300'
     )
 
-  // Mobile drawer always shows labels; desktop respects sidebarCollapsed
-  const showLabels = !sidebarCollapsed
-
   return (
     <>
       <aside
@@ -276,55 +262,8 @@ export function Sidebar() {
           </div>
         </nav>
 
-        {/* Footer actions */}
-        <div className="p-2 border-t border-border flex flex-col gap-0.5">
-          <Link
-            to={docsRoutes.root}
-            onClick={handleLinkClick}
-            title={sidebarCollapsed ? '接入指南' : undefined}
-            className="flex min-h-11 items-center gap-2.5 rounded-xl px-2.5 py-2 text-sm font-medium text-gray-500 dark:text-dark-400 hover:bg-gray-50 dark:hover:bg-dark-800 hover:text-gray-700 dark:hover:text-white transition-colors w-full"
-          >
-            <BookOpen className="h-[18px] w-[18px] flex-shrink-0" />
-            <span className={cn(sidebarCollapsed && 'lg:hidden')}>接入指南</span>
-          </Link>
-          <button
-            type="button"
-            onClick={handleToggleTheme}
-            title={sidebarCollapsed ? (theme === 'dark' ? '亮色模式' : '暗色模式') : undefined}
-            className="flex min-h-11 items-center gap-2.5 rounded-xl px-2.5 py-2 text-sm font-medium text-gray-500 dark:text-dark-400 hover:bg-gray-50 dark:hover:bg-dark-800 hover:text-gray-700 dark:hover:text-white transition-colors w-full"
-          >
-            {theme === 'dark' ? <Sun className="h-[18px] w-[18px] text-amber-500" /> : <Moon className="h-[18px] w-[18px]" />}
-            <span className={cn(sidebarCollapsed && 'lg:hidden')}>{theme === 'dark' ? '亮色' : '暗色'}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={toggleSidebar}
-            title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
-            className="hidden lg:flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-sm font-medium text-gray-500 dark:text-dark-400 hover:bg-gray-50 dark:hover:bg-dark-800 hover:text-gray-700 dark:hover:text-white transition-colors w-full"
-          >
-            {sidebarCollapsed ? <PanelLeft className="h-[18px] w-[18px]" /> : <PanelLeftClose className="h-[18px] w-[18px]" />}
-            {showLabels && <span>收起</span>}
-          </button>
-
-          <button
-            type="button"
-            onClick={async () => {
-              try {
-                await serverLogout()
-              } catch {
-                /* ignore */
-              }
-              logout()
-              queryClient.clear()
-              navigate('/login')
-            }}
-            title={sidebarCollapsed ? '退出登录' : undefined}
-            className="flex min-h-11 items-center gap-2.5 rounded-xl px-2.5 py-2 text-sm font-medium text-gray-400 dark:text-dark-500 hover:bg-red-50 dark:hover:bg-red-900/20 hover:text-red-600 dark:hover:text-red-400 transition-colors w-full"
-          >
-            <LogOut className="h-[18px] w-[18px] flex-shrink-0" />
-            <span className={cn(sidebarCollapsed && 'lg:hidden')}>退出</span>
-          </button>
+        <div className="p-2 border-t border-border">
+          <SidebarAccountMenu collapsed={sidebarCollapsed} onNavigate={handleLinkClick} />
         </div>
       </aside>
 

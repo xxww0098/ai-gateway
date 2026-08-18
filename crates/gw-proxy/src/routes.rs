@@ -746,20 +746,20 @@ pub(crate) fn model_json(model: &crate::ports::ModelEntry) -> serde_json::Value 
     if !model.input_modalities.is_empty() {
         value["input_modalities"] = serde_json::json!(model.input_modalities);
     }
-    if let Some(reasoning) = &model.reasoning {
-        if !reasoning.efforts.is_empty() {
-            let mut body = serde_json::json!({
-                "efforts": reasoning
-                    .efforts
-                    .iter()
-                    .map(|e| serde_json::json!({ "id": e.id, "name": e.name }))
-                    .collect::<Vec<_>>(),
-            });
-            if let Some(default_effort) = &reasoning.default_effort {
-                body["default_effort"] = serde_json::json!(default_effort);
-            }
-            value["reasoning"] = body;
+    if let Some(reasoning) = &model.reasoning
+        && !reasoning.efforts.is_empty()
+    {
+        let mut body = serde_json::json!({
+            "efforts": reasoning
+                .efforts
+                .iter()
+                .map(|e| serde_json::json!({ "id": e.id, "name": e.name }))
+                .collect::<Vec<_>>(),
+        });
+        if let Some(default_effort) = &reasoning.default_effort {
+            body["default_effort"] = serde_json::json!(default_effort);
         }
+        value["reasoning"] = body;
     }
     value
 }

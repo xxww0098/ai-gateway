@@ -155,15 +155,15 @@ pub(crate) fn apply_capabilities(entry: &mut ModelEntry, raw: Option<&serde_json
     let Some(value) = raw else {
         return;
     };
-    if let Some(n) = value.get("context_length").and_then(serde_json::Value::as_i64) {
-        if n > 0 {
-            entry.context_length = Some(n);
-        }
+    if let Some(n) = value.get("context_length").and_then(serde_json::Value::as_i64)
+        && n > 0
+    {
+        entry.context_length = Some(n);
     }
-    if let Some(n) = value.get("max_output_tokens").and_then(serde_json::Value::as_i64) {
-        if n > 0 {
-            entry.max_output_tokens = Some(n);
-        }
+    if let Some(n) = value.get("max_output_tokens").and_then(serde_json::Value::as_i64)
+        && n > 0
+    {
+        entry.max_output_tokens = Some(n);
     }
     if let Some(arr) = value.get("input_modalities").and_then(serde_json::Value::as_array) {
         entry.input_modalities = arr

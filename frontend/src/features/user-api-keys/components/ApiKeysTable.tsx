@@ -1,3 +1,4 @@
+import type { ReactNode } from "react"
 import { Copy, Check, Trash2, MoreHorizontal } from "lucide-react"
 import { Button } from "@/shared/components/ui/button"
 import {
@@ -32,6 +33,8 @@ interface Props {
   groupsLoading: boolean
   rebindingId: number | null
   onRebindGroup: (keyId: number, groupId: number | null) => void
+  /** 空状态下的下一步动作（通常是「新建密钥」对话框），无则只显示文案。 */
+  emptyAction?: ReactNode
 }
 
 export function ApiKeysTable({
@@ -44,6 +47,7 @@ export function ApiKeysTable({
   groupsLoading,
   rebindingId,
   onRebindGroup,
+  emptyAction,
 }: Props) {
   if (loading) {
     return (
@@ -56,8 +60,9 @@ export function ApiKeysTable({
 
   if (keys.length === 0) {
     return (
-      <div className="glass-card flex h-32 items-center justify-center text-gray-500 text-sm">
-        您还没有创建任何 API Key，请点击上方按钮新建。
+      <div className="glass-card flex h-32 flex-col items-center justify-center gap-3 text-gray-500 text-sm">
+        <span>您还没有创建任何 API Key，请点击下方按钮新建。</span>
+        {emptyAction}
       </div>
     )
   }

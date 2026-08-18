@@ -35,7 +35,8 @@ fn entry(action: &str, target: &str, metadata: Option<Value>) -> OperationEntry 
         status_code: 200,
         ip_address: "10.0.0.1".to_owned(),
         request_id: "trace-1".to_owned(),
-        // 与 handler 侧一致：先编成字节再哈希。
+        // 原始 metadata 字节，仅用于决定「有没有 metadata」并绑定入库；真正参与
+        // 哈希的是 Postgres 归一化后的 `::text`（见 `insert`）。
         metadata: metadata
             .as_ref()
             .map(|value| value.to_string().into_bytes())
@@ -67,7 +68,7 @@ async fn insert(pool: &PgPool, entry: &OperationEntry, hash_key: Option<&[u8]>) 
     .bind(&entry.target)
     .bind(&entry.method)
     .bind(&entry.path)
-    .bind(i64::from(entry.status_code))
+    .bind(entry.status_code)
     .bind(&entry.ip_address)
     .bind(&entry.request_id)
     .bind(&metadata)

@@ -252,3 +252,29 @@ fn a_blank_parameter_is_the_same_as_an_absent_one() {
     assert_eq!(non_empty(Some(&" gpt-4o ".to_owned())), Some("gpt-4o"));
     assert_eq!(non_empty(None), None);
 }
+
+/// sqlx types a `None::<&str>` date bind as `text`. Comparing that to
+/// `created_at::date` without a cast is `date >= text` and 500s the empty
+/// admin usage page. This query is the production filter with no values set.
+#[tokio::test]
+#[ignore = "needs a local Postgres: set GW_TEST_DATABASE_URL"]
+async fn an_unfiltered_usage_count_type_checks_when_date_binds_are_null() {
+    let url = std::env::var("GW_TEST_DATABASE_URL").expect(
+        "连库集成测试需要 GW_TEST_DATABASE_URL，例如：\n  \
+         GW_TEST_DATABASE_URL=postgres://ai_gateway:agw_dev_password@127.0.0.1:5432/ai_gateway",
+    );
+    let pool = sqlx::PgPool::connect(&url)
+        .await
+        .expect("连不上 GW_TEST_DATABASE_URL 指向的库");
+    let total: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM usage_logs WHERE {USAGE_LOG_FILTER}"
+    ))
+    .bind(None::<&str>)
+    .bind(None::<bool>)
+    .bind(None::<&str>)
+    .bind(None::<&str>)
+    .fetch_one(&pool)
+    .await
+    .expect("NULL date binds must compare as date, not text");
+    assert!(total >= 0);
+}

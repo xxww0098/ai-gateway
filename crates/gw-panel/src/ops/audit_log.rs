@@ -401,14 +401,17 @@ async fn fetch_panel(
     like: Option<&str>,
     limit: i64,
 ) -> Result<Vec<AuditLogEntry>, sqlx::Error> {
+    // Date binds are `&str`. Postgres types an unbound `$3` as `text`, so
+    // `created_at >= $3` is `timestamptz >= text` and 500s even when the bind
+    // is NULL — the `OR` is still type-checked. Cast both sides.
     let rows: Vec<PanelLogRow> = sqlx::query_as(
         "SELECT id, actor_id, actor_email, action, target, method, path, status_code, \
           ip_address, request_id, metadata, created_at \
          FROM operation_logs \
          WHERE ($1::text IS NULL OR action = $1) \
            AND ($2::bigint IS NULL OR actor_id = $2) \
-           AND ($3::timestamptz IS NULL OR created_at >= $3) \
-           AND ($4::timestamptz IS NULL OR created_at <= $4) \
+           AND ($3::timestamptz IS NULL OR created_at >= $3::timestamptz) \
+           AND ($4::timestamptz IS NULL OR created_at <= $4::timestamptz) \
            AND ($5::text IS NULL OR action ILIKE $5 OR target ILIKE $5 OR actor_email ILIKE $5) \
          ORDER BY created_at DESC LIMIT $6",
     )
@@ -464,8 +467,8 @@ async fn fetch_sdk(
          FROM usage_logs \
          WHERE ($1::text IS NULL OR provider = $1) \
            AND ($2::bigint IS NULL OR user_id = $2) \
-           AND ($3::timestamptz IS NULL OR created_at >= $3) \
-           AND ($4::timestamptz IS NULL OR created_at <= $4) \
+           AND ($3::timestamptz IS NULL OR created_at >= $3::timestamptz) \
+           AND ($4::timestamptz IS NULL OR created_at <= $4::timestamptz) \
            AND ($5::text IS NULL OR model ILIKE $5 OR provider ILIKE $5 OR request_id ILIKE $5) \
          ORDER BY created_at DESC LIMIT $6",
     )
@@ -580,8 +583,8 @@ async fn fetch_balance(
          FROM balance_logs \
          WHERE ($1::text IS NULL OR type = $1) \
            AND ($2::bigint IS NULL OR user_id = $2) \
-           AND ($3::timestamptz IS NULL OR created_at >= $3) \
-           AND ($4::timestamptz IS NULL OR created_at <= $4) \
+           AND ($3::timestamptz IS NULL OR created_at >= $3::timestamptz) \
+           AND ($4::timestamptz IS NULL OR created_at <= $4::timestamptz) \
            AND ($5::text IS NULL OR type ILIKE $5 OR reference ILIKE $5) \
          ORDER BY created_at DESC LIMIT $6",
     )

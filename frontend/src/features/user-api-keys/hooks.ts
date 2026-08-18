@@ -55,13 +55,18 @@ export function useApiKeys() {
     qc.invalidateQueries({ queryKey: queryKeys.apiKeys.all() })
   }
 
-  const handleCreate = async (form: CreateKeyForm, onSuccess: () => void) => {
+  const handleCreate = async (form: CreateKeyForm, onSuccess: (plaintext: string) => void) => {
     if (!form.name.trim()) return
     try {
       const payload = buildCreatePayload(form)
-      await createApiKey(payload)
+      const created = await createApiKey(payload)
+      if (!created.key) {
+        toast.error("密钥已创建，但响应里没有明文，无法再次查看")
+        invalidateKeys()
+        return
+      }
       toast.success("成功创建 API Key")
-      onSuccess()
+      onSuccess(created.key)
       invalidateKeys()
     } catch (err: unknown) {
       if (isSubscriptionRequiredError(err)) {

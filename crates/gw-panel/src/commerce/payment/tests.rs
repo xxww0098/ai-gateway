@@ -142,6 +142,16 @@ fn order_record_carries_the_twelve_keys_the_orders_table_reads() {
 }
 
 #[test]
+fn a_user_order_list_ignores_query_user_id() {
+    // 性质：即使用户在 query 里塞了别人的 id，绑定的仍是登录身份。
+    // 管理员列表才认 ?user_id=；0 是「不过滤」哨兵，用户路径碰不得。
+    assert_eq!(own_orders_user_id(7, Some("99")), 7);
+    assert_eq!(own_orders_user_id(7, None), 7);
+    assert_eq!(own_orders_user_id(7, Some("0")), 7);
+    assert_ne!(own_orders_user_id(7, Some("0")), UNSCOPED_USER_ID);
+}
+
+#[test]
 fn local_currency_conversion_is_proportional() {
     // 性质：本币金额与美元金额成正比，且 0 映射到 0。不断言 7.2 本身
     // （那是抄源码），只钉住"它是一个正的线性换算"。

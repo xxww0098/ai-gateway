@@ -1,10 +1,10 @@
 import { useState } from "react"
 import * as DialogPrimitive from "@radix-ui/react-dialog"
-import { Plus, X, ChevronDown } from "lucide-react"
+import { Plus, X, ChevronDown, Copy, Check } from "lucide-react"
 import type { CreateKeyForm, AvailableGroup } from "../types"
 
 interface Props {
-  onCreate: (form: CreateKeyForm, onSuccess: () => void) => Promise<void>
+  onCreate: (form: CreateKeyForm, onSuccess: (plaintext: string) => void) => Promise<void>
   groups: AvailableGroup[]
   groupsLoading: boolean
 }
@@ -24,6 +24,8 @@ export function CreateApiKeyDialog({ onCreate, groups, groupsLoading }: Props) {
   const [rate7d, setRate7d] = useState("")
   const [rate30d, setRate30d] = useState("")
   const [creating, setCreating] = useState(false)
+  const [createdKey, setCreatedKey] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
 
   // Group selector state
   const [selectedGroupId, setSelectedGroupId] = useState<string>("")
@@ -44,6 +46,8 @@ export function CreateApiKeyDialog({ onCreate, groups, groupsLoading }: Props) {
     setExpirationMode("permanent")
     setSelectedPresetDays(null)
     setCustomDays("")
+    setCreatedKey(null)
+    setCopied(false)
   }
 
   const getExpiresInDays = (): number | null | undefined => {
@@ -75,9 +79,8 @@ export function CreateApiKeyDialog({ onCreate, groups, groupsLoading }: Props) {
       if (expiresInDays !== undefined) {
         form.expires_in_days = expiresInDays
       }
-      await onCreate(form, () => {
-        setOpen(false)
-        resetForm()
+      await onCreate(form, (plaintext) => {
+        setCreatedKey(plaintext)
       })
     } finally {
       setCreating(false)
@@ -87,7 +90,13 @@ export function CreateApiKeyDialog({ onCreate, groups, groupsLoading }: Props) {
   const selectedGroup = groups.find((g) => String(g.id) === selectedGroupId)
 
   return (
-    <DialogPrimitive.Root open={open} onOpenChange={setOpen}>
+    <DialogPrimitive.Root
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next)
+        if (!next) resetForm()
+      }}
+    >
       <DialogPrimitive.Trigger asChild>
         <button className="btn btn-primary px-5 shadow-glow">
           <Plus className="h-4 w-4" />
@@ -103,6 +112,40 @@ export function CreateApiKeyDialog({ onCreate, groups, groupsLoading }: Props) {
               为这个 Key 命名，这有助于您区分它的用途。
             </DialogPrimitive.Description>
           </div>
+          {createdKey ? (
+            <div className="space-y-4">
+              <p className="text-sm text-amber-700 dark:text-amber-400">
+                这是唯一一次展示完整密钥。关闭后无法再查看，请先复制保存。
+              </p>
+              <div className="flex items-center gap-2">
+                <code className="input flex-1 font-mono text-sm break-all">{createdKey}</code>
+                <button
+                  type="button"
+                  className="btn btn-primary shrink-0 px-3"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(createdKey)
+                    setCopied(true)
+                    setTimeout(() => setCopied(false), 2000)
+                  }}
+                >
+                  {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                  {copied ? "已复制" : "复制"}
+                </button>
+              </div>
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  className="btn btn-primary px-6"
+                  onClick={() => {
+                    setOpen(false)
+                    resetForm()
+                  }}
+                >
+                  我已保存
+                </button>
+              </div>
+            </div>
+          ) : (
           <form onSubmit={handleSubmit} className="space-y-4">
             {/* Name */}
             <div className="space-y-1.5">
@@ -287,6 +330,7 @@ export function CreateApiKeyDialog({ onCreate, groups, groupsLoading }: Props) {
               </button>
             </div>
           </form>
+          )}
           <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground">
             <X className="h-4 w-4" />
             <span className="sr-only">Close</span>

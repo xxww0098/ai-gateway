@@ -163,10 +163,14 @@ const USAGE_LOG_COLUMNS: &str = "id, request_id, user_id, api_key_id, model, pro
 
 /// The optional filters, written so an absent parameter is a NULL bind rather
 /// than a different statement. One prepared statement, four toggles.
+///
+/// Date binds are `&str` (query-string leftovers). Postgres types `$3` as
+/// `text`, so `created_at::date >= $3` is `date >= text` and 500s even when
+/// the bind is NULL — the `OR` is still type-checked. Cast both sides.
 const USAGE_LOG_FILTER: &str = "($1::text IS NULL OR model = $1) \
      AND ($2::bool IS NULL OR failed = $2) \
-     AND ($3::date IS NULL OR created_at::date >= $3) \
-     AND ($4::date IS NULL OR created_at::date <= $4)";
+     AND ($3::date IS NULL OR created_at::date >= $3::date) \
+     AND ($4::date IS NULL OR created_at::date <= $4::date)";
 
 /// `GET /admin/usage-logs`. 对应 `AdminUsageLogsHandler`.
 pub async fn list_usage_logs(

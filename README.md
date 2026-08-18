@@ -61,7 +61,7 @@ make run                  # cargo build --release 后运行 ./ai-gateway
 #    或：./ai-gateway --config config.yaml
 
 # 3. 前端（独立构建）
-cd frontend && npm ci && npm run dev
+cd frontend && npm ci --legacy-peer-deps && npm run dev
 ```
 
 启动后注意日志：若出现 JWT secret 为空、`CREDENTIAL_ENCRYPTION_KEY` 未设置、或

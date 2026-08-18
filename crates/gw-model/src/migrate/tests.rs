@@ -1,4 +1,5 @@
 use crate::testsupport::fresh_db;
+use sqlx::PgPool;
 
 use super::*;
 
@@ -11,6 +12,23 @@ fn migrations_are_ordered_and_unique() {
     assert!(
         versions.windows(2).all(|w| w[0] < w[1]),
         "版本号必须严格递增：{versions:?}"
+    );
+
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+    let mut on_disk: Vec<i64> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("读不到 {}: {e}", dir.display()))
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name().into_string().ok()?;
+            if !name.ends_with(".sql") {
+                return None;
+            }
+            name.split('_').next()?.parse().ok()
+        })
+        .collect();
+    on_disk.sort();
+    assert_eq!(
+        on_disk, versions,
+        "嵌进二进制的迁移必须和 migrations/*.sql 一一对应；对不上说明 cargo 没重编"
     );
 }
 
@@ -154,4 +172,145 @@ async fn migrator_tolerates_an_existing_schema() {
     .await
     .expect("查索引");
     assert!(has_index, "迁移应当把缺的索引补回来");
+}
+
+/// `/v1` 每条计费请求都会打的两条查找，0003 的单列/错前缀索引盖不住。
+/// 守的是「迁移之后库里真有能按这些谓词做 Index Cond 的索引」，不是文件名。
+#[sqlx::test]
+#[ignore = "需要本地 Postgres（见 testsupport::fresh_db 的用法说明）"]
+async fn hot_path_lookups_use_covering_indexes() {
+    let pool = fresh_db("hot_path_idx").await;
+    run(&pool).await.expect("迁移应当成功");
+
+    let sub_defs = indexdefs(&pool, "subscriptions").await;
+    assert!(
+        sub_defs
+            .iter()
+            .any(|d| column_order(d, &["user_id", "status", "expires_at"])),
+        "subscriptions 必须有 (user_id, status, expires_at) 复合索引，单列盖不住 \
+         `status='active' AND expires_at>NOW()`：{sub_defs:?}"
+    );
+
+    let cat_defs = indexdefs(&pool, "model_catalog_entries").await;
+    assert!(
+        cat_defs.iter().any(|d| leading_column(d, "model_id")),
+        "model_catalog_entries 必须有以 model_id 打头的索引，\
+         唯一键 (channel_key, model_id) 服务不了按模型反查渠道：{cat_defs:?}"
+    );
+
+    sqlx::query(
+        "INSERT INTO subscriptions (user_id, package_id, group_id, status, starts_at, expires_at)
+         SELECT (g % 200) + 1, 1, 1,
+                CASE WHEN g % 5 = 0 THEN 'active' ELSE 'expired' END,
+                NOW() - INTERVAL '30 days',
+                CASE WHEN g % 5 = 0 THEN NOW() + INTERVAL '30 days' ELSE NOW() - INTERVAL '1 day' END
+         FROM generate_series(1, 8000) AS g",
+    )
+    .execute(&pool)
+    .await
+    .expect("灌 subscriptions");
+
+    sqlx::query(
+        "INSERT INTO model_catalog_entries (channel_key, model_id, visible, created_at)
+         SELECT 'ch-' || (g % 40), 'model-' || (g / 40), TRUE, NOW()
+         FROM generate_series(0, 3999) AS g",
+    )
+    .execute(&pool)
+    .await
+    .expect("灌 model_catalog_entries");
+
+    for table in ["subscriptions", "model_catalog_entries"] {
+        sqlx::query(&format!("ANALYZE {table}"))
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("ANALYZE {table}: {e}"));
+    }
+
+    // 同一条连接上关 seqscan：证明「有索引能按这些列做 Index Cond」。
+    // 只靠 user_id / (channel_key, model_id) 时 Cond 里不会同时出现下面这些列。
+    let mut conn = pool.acquire().await.expect("借连接");
+    sqlx::query("SET enable_seqscan = off")
+        .execute(&mut *conn)
+        .await
+        .expect("enable_seqscan");
+
+    let sub_plan = explain(
+        &mut conn,
+        "SELECT id FROM subscriptions
+         WHERE user_id = 42 AND status = 'active' AND expires_at > NOW()
+         ORDER BY expires_at DESC LIMIT 1",
+    )
+    .await;
+    assert!(
+        index_cond_mentions(&sub_plan, &["user_id", "status"]),
+        "活跃订阅查找的 Index Cond 必须带上 user_id 和 status，否则还在扫单列 user_id：{sub_plan}"
+    );
+
+    let cat_plan = explain(
+        &mut conn,
+        "SELECT DISTINCT channel_key FROM model_catalog_entries
+         WHERE model_id = 'model-5' AND model_id <> '__models_url__'
+         ORDER BY channel_key",
+    )
+    .await;
+    assert!(
+        index_cond_mentions(&cat_plan, &["model_id"]),
+        "按 model_id 反查渠道的 Index Cond 必须带上 model_id：{cat_plan}"
+    );
+}
+
+async fn indexdefs(pool: &PgPool, table: &str) -> Vec<String> {
+    sqlx::query_scalar("SELECT indexdef FROM pg_indexes WHERE tablename = $1")
+        .bind(table)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_else(|e| panic!("pg_indexes({table}): {e}"))
+}
+
+fn column_order(indexdef: &str, cols: &[&str]) -> bool {
+    let mut rest = indexdef;
+    for col in cols {
+        let Some(at) = rest.find(col) else {
+            return false;
+        };
+        rest = &rest[at + col.len()..];
+    }
+    true
+}
+
+fn leading_column(indexdef: &str, col: &str) -> bool {
+    let Some(open) = indexdef.find('(') else {
+        return false;
+    };
+    indexdef[open + 1..]
+        .trim_start()
+        .trim_start_matches('"')
+        .starts_with(col)
+}
+
+async fn explain(conn: &mut sqlx::PgConnection, sql: &str) -> serde_json::Value {
+    sqlx::query_scalar(&format!("EXPLAIN (FORMAT JSON) {sql}"))
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap_or_else(|e| panic!("EXPLAIN 失败: {e}"))
+}
+
+fn index_cond_mentions(plan: &serde_json::Value, cols: &[&str]) -> bool {
+    fn walk(node: &serde_json::Value, cols: &[&str]) -> bool {
+        if let Some(cond) = node.get("Index Cond").and_then(|v| v.as_str())
+            && cols.iter().all(|c| cond.contains(c))
+        {
+            return true;
+        }
+        if let Some(plans) = node.get("Plans").and_then(|v| v.as_array()) {
+            return plans.iter().any(|p| walk(p, cols));
+        }
+        false
+    }
+    let root = plan
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|v| v.get("Plan"))
+        .unwrap_or(plan);
+    walk(root, cols)
 }

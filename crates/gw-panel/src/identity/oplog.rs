@@ -100,6 +100,24 @@ pub fn trace_id(parts: &Parts) -> String {
         .map_or_else(|| uuid::Uuid::new_v4().to_string(), ToOwned::to_owned)
 }
 
+/// 校验读的是 `metadata::text`。serde 紧凑 JSON 对不上 jsonb 的空格和键序。
+pub async fn stored_metadata_bytes(pool: &sqlx::PgPool, extras: Option<&Value>) -> Vec<u8> {
+    let Some(value) = extras else {
+        return Vec::new();
+    };
+    match sqlx::query_scalar::<_, Option<String>>("SELECT $1::jsonb::text")
+        .bind(value)
+        .fetch_one(pool)
+        .await
+    {
+        Ok(text) => text.unwrap_or_default().into_bytes(),
+        Err(error) => {
+            tracing::warn!(event = "audit_metadata_text_failed", error = %error);
+            Vec::new()
+        }
+    }
+}
+
 /// `operation_logs` 的插入语句。列顺序与 `gw_model::OperationLog` 一致。
 const INSERT_OPERATION_LOG: &str = "INSERT INTO operation_logs \
      (source, actor_id, actor_email, actor_role, action, target, method, path, \
@@ -118,15 +136,11 @@ pub async fn record(
     actor: Option<&Actor>,
     action: &str,
     target: &str,
-    status_code: i32,
+    status_code: i64,
     extras: Option<Value>,
 ) {
-    // 对应 `json.Marshal(extras)`，失败时把 Metadata 留成 nil。canonical 里参与
-    // 哈希的就是这串原始字节，所以先算出来再传给 entry_hash。
-    let metadata = extras
-        .as_ref()
-        .and_then(|v| serde_json::to_vec(v).ok())
-        .unwrap_or_default();
+    // 哈希覆盖列里的字节，所以先问 Postgres 这坨 jsonb 会写成什么。
+    let metadata = stored_metadata_bytes(&state.pg, extras.as_ref()).await;
 
     let entry = OperationEntry {
         source: SOURCE_PANEL.to_owned(),
@@ -155,7 +169,7 @@ pub async fn record(
         .bind(&entry.target)
         .bind(&entry.method)
         .bind(&entry.path)
-        .bind(i64::from(entry.status_code))
+        .bind(entry.status_code)
         .bind(&entry.ip_address)
         .bind(&entry.request_id)
         .bind(extras)

@@ -48,7 +48,7 @@ pub struct OperationEntry {
     pub target: String,
     pub method: String,
     pub path: String,
-    pub status_code: i32,
+    pub status_code: i64,
     pub ip_address: String,
     pub request_id: String,
     /// Raw JSON bytes, exactly as stored in the `jsonb` column.

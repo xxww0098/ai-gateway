@@ -48,6 +48,15 @@ export interface CreateKeyForm {
   expires_in_days?: number | null
 }
 
+/** POST /user/api-keys 的唯一明文响应。列表里的 `key` 已经是遮蔽值。 */
+export interface ApiKeyCreated {
+  id: number
+  name: string
+  key: string
+  key_prefix: string
+  created_at: string
+}
+
 /** Payload sent to POST /user/api-keys */
 export interface CreateKeyPayload {
   name: string

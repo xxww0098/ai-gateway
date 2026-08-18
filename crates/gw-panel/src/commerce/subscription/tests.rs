@@ -165,6 +165,7 @@ fn user_subscription_item_omits_absent_limits() {
         daily_usage_usd: 0.0,
         weekly_usage_usd: 0.0,
         monthly_usage_usd: 0.0,
+        price_paid: 9.9,
         daily_limit_usd: None,
         weekly_limit_usd: None,
         monthly_limit_usd: Some(100.0),
@@ -173,6 +174,38 @@ fn user_subscription_item_omits_absent_limits() {
     let obj = json.as_object().expect("object");
     assert!(!obj.contains_key("daily_limit_usd"));
     assert!(obj.contains_key("monthly_limit_usd"));
+}
+
+#[test]
+fn a_purchase_records_the_debited_package_price_not_zero() {
+    // 退款页用这一列算剩余天数金额；写成 0 会让整笔订单一分钱都退不了。
+    let debited = 12.5;
+    let recorded = purchase_price_paid(debited);
+    assert_eq!(recorded, debited);
+    assert_ne!(recorded, 0.0);
+}
+
+#[test]
+fn user_subscription_item_carries_price_paid_for_the_refund_page() {
+    // 退款页用 price_paid 算剩余天数金额；键名必须是 price_paid，不是列名。
+    let json = serde_json::to_value(SubscriptionItem {
+        id: 1,
+        group_id: 3,
+        group_name: "Pro".into(),
+        status: "active".into(),
+        starts_at: Utc::now(),
+        expires_at: Utc::now(),
+        daily_usage_usd: 0.0,
+        weekly_usage_usd: 0.0,
+        monthly_usage_usd: 0.0,
+        price_paid: 9.9,
+        daily_limit_usd: None,
+        weekly_limit_usd: None,
+        monthly_limit_usd: None,
+    })
+    .expect("serialise");
+    assert_eq!(json["price_paid"], 9.9);
+    assert!(json.get("price_paid_usd").is_none());
 }
 
 // ── 请求绑定 ─────────────────────────────────────────────────────────────────

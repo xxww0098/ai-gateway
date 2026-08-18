@@ -177,6 +177,15 @@ fn user_subscription_item_omits_absent_limits() {
 }
 
 #[test]
+fn a_purchase_records_the_debited_package_price_not_zero() {
+    // 退款页用这一列算剩余天数金额；写成 0 会让整笔订单一分钱都退不了。
+    let debited = 12.5;
+    let recorded = purchase_price_paid(debited);
+    assert_eq!(recorded, debited);
+    assert_ne!(recorded, 0.0);
+}
+
+#[test]
 fn user_subscription_item_carries_price_paid_for_the_refund_page() {
     // 退款页用 price_paid 算剩余天数金额；键名必须是 price_paid，不是列名。
     let json = serde_json::to_value(SubscriptionItem {

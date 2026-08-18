@@ -42,6 +42,11 @@ const REACTIVATE_EXTENSION_DAYS: u64 = 30;
 /// 购买时套餐有效期的下限（旧实现 `days < 1` 时补成 1）。
 const MIN_PURCHASE_VALIDITY_DAYS: i64 = 1;
 
+/// 购买落库的实付必须等于这次扣的套餐价。写成 0 会让退款页算出可退金额 0。
+fn purchase_price_paid(package_price: f64) -> f64 {
+    package_price
+}
+
 /// 套餐没名字时兜底的展示名（旧实现名字为空时补成 "Plan"）。
 const FALLBACK_GROUP_NAME: &str = "Plan";
 
@@ -487,7 +492,7 @@ pub async fn purchase(
                     monthly_limit_usd: pkg.monthly_limit_usd,
                     funding_source: "",
                     funding_reference: "",
-                    price_paid_usd: 0.0,
+                    price_paid_usd: purchase_price_paid(price),
                     notes: "",
                 },
             )

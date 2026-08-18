@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none" role="img" aria-label="AI-GateWay ledger puff">
+  <defs>
+    <clipPath id="ip6-clip"><rect width="512" height="512" rx="114"/></clipPath>
+    <linearGradient id="ip6-bg" x1="20%" y1="0%" x2="80%" y2="100%">
+      <stop offset="0%" stop-color="#6A5488"/>
+      <stop offset="100%" stop-color="#4A3864"/>
+    </linearGradient>
+    <radialGradient id="ip6-skin" cx="42%" cy="30%" r="72%">
+      <stop offset="0%" stop-color="#FFFBF6"/>
+      <stop offset="55%" stop-color="#F2E4D4"/>
+      <stop offset="100%" stop-color="#DCC6B0"/>
+    </radialGradient>
+    <radialGradient id="ip6-coin" cx="40%" cy="30%" r="70%">
+      <stop offset="0%" stop-color="#F6E08A"/>
+      <stop offset="100%" stop-color="#D4A838"/>
+    </radialGradient>
+    <filter id="ip6-blur" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="16"/>
+    </filter>
+  </defs>
+  <g clip-path="url(#ip6-clip)">
+    <rect width="512" height="512" fill="url(#ip6-bg)"/>
+    <ellipse cx="256" cy="500" rx="168" ry="40" fill="#241830" opacity="0.32" filter="url(#ip6-blur)"/>
+    <ellipse cx="256" cy="400" rx="196" ry="204" fill="url(#ip6-skin)"/>
+    <ellipse cx="168" cy="456" rx="46" ry="28" fill="url(#ip6-skin)"/>
+    <ellipse cx="344" cy="456" rx="46" ry="28" fill="url(#ip6-skin)"/>
+    <ellipse cx="214" cy="312" rx="70" ry="34" fill="#FFFFFF" opacity="0.2"/>
+    <circle cx="198" cy="360" r="13.5" fill="#2A2118"/>
+    <circle cx="314" cy="360" r="13.5" fill="#2A2118"/>
+    <circle cx="203" cy="355" r="4" fill="#FFF8F0" opacity="0.85"/>
+    <circle cx="319" cy="355" r="4" fill="#FFF8F0" opacity="0.85"/>
+    <ellipse cx="166" cy="400" rx="22" ry="12" fill="#E8A090" opacity="0.42"/>
+    <ellipse cx="346" cy="400" rx="22" ry="12" fill="#E8A090" opacity="0.42"/>
+    <path d="M234 404 C248 420 264 420 278 404" stroke="#2A2118" stroke-width="5" stroke-linecap="round"/>
+    <circle cx="256" cy="188" r="40" fill="url(#ip6-coin)"/>
+    <circle cx="256" cy="188" r="29" fill="none" stroke="#B88820" stroke-width="3"/>
+    <path d="M256 170 V206 M243 178 H266 C273 178 276 185 270 191 H246" stroke="#8A6410" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

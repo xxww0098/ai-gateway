@@ -142,6 +142,17 @@ fn order_record_carries_the_twelve_keys_the_orders_table_reads() {
 }
 
 #[test]
+fn payment_config_stubs_are_the_three_local_channels_and_disabled() {
+    let items = payment_config_stubs();
+    let providers: Vec<&str> = items
+        .iter()
+        .filter_map(|item| item["provider"].as_str())
+        .collect();
+    assert_eq!(providers, ["stripe", "alipay", "wechat"]);
+    assert!(items.iter().all(|item| item["enabled"] == false));
+}
+
+#[test]
 fn a_user_order_list_ignores_query_user_id() {
     // 性质：即使用户在 query 里塞了别人的 id，绑定的仍是登录身份。
     // 管理员列表才认 ?user_id=；0 是「不过滤」哨兵，用户路径碰不得。

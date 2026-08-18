@@ -388,6 +388,36 @@ pub async fn admin_confirm(
     ok(serde_json::json!({ "confirmed": true }))
 }
 
+/// 系统设置里的三个渠道卡片。支付下单目前是本地模拟，这里不落库：
+/// GET 给出禁用桩，PUT 明确拒绝，避免管理员以为密钥已经存上了。
+const PAYMENT_CONFIG_PROVIDERS: [&str; 3] = [PROVIDER_STRIPE, PROVIDER_ALIPAY, PROVIDER_WECHAT];
+
+fn payment_config_stubs() -> Vec<serde_json::Value> {
+    PAYMENT_CONFIG_PROVIDERS
+        .iter()
+        .map(|provider| {
+            serde_json::json!({
+                "provider": provider,
+                "app_id": null,
+                "app_secret": "",
+                "webhook_secret": "",
+                "mode": "sandbox",
+                "enabled": false,
+            })
+        })
+        .collect()
+}
+
+/// `GET /admin/payment-config` —— 三个渠道的只读桩，全部未启用。
+pub async fn admin_list_payment_config(_admin: AdminUser) -> Response {
+    ok(payment_config_stubs())
+}
+
+/// `PUT /admin/payment-config` —— 渠道还是本地模拟，拒绝落库。
+pub async fn admin_put_payment_config(_admin: AdminUser) -> Response {
+    bad_request("支付渠道目前为本地模拟，配置不会落库")
+}
+
 /// `GET /payment/stripe/config` —— 前端用来决定是否显示 Stripe 入口。
 ///
 /// Ports `PaymentStripeConfigHandler`：三个字段全是写死的占位值，没有真实账户。

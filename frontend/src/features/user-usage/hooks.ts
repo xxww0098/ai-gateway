@@ -126,20 +126,25 @@ export function useUsageLogs(opts: UseUsageLogsOptions = {}) {
 
 // ── useUserApiKeys Hook (for filter dropdown) ───────────────────────────────
 
+/** 密钥页把 `{ items }` 信封缓存在同一条 queryKey 上。这里只取数组，避免 `.map` 炸。 */
+export function apiKeysFromQueryData(res: unknown): ApiKey[] {
+  if (Array.isArray(res)) return res
+  if (res && typeof res === 'object' && 'items' in res) {
+    const items = (res as { items: unknown }).items
+    if (Array.isArray(items)) return items
+  }
+  return []
+}
+
 export function useUserApiKeys() {
   const apiKeysQuery = useQuery({
     queryKey: queryKeys.apiKeys.list(),
-    queryFn: async () => {
-      const res = await fetchUserApiKeys()
-      // Backend may return array directly or { items: [...] }
-      if (Array.isArray(res)) return res
-      if (res && typeof res === 'object' && 'items' in res) return (res as { items: ApiKey[] }).items
-      return []
-    },
+    queryFn: fetchUserApiKeys,
+    select: apiKeysFromQueryData,
   })
 
   return {
-    apiKeys: apiKeysQuery.data || [],
+    apiKeys: apiKeysQuery.data ?? [],
     loading: apiKeysQuery.isLoading,
   }
 }

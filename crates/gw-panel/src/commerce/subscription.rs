@@ -70,6 +70,9 @@ pub struct PackageItem {
 }
 
 /// 对应 `subscriptionItem`（用户自己的订阅）。三个 limit 同样是 `omitempty`。
+///
+/// `price_paid` 是退款页算剩余天数金额用的；列名是 `price_paid_usd`，键名照
+/// 管理员视图写成 `price_paid`。没有这个键，前端会把可退金额当成 0。
 #[derive(Debug, Serialize)]
 pub struct SubscriptionItem {
     pub id: i64,
@@ -81,6 +84,7 @@ pub struct SubscriptionItem {
     pub daily_usage_usd: f64,
     pub weekly_usage_usd: f64,
     pub monthly_usage_usd: f64,
+    pub price_paid: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daily_limit_usd: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -196,6 +200,7 @@ impl From<SubscriptionRow> for SubscriptionItem {
             daily_usage_usd: row.daily_usage_usd,
             weekly_usage_usd: row.weekly_usage_usd,
             monthly_usage_usd: row.monthly_usage_usd,
+            price_paid: row.price_paid_usd,
             daily_limit_usd: row.daily_limit_usd,
             weekly_limit_usd: row.weekly_limit_usd,
             monthly_limit_usd: row.monthly_limit_usd,

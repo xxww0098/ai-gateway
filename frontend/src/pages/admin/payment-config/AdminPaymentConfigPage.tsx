@@ -81,13 +81,14 @@ const makeSchema = (hasExistingSecret: boolean) =>
 type FormValues = z.infer<ReturnType<typeof makeSchema>>
 
 function ProviderCard({
+  provider,
   config,
   onSaved,
 }: {
+  provider: string
   config?: PaymentConfigItem
   onSaved: () => void
 }) {
-  const provider = config?.provider || ""
   const providerMeta = PROVIDERS.find((p) => p.key === provider)
   const Icon = providerMeta?.icon || Landmark
 
@@ -359,6 +360,7 @@ export default function PaymentConfig({ embedded = true }: PaymentConfigProps) {
           {PROVIDERS.map((p) => (
             <ProviderCard
               key={p.key}
+              provider={p.key}
               config={getConfig(p.key)}
               onSaved={loadConfigs}
             />

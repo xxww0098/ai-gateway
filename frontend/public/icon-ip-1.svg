@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none" role="img" aria-label="AI-GateWay gate fox">
+  <defs>
+    <clipPath id="ip1-clip"><rect width="512" height="512" rx="114"/></clipPath>
+    <linearGradient id="ip1-bg" x1="20%" y1="0%" x2="80%" y2="100%">
+      <stop offset="0%" stop-color="#12856A"/>
+      <stop offset="100%" stop-color="#0A5F4C"/>
+    </linearGradient>
+    <radialGradient id="ip1-skin" cx="42%" cy="30%" r="72%">
+      <stop offset="0%" stop-color="#FFFBF4"/>
+      <stop offset="58%" stop-color="#F4E4D2"/>
+      <stop offset="100%" stop-color="#E2C8B0"/>
+    </radialGradient>
+    <radialGradient id="ip1-ear" cx="40%" cy="30%" r="70%">
+      <stop offset="0%" stop-color="#F7D8C4"/>
+      <stop offset="100%" stop-color="#E8A890"/>
+    </radialGradient>
+    <radialGradient id="ip1-tip" cx="40%" cy="40%" r="70%">
+      <stop offset="0%" stop-color="#FFFDF8"/>
+      <stop offset="100%" stop-color="#F4E8D8"/>
+    </radialGradient>
+    <filter id="ip1-blur" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="16"/>
+    </filter>
+  </defs>
+  <g clip-path="url(#ip1-clip)">
+    <rect width="512" height="512" fill="url(#ip1-bg)"/>
+    <ellipse cx="256" cy="500" rx="168" ry="42" fill="#06382D" opacity="0.28" filter="url(#ip1-blur)"/>
+    <path d="M118 300 C96 210 148 128 210 196 C228 220 198 268 176 312 Z" fill="url(#ip1-skin)"/>
+    <path d="M394 300 C416 210 364 128 302 196 C284 220 314 268 336 312 Z" fill="url(#ip1-skin)"/>
+    <path d="M138 286 C128 228 158 176 196 214 C210 234 186 274 170 304 Z" fill="url(#ip1-ear)"/>
+    <path d="M374 286 C384 228 354 176 316 214 C302 234 326 274 342 304 Z" fill="url(#ip1-ear)"/>
+    <path d="M390 360 C448 300 490 348 456 430 C432 478 380 470 360 430 Z" fill="url(#ip1-skin)"/>
+    <ellipse cx="448" cy="348" rx="28" ry="22" fill="url(#ip1-tip)"/>
+    <ellipse cx="256" cy="412" rx="198" ry="196" fill="url(#ip1-skin)"/>
+    <ellipse cx="256" cy="430" rx="78" ry="58" fill="#FFF8F0" opacity="0.55"/>
+    <ellipse cx="210" cy="318" rx="72" ry="36" fill="#FFFFFF" opacity="0.22"/>
+    <circle cx="198" cy="368" r="13.5" fill="#2A2118"/>
+    <circle cx="314" cy="368" r="13.5" fill="#2A2118"/>
+    <circle cx="203" cy="363" r="4" fill="#FFF8F0" opacity="0.85"/>
+    <circle cx="319" cy="363" r="4" fill="#FFF8F0" opacity="0.85"/>
+    <ellipse cx="168" cy="404" rx="22" ry="12" fill="#E8A090" opacity="0.45"/>
+    <ellipse cx="344" cy="404" rx="22" ry="12" fill="#E8A090" opacity="0.45"/>
+    <ellipse cx="256" cy="404" rx="9" ry="6.5" fill="#3A2A20"/>
+    <path d="M236 428 C248 442 264 442 276 428" stroke="#3A2A20" stroke-width="5" stroke-linecap="round"/>
+  </g>
+</svg>

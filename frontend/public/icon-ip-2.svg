@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none" role="img" aria-label="AI-GateWay arch spirit">
+  <defs>
+    <clipPath id="ip2-clip"><rect width="512" height="512" rx="114"/></clipPath>
+    <linearGradient id="ip2-bg" x1="18%" y1="0%" x2="82%" y2="100%">
+      <stop offset="0%" stop-color="#2A3A62"/>
+      <stop offset="100%" stop-color="#162038"/>
+    </linearGradient>
+    <radialGradient id="ip2-skin" cx="44%" cy="22%" r="74%">
+      <stop offset="0%" stop-color="#FFFEFB"/>
+      <stop offset="62%" stop-color="#F0EBE3"/>
+      <stop offset="100%" stop-color="#D9D0C4"/>
+    </radialGradient>
+    <filter id="ip2-blur" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="16"/>
+    </filter>
+  </defs>
+  <g clip-path="url(#ip2-clip)">
+    <rect width="512" height="512" fill="url(#ip2-bg)"/>
+    <ellipse cx="256" cy="498" rx="150" ry="38" fill="#0A1020" opacity="0.35" filter="url(#ip2-blur)"/>
+    <path d="M96 512 C96 268 156 96 256 96 C356 96 416 268 416 512 Z" fill="url(#ip2-skin)"/>
+    <path d="M176 512 C176 308 196 214 256 214 C316 214 336 308 336 512 Z" fill="#162038"/>
+    <ellipse cx="206" cy="168" rx="50" ry="24" fill="#FFFFFF" opacity="0.22"/>
+    <circle cx="186" cy="168" r="12" fill="#2A2118"/>
+    <circle cx="326" cy="168" r="12" fill="#2A2118"/>
+    <circle cx="190" cy="163" r="3.6" fill="#FFF8F0" opacity="0.85"/>
+    <circle cx="330" cy="163" r="3.6" fill="#FFF8F0" opacity="0.85"/>
+    <ellipse cx="164" cy="202" rx="16" ry="9" fill="#E8A090" opacity="0.4"/>
+    <ellipse cx="348" cy="202" rx="16" ry="9" fill="#E8A090" opacity="0.4"/>
+    <path d="M234 200 C246 214 266 214 278 200" stroke="#2A2118" stroke-width="5" stroke-linecap="round"/>
+  </g>
+</svg>

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none" role="img" aria-label="AI-GateWay sentinel owl">
+  <defs>
+    <clipPath id="ip4-clip"><rect width="512" height="512" rx="114"/></clipPath>
+    <linearGradient id="ip4-bg" x1="20%" y1="0%" x2="82%" y2="100%">
+      <stop offset="0%" stop-color="#3A5A46"/>
+      <stop offset="100%" stop-color="#24382C"/>
+    </linearGradient>
+    <radialGradient id="ip4-skin" cx="44%" cy="30%" r="72%">
+      <stop offset="0%" stop-color="#FFF9F0"/>
+      <stop offset="60%" stop-color="#EFE0CC"/>
+      <stop offset="100%" stop-color="#D8C4A8"/>
+    </radialGradient>
+    <radialGradient id="ip4-belly" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#FFFDF8"/>
+      <stop offset="100%" stop-color="#F2E6D4"/>
+    </radialGradient>
+    <filter id="ip4-blur" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="16"/>
+    </filter>
+  </defs>
+  <g clip-path="url(#ip4-clip)">
+    <rect width="512" height="512" fill="url(#ip4-bg)"/>
+    <ellipse cx="256" cy="500" rx="160" ry="40" fill="#142018" opacity="0.3" filter="url(#ip4-blur)"/>
+    <path d="M186 196 L206 148 L232 204 Z" fill="url(#ip4-skin)"/>
+    <path d="M326 196 L306 148 L280 204 Z" fill="url(#ip4-skin)"/>
+    <ellipse cx="256" cy="386" rx="198" ry="206" fill="url(#ip4-skin)"/>
+    <ellipse cx="118" cy="430" rx="46" ry="78" fill="url(#ip4-skin)"/>
+    <ellipse cx="394" cy="430" rx="46" ry="78" fill="url(#ip4-skin)"/>
+    <ellipse cx="256" cy="430" rx="118" ry="150" fill="url(#ip4-belly)"/>
+    <ellipse cx="208" cy="300" rx="58" ry="28" fill="#FFFFFF" opacity="0.18"/>
+    <circle cx="196" cy="348" r="18" fill="#2A2118"/>
+    <circle cx="316" cy="348" r="18" fill="#2A2118"/>
+    <circle cx="202" cy="341" r="5" fill="#FFF8F0" opacity="0.85"/>
+    <circle cx="322" cy="341" r="5" fill="#FFF8F0" opacity="0.85"/>
+    <path d="M240 376 L256 400 L272 376 Q256 368 240 376 Z" fill="#C48448"/>
+    <path d="M232 422 C246 436 266 436 280 422" stroke="#2A2118" stroke-width="4.5" stroke-linecap="round"/>
+  </g>
+</svg>

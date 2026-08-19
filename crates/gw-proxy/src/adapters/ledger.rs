@@ -119,6 +119,8 @@ impl BillingLedger for SharedLedger {
         request_id: &str,
         ttl: Duration,
     ) -> Result<HoldAdmit, BillingError> {
+        // gw_ledger::HoldOutcome → ports::HoldAdmit：仅此适配层做枚举映射，
+        // middleware 只认 HoldAdmit，不碰具体 ledger crate 的类型。
         match self
             .0
             .hold_with_floor(user_id, amount, min_available, request_id, ttl)

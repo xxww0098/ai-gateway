@@ -65,9 +65,12 @@ const DETACHED_TIMEOUT: Duration = Duration::from_secs(2);
 /// 流式还有第三遍）。这个结构只补上中继层不关心、而计费必需的东西。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BillingPeek {
-    /// 已 trim 的模型名。`RequestSpec::model` 按合同保留原样字节，
-    /// 而计费要拿它当缓存键与价格表键，必须先归一。
+    /// 已 trim 的模型名。`RequestSpec::model` 按合同保留原样字节；
+    /// 目录 / 熔断 / 日志仍用这份，大小写保持 peek 时的样子。
     pub model: String,
+    /// [`gw_pricing::normalize_model_key`] 的结果。三次 estimator 共用，
+    /// 价目表 lookup 不再对同一请求重复 `trim` + `to_lowercase`。
+    pub price_key: String,
     /// 由原始 body 长度近似而来；略微高估，对预扣而言是安全方向。
     pub input_tokens: i64,
     /// 输出上限。`None`（客户端没说）在这里塌缩成 0 = 「无上限」，
@@ -80,8 +83,10 @@ impl BillingPeek {
     /// 从唯一一次解析的结果派生。**不再解析 body**。
     #[must_use]
     pub fn from_spec(spec: &RequestSpec, body_len: usize) -> Self {
+        let model = spec.model().unwrap_or_default().trim().to_owned();
         Self {
-            model: spec.model().unwrap_or_default().trim().to_owned(),
+            price_key: gw_pricing::normalize_model_key(&model),
+            model,
             input_tokens: approximate_tokens_from_bytes(body_len),
             // 负数与缺失同义：都表示「客户端没有给出可用的上限」。
             max_tokens: spec.max_tokens.unwrap_or(0).max(0),
@@ -171,6 +176,16 @@ impl HoldMiddleware {
     /// Configured hold TTL.
     pub fn ttl(&self) -> Duration {
         self.ttl
+    }
+
+    /// 只读账本。`GET /v1/usage` 查余额用，不把 ledger 再克隆进 [`crate::ProxyState`]。
+    pub fn ledger(&self) -> &Arc<dyn BillingLedger> {
+        &self.ledger
+    }
+
+    /// 只读用量存储。`GET /v1/usage` 查今日模型 token 用。
+    pub fn usage_store(&self) -> &Arc<dyn crate::ports::UsageStore> {
+        self.settlement.store()
     }
 
     /// The full billable-request flow.
@@ -364,13 +379,7 @@ impl HoldMiddleware {
         // The reservation scales with the real prompt size so a large request
         // reserves proportional funds instead of under-holding on a flat
         // nominal input assumption.
-        let hold_amount = self.calc.estimate_with_tokens(
-            &peek.model,
-            peek.input_tokens,
-            peek.max_tokens,
-            peek.stream,
-            rate_mult,
-        );
+        let (hold_amount, upper_bound) = compute_reservation(&peek, rate_mult, self.calc.as_ref());
 
         // --- subscription quota ---
         if let (Some(sub), Some(store)) = (&meta.subscription, &self.quota_store) {
@@ -397,42 +406,13 @@ impl HoldMiddleware {
         // Reject before creating a hold when the balance cannot cover even the
         // worst case. The reserved amount stays `hold_amount`; the upper bound
         // only gates the balance comparison.
-        let upper_bound = preflight_upper_bound(
-            self.calc.as_ref(),
-            &peek.model,
-            peek.max_tokens,
-            peek.stream,
-            rate_mult,
-            hold_amount,
-        );
-        // 预算代币先 peek 再扣（门在扣之前）。常见路径走 hold_gated，
-        // floor + 预扣 + EXPIRE 同一趟 Redis。
-        let used_budget_token = if self.budget_tokens.is_some() {
-            let available = self
-                .ledger
-                .available_balance(meta.user_id)
-                .await
-                .unwrap_or(0.0);
-            if available < upper_bound {
-                tracing::warn!(
-                    event = "preflight_insufficient_balance",
-                    user_id = meta.user_id,
-                    model = %peek.model,
-                    upper_bound,
-                    available,
-                );
-                return HoldRejection::InsufficientBalance {
-                    current_balance: available,
-                    required_amount: upper_bound,
-                }
-                .into_response();
-            }
-            self.budget_tokens
-                .as_ref()
-                .is_some_and(|bts| bts.try_deduct(meta.user_id, hold_amount))
-        } else {
-            false
-        };
+        // 预算代币：仅 try_deduct 命中时跳过 Redis hold；无 token / 不足 /
+        // 过期走 hold_gated 单趟 Lua（floor + 预扣 + EXPIRE）。不在 store
+        // 挂载时 peek 余额——那是 acquire 启用前的误接线代价。
+        let used_budget_token = self
+            .budget_tokens
+            .as_ref()
+            .is_some_and(|bts| bts.try_deduct(meta.user_id, hold_amount));
 
         if !used_budget_token {
             match self
@@ -482,7 +462,6 @@ impl HoldMiddleware {
                 ip_address,
                 idempotency_key,
             },
-            hold_amount,
             used_budget_token,
         ));
         req.extensions_mut().insert(billing.clone());
@@ -682,6 +661,8 @@ pub async fn layer(State(state): State<ProxyState>, req: Request, next: Next) ->
 /// Hold / Settle / Release 三段式、partial-debit shortfall、strict-usage-metadata
 /// 模式 —— 签名与语义一行未动。变的只是**哪些路径进入这条管线**。
 /// 这是 `CONTRACT.md` 硬约束「计费语义不变」允许的那一半。
+///
+/// `GET /v1/usage` 同样不计费：全部 GET 已被排除，它只读账本与鉴权元数据。
 pub fn is_billable(method: &Method, path: &str) -> bool {
     is_proxy_path(path)
         && !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
@@ -705,6 +686,30 @@ pub fn preflight_upper_bound(
     let with_max = calc.estimate_with_max_tokens(model, max_tokens, stream, rate_mult);
     let streaming = calc.estimate(model, true, rate_mult);
     hold_amount.max(with_max).max(streaming)
+}
+
+/// 从 peek 一次算出预扣额与 floor 上界，避免 middleware 重复调 estimator。
+pub fn compute_reservation(
+    peek: &BillingPeek,
+    rate_mult: f64,
+    calc: &dyn PricingCalculator,
+) -> (f64, f64) {
+    let hold_amount = calc.estimate_with_tokens(
+        &peek.price_key,
+        peek.input_tokens,
+        peek.max_tokens,
+        peek.stream,
+        rate_mult,
+    );
+    let upper_bound = preflight_upper_bound(
+        calc,
+        &peek.price_key,
+        peek.max_tokens,
+        peek.stream,
+        rate_mult,
+        hold_amount,
+    );
+    (hold_amount, upper_bound)
 }
 
 /// Returns the rejection reason when `estimated` would push any period over its

@@ -9,9 +9,9 @@ use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 
 use crate::ports::{
-    BalanceEvent, BillingError, BillingLedger, Id, PricingCalculator, SettleReceipt,
-    SettlementCommit, SubscriptionQuota, SubscriptionQuotaStore, TokenUsage, UsageLogEntry,
-    UsageStore,
+    BalanceEvent, BillingError, BillingLedger, HoldAdmit, Id, ModelTokenUsage, PricingCalculator,
+    SettleReceipt, SettlementCommit, SubscriptionQuota, SubscriptionQuotaStore, TokenUsage,
+    UsageLogEntry, UsageStore, fold_model_usage,
 };
 use crate::reconcile::{StaleHold, StaleHoldScanner};
 
@@ -47,6 +47,10 @@ impl FakeLedger {
 
     pub(crate) fn held_amount(&self, request_id: &str) -> Option<f64> {
         self.holds.lock().get(request_id).copied()
+    }
+
+    fn available_after_holds(balance: f64, holds: &HashMap<String, f64>) -> f64 {
+        balance - holds.values().sum::<f64>()
     }
 }
 
@@ -109,7 +113,32 @@ impl BillingLedger for FakeLedger {
     }
 
     async fn available_balance(&self, _user_id: Id) -> Result<f64, BillingError> {
-        Ok(*self.balance.lock())
+        let balance = self.balance.lock();
+        let holds = self.holds.lock();
+        Ok(Self::available_after_holds(*balance, &holds))
+    }
+
+    /// 单 Mutex 内完成 floor 检查与预扣，模拟生产 Lua 的原子语义。
+    async fn hold_gated(
+        &self,
+        user_id: Id,
+        amount: f64,
+        min_available: f64,
+        request_id: &str,
+        _ttl: Duration,
+    ) -> Result<HoldAdmit, BillingError> {
+        if let Some(err) = self.hold_fails_with.lock().take() {
+            return Err(err);
+        }
+        let balance = self.balance.lock();
+        let mut holds = self.holds.lock();
+        let available = Self::available_after_holds(*balance, &holds);
+        if available < min_available {
+            return Ok(HoldAdmit::Insufficient { available });
+        }
+        self.calls.lock().push(LedgerCall::Hold { user_id, amount });
+        holds.insert(request_id.to_owned(), amount);
+        Ok(HoldAdmit::Reserved)
     }
 }
 
@@ -291,6 +320,18 @@ impl UsageStore for FakeUsageStore {
     async fn clear_hold(&self, _user_id: Id, request_id: &str) -> anyhow::Result<()> {
         self.cleared_holds.lock().push(request_id.to_owned());
         Ok(())
+    }
+
+    async fn model_usage_since(
+        &self,
+        user_id: Id,
+        _since: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<ModelTokenUsage>> {
+        // 内存双没有 created_at：测试只种「今日」行，窗口过滤交给 SQL 实现。
+        let logs = self.logs.lock();
+        Ok(fold_model_usage(
+            logs.iter().filter(|entry| entry.user_id == user_id),
+        ))
     }
 }
 

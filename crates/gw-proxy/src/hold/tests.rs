@@ -11,9 +11,10 @@ use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use chrono::{Datelike, TimeZone, Timelike, Utc};
 
 use super::*;
-use crate::ports::SubscriptionQuota;
+use crate::ports::{HoldAdmit, SubscriptionQuota};
 use crate::testsupport::{
-    Harness, LedgerCall, TEST_USER_ID, anonymous_request, chat_body, send, signed_request,
+    FakeLedger, Harness, LedgerCall, TEST_USER_ID, anonymous_request, chat_body, send,
+    signed_request,
 };
 
 // ---------------------------------------------------------------- billable paths
@@ -36,10 +37,11 @@ fn only_the_three_inference_entries_are_billable() {
 
 #[test]
 fn the_zero_cost_endpoints_are_out_of_billing_scope() {
-    // 收敛前这三条按 LLM 价格收钱：两条 catalogue 读是纯 DB 读、不出网，
-    // count_tokens 在 Anthropic 那边收 0。都已移出计费范围。
+    // 收敛前 catalogue / count_tokens 按 LLM 价格收钱；`GET /v1/usage` 是
+    // 新加的只读查询，全部 GET 都不进预扣。
     assert!(!is_billable(&Method::GET, "/v1/models"));
     assert!(!is_billable(&Method::GET, "/v1/models/gpt-4o"));
+    assert!(!is_billable(&Method::GET, "/v1/usage"));
     assert!(!is_billable(&Method::POST, "/v1/messages/count_tokens"));
 }
 
@@ -65,11 +67,47 @@ fn billing_peek(body: &[u8]) -> BillingPeek {
     BillingPeek::from_spec(&spec, body.len())
 }
 
+/// A real cache-backed calculator so trim/case variants can miss the table
+/// when they fail to share a key. The default rate is far from the row so a
+/// miss cannot accidentally equal a hit.
+fn priced_calculator(model_id: &str, input: f64, output: f64) -> crate::adapters::SharedCalculator {
+    let row = gw_model::ModelPrice {
+        id: 1,
+        model_id: model_id.to_owned(),
+        input_price_per_1m: input,
+        output_price_per_1m: output,
+        cached_input_price_per_1m: 0.0,
+        reasoning_price_per_1m: 0.0,
+        created_at: chrono::DateTime::<Utc>::UNIX_EPOCH,
+        updated_at: chrono::DateTime::<Utc>::UNIX_EPOCH,
+    };
+    let cache = gw_pricing::ModelPriceCache::from_rows([row]);
+    crate::adapters::SharedCalculator::new(std::sync::Arc::new(gw_pricing::Calculator::new(
+        Some(std::sync::Arc::new(cache)),
+        99.0,
+    )))
+}
+
 #[test]
 fn the_peek_reads_model_and_stream_from_a_json_body() {
     let peek = billing_peek(br#"{"model":" gpt-4o ","stream":true}"#);
     assert_eq!(peek.model, "gpt-4o", "the model name must be trimmed");
+    assert_eq!(
+        peek.price_key,
+        gw_pricing::normalize_model_key(" gpt-4o "),
+        "price_key is the public normalize of the raw model",
+    );
     assert!(peek.stream);
+}
+
+#[test]
+fn the_price_key_is_the_public_normalize_of_the_peeked_model() {
+    for raw in ["Claude-3", "  R1  ", "MiXeD"] {
+        let body = format!(r#"{{"model":"{raw}"}}"#);
+        let peek = billing_peek(body.as_bytes());
+        assert_eq!(peek.price_key, gw_pricing::normalize_model_key(raw));
+        assert_eq!(peek.price_key, gw_pricing::normalize_model_key(&peek.model),);
+    }
 }
 
 #[test]
@@ -346,6 +384,156 @@ fn the_breaker_key_is_derived_from_the_model_family() {
     assert_eq!(infer_provider("mystery-model"), None);
 }
 
+#[test]
+fn compute_reservation_pairs_hold_with_a_dominating_floor() {
+    let calc = crate::testsupport::FakeCalculator::default();
+    let peek = billing_peek(chat_body("gpt-4o").to_string().as_bytes());
+    let (hold, floor) = compute_reservation(&peek, 1.0, &calc);
+    assert!(hold > 0.0);
+    assert!(
+        floor >= hold,
+        "the floor must gate at least as much as the reservation",
+    );
+    assert_eq!(
+        floor,
+        preflight_upper_bound(
+            &calc,
+            &peek.price_key,
+            peek.max_tokens,
+            peek.stream,
+            1.0,
+            hold,
+        ),
+    );
+}
+
+/// Trim and case must not change the reservation: the three estimators share
+/// one already-normalized key. A miss (different id) must not collide, so
+/// the fixture is not a vacuous constant.
+#[test]
+fn compute_reservation_is_invariant_to_model_trim_and_case() {
+    let calc = priced_calculator("Mix-Id", 3.0, 7.0);
+    let variants = ["Mix-Id", "mix-id", "MIX-ID", "  mix-id  "];
+    let pairs: Vec<(f64, f64)> = variants
+        .iter()
+        .map(|model| {
+            let body = format!(r#"{{"model":"{model}","max_tokens":128}}"#);
+            compute_reservation(&billing_peek(body.as_bytes()), 1.5, &calc)
+        })
+        .collect();
+    let first = pairs[0];
+    for pair in &pairs[1..] {
+        assert_eq!(
+            *pair, first,
+            "trim/case variants must share one (hold, floor)",
+        );
+    }
+    let miss = compute_reservation(
+        &billing_peek(br#"{"model":"other-id","max_tokens":128}"#),
+        1.5,
+        &calc,
+    );
+    assert_ne!(miss, first, "a different model must not collide");
+}
+
+// ---------------------------------------------------------------- hold_gated
+
+#[tokio::test]
+async fn hold_gated_floor_refusal_leaves_no_reservation() {
+    let ledger = FakeLedger::with_balance(1.0);
+    let admit = ledger
+        .hold_gated(1, 0.5, 2.0, "req-a", Duration::from_secs(60))
+        .await
+        .expect("lookup");
+    assert!(matches!(admit, HoldAdmit::Insufficient { .. }));
+    assert!(ledger.calls().is_empty());
+    assert!(ledger.held_amount("req-a").is_none());
+}
+
+#[tokio::test]
+async fn hold_gated_quotes_the_available_balance_on_floor_refusal() {
+    let ledger = FakeLedger::with_balance(3.75);
+    let admit = ledger
+        .hold_gated(1, 1.0, 5.0, "req-b", Duration::from_secs(60))
+        .await
+        .expect("lookup");
+    assert_eq!(admit, HoldAdmit::Insufficient { available: 3.75 },);
+}
+
+#[tokio::test]
+async fn an_insufficient_balance_402_quotes_the_peeked_available() {
+    let harness = Harness::build();
+    let peek = billing_peek(chat_body("gpt-4o").to_string().as_bytes());
+    let (_hold, floor) = compute_reservation(&peek, 1.0, harness.calc.as_ref());
+    let quoted_available = floor - 0.01;
+    assert!(
+        quoted_available > 0.0,
+        "fixture needs a positive balance below the floor",
+    );
+    *harness.ledger.balance.lock() = quoted_available;
+
+    let (status, body) = send(
+        harness.stub_router(StatusCode::OK),
+        signed_request("/v1/chat/completions", chat_body("gpt-4o")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+    assert_eq!(body["error"].as_str(), Some("insufficient_balance"));
+    assert!(
+        harness.ledger.calls().is_empty(),
+        "floor refusal must not create a hold",
+    );
+    assert_eq!(
+        body["current_balance"].as_f64(),
+        Some(quoted_available),
+        "the 402 must quote the balance seen at gate time",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_requests_cannot_pass_the_floor_twice_on_one_balance() {
+    let harness = Harness::build();
+    let peek = billing_peek(chat_body("gpt-4o").to_string().as_bytes());
+    let (_hold, floor) = compute_reservation(&peek, 1.0, harness.calc.as_ref());
+    *harness.ledger.balance.lock() = floor;
+
+    let router = harness.stub_router(StatusCode::OK);
+    let mut tasks = Vec::new();
+    for _ in 0..2 {
+        let router = router.clone();
+        tasks.push(tokio::spawn(async move {
+            send(
+                router,
+                signed_request("/v1/chat/completions", chat_body("gpt-4o")),
+            )
+            .await
+        }));
+    }
+
+    let mut ok = 0;
+    let mut denied = 0;
+    for task in tasks {
+        let (status, _) = task.await.expect("request finishes");
+        match status {
+            StatusCode::OK => ok += 1,
+            StatusCode::PAYMENT_REQUIRED => denied += 1,
+            other => panic!("unexpected status {other}"),
+        }
+    }
+    assert_eq!(ok, 1, "exactly one request may pass the atomic floor");
+    assert_eq!(denied, 1);
+    assert_eq!(
+        harness
+            .ledger
+            .calls()
+            .iter()
+            .filter(|c| matches!(c, LedgerCall::Hold { .. }))
+            .count(),
+        1,
+        "only the winner may create a reservation",
+    );
+}
+
 // ---------------------------------------------------------------- middleware
 
 #[tokio::test]
@@ -469,7 +657,7 @@ async fn covering_the_hold_but_not_the_upper_bound_is_refused_without_reserving(
     let body = chat_body("gpt-4o");
     let peek = billing_peek(body.to_string().as_bytes());
     let hold_amount = harness.calc.estimate_with_tokens(
-        &peek.model,
+        &peek.price_key,
         peek.input_tokens,
         peek.max_tokens,
         peek.stream,
@@ -477,7 +665,7 @@ async fn covering_the_hold_but_not_the_upper_bound_is_refused_without_reserving(
     );
     let upper_bound = preflight_upper_bound(
         harness.calc.as_ref(),
-        &peek.model,
+        &peek.price_key,
         peek.max_tokens,
         peek.stream,
         1.0,

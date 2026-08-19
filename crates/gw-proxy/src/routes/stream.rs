@@ -10,6 +10,13 @@
 //! inputs) are in hand, and the ledger write is spawned onto
 //! [`ProxyState::drain`] via [`StreamSettler`]'s `Drop`. That is the same
 //! path a hung-up stream already uses — not a second queue.
+//!
+//! `claim_finalize` 四入口（每请求恰一次结算权）：
+//! | 入口 | 语义 |
+//! | [`stream_response`] | 流式：settler 持票，中间件 finalize 让位 |
+//! | [`unary_response`] | 一元：同上，Drop 时结算 |
+//! | [`schedule_release`] | 上游未出 body：Release |
+//! | [`crate::hold::HoldMiddleware::finalize`] | 兜底：handler 未结算时 settle_missing 或 Release |
 
 use std::future::Future;
 use std::pin::Pin;

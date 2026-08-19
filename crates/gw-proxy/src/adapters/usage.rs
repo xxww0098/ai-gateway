@@ -19,7 +19,9 @@ use gw_infra::Db;
 use gw_ledger::Ledger;
 use std::sync::Arc;
 
-use crate::ports::{BalanceEvent, Id, SettleReceipt, SettlementCommit, UsageLogEntry, UsageStore};
+use crate::ports::{
+    BalanceEvent, Id, ModelTokenUsage, SettleReceipt, SettlementCommit, UsageLogEntry, UsageStore,
+};
 use crate::usage::merge_shortfall;
 
 /// Transactional settlement writes.
@@ -150,6 +152,52 @@ impl UsageStore for SqlUsageStore {
     async fn clear_hold(&self, user_id: Id, request_id: &str) -> anyhow::Result<()> {
         Ok(self.ledger.clear_hold(user_id, request_id).await?)
     }
+
+    async fn model_usage_since(
+        &self,
+        user_id: Id,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<Vec<ModelTokenUsage>> {
+        let rows: Vec<ModelUsageRow> = sqlx::query_as(
+            "SELECT \
+                CASE WHEN BTRIM(COALESCE(model, '')) = '' THEN 'unknown' ELSE BTRIM(model) END \
+                    AS model, \
+                COUNT(*)::bigint AS requests, \
+                COALESCE(SUM(CASE WHEN input_tokens > 0 THEN input_tokens ELSE tokens_in END), 0) \
+                    ::bigint AS tokens_in, \
+                COALESCE(SUM(CASE WHEN output_tokens > 0 THEN output_tokens ELSE tokens_out END), 0) \
+                    ::bigint AS tokens_out \
+             FROM usage_logs \
+             WHERE user_id = $1 AND created_at >= $2 \
+             GROUP BY 1 \
+             ORDER BY requests DESC, model ASC",
+        )
+        .bind(user_id)
+        .bind(since)
+        .fetch_all(&self.db)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| ModelTokenUsage {
+                model: row.model,
+                requests: row.requests,
+                tokens_in: row.tokens_in,
+                tokens_out: row.tokens_out,
+            })
+            .collect())
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct ModelUsageRow {
+    #[sqlx(try_from = "gw_model::compat::Text")]
+    model: String,
+    #[sqlx(try_from = "gw_model::compat::Int")]
+    requests: i64,
+    #[sqlx(try_from = "gw_model::compat::Int")]
+    tokens_in: i64,
+    #[sqlx(try_from = "gw_model::compat::Int")]
+    tokens_out: i64,
 }
 
 /// The `usage_logs` insert, shared by the transactional and standalone paths.

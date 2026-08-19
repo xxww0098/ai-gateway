@@ -361,6 +361,14 @@ impl ModelCatalog for OneModelCatalog {
             owned_by: "openai".to_owned(),
         }])
     }
+
+    async fn get_model(&self, id: &str) -> anyhow::Result<Option<ModelEntry>> {
+        Ok(self
+            .list_models()
+            .await?
+            .into_iter()
+            .find(|model| model.id == id))
+    }
 }
 
 // ---------------------------------------------------------------- 凭证

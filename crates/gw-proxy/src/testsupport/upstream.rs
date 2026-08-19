@@ -207,11 +207,36 @@ impl Provider for FakeProvider {
 #[derive(Default)]
 pub(crate) struct FakeCatalog {
     pub(crate) models: Mutex<Vec<ModelEntry>>,
+    /// How many times the listing was walked. A detail request that increments
+    /// this is scanning the whole catalogue to find one id.
+    list_calls: AtomicUsize,
+    get_calls: AtomicUsize,
+}
+
+impl FakeCatalog {
+    pub(crate) fn list_calls(&self) -> usize {
+        self.list_calls.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn get_calls(&self) -> usize {
+        self.get_calls.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait]
 impl ModelCatalog for FakeCatalog {
     async fn list_models(&self) -> anyhow::Result<Vec<ModelEntry>> {
+        self.list_calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.models.lock().clone())
+    }
+
+    async fn get_model(&self, id: &str) -> anyhow::Result<Option<ModelEntry>> {
+        self.get_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self
+            .models
+            .lock()
+            .iter()
+            .find(|model| model.id == id)
+            .cloned())
     }
 }

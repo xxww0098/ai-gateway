@@ -354,6 +354,63 @@ pub trait UsageStore: Send + Sync {
 
     /// Releases the Redis reservation after the settle transaction commits.
     async fn clear_hold(&self, user_id: Id, request_id: &str) -> anyhow::Result<()>;
+
+    /// 当地今日零点以来、按模型折叠的 token 消耗。供 `GET /v1/usage`。
+    async fn model_usage_since(
+        &self,
+        user_id: Id,
+        since: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<ModelTokenUsage>>;
+}
+
+/// 一个模型在某个时间窗内的 token 小计。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelTokenUsage {
+    pub model: String,
+    pub requests: i64,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+}
+
+impl ModelTokenUsage {
+    /// `tokens_in + tokens_out`，给 JSON 的 `tokens` 字段。
+    #[must_use]
+    pub fn tokens(&self) -> i64 {
+        self.tokens_in.saturating_add(self.tokens_out)
+    }
+}
+
+/// 把逐条 usage 折成按模型的 token 小计。空模型名变成 `unknown`。
+///
+/// 排序与面板 `buildUsageModels` 同口径：请求数降序，同数按模型名升序。
+#[must_use]
+pub fn fold_model_usage<'a>(
+    logs: impl IntoIterator<Item = &'a UsageLogEntry>,
+) -> Vec<ModelTokenUsage> {
+    let mut table: HashMap<String, ModelTokenUsage> = HashMap::new();
+    for entry in logs {
+        let name = entry.model.trim();
+        let name = if name.is_empty() { "unknown" } else { name };
+        let point = table
+            .entry(name.to_owned())
+            .or_insert_with(|| ModelTokenUsage {
+                model: name.to_owned(),
+                requests: 0,
+                tokens_in: 0,
+                tokens_out: 0,
+            });
+        point.requests += 1;
+        point.tokens_in += entry.input_tokens;
+        point.tokens_out += entry.output_tokens;
+    }
+    let mut items: Vec<ModelTokenUsage> = table.into_values().collect();
+    items.sort_by(|left, right| {
+        right
+            .requests
+            .cmp(&left.requests)
+            .then_with(|| left.model.cmp(&right.model))
+    });
+    items
 }
 
 // ---------------------------------------------------------------- infra
@@ -478,6 +535,19 @@ pub struct ModelReasoningEffort {
 #[async_trait]
 pub trait ModelCatalog: Send + Sync {
     async fn list_models(&self) -> anyhow::Result<Vec<ModelEntry>>;
+
+    /// One visible catalogue entry, or `None` when the id is hidden or absent.
+    ///
+    /// The default walks [`Self::list_models`]. Adapters that can look up a
+    /// single row — or a snapshot keyed by id — override this so a detail
+    /// request does not rescan the listing.
+    async fn get_model(&self, id: &str) -> anyhow::Result<Option<ModelEntry>> {
+        Ok(self
+            .list_models()
+            .await?
+            .into_iter()
+            .find(|model| model.id == id))
+    }
 
     /// **路由用**的 `model_id → channel_key[]`，顺序即优先级。
     ///

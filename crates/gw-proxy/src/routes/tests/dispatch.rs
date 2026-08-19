@@ -3,6 +3,8 @@
 //! whole billing pipeline depends on.
 
 use super::*;
+use crate::ports::{BillingLedger, UsageLogEntry, UsageStore, fold_model_usage};
+use crate::testsupport::TEST_USER_ID;
 
 // ---------------------------------------------------------------- routing
 
@@ -671,7 +673,11 @@ async fn the_endpoints_moved_out_of_billing_are_still_behind_authentication() {
     // 「不计费」不等于「不鉴权」。两道门共用 `is_proxy_path`，
     // 但计费那道额外排除了 GET 与 count_tokens —— 排除的是**收钱**，不是**认人**。
     let harness = Harness::build();
-    for (method, path) in [("GET", "/v1/models"), ("POST", "/v1/messages/count_tokens")] {
+    for (method, path) in [
+        ("GET", "/v1/models"),
+        ("GET", "/v1/usage"),
+        ("POST", "/v1/messages/count_tokens"),
+    ] {
         let request = axum::http::Request::builder()
             .method(method)
             .uri(path)
@@ -817,7 +823,10 @@ async fn listing_models_exposes_catalog_capabilities_verbatim() {
 
     assert_eq!(vision["context_length"], 128_000);
     assert_eq!(vision["max_output_tokens"], 16_384);
-    assert_eq!(vision["input_modalities"], serde_json::json!(["text", "image"]));
+    assert_eq!(
+        vision["input_modalities"],
+        serde_json::json!(["text", "image"])
+    );
     assert_eq!(
         vision["reasoning"]["efforts"]
             .as_array()
@@ -839,4 +848,166 @@ async fn listing_models_exposes_catalog_capabilities_verbatim() {
             .iter()
             .all(|m| m != "image")
     );
+}
+
+#[tokio::test]
+async fn fetching_one_catalogued_model_returns_that_entry() {
+    let harness = Harness::build();
+    let expected = harness.catalog.models.lock()[0].clone();
+    let (status, body) = send(
+        harness.router(),
+        signed_get(&format!("/v1/models/{}", expected.id)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["id"].as_str(), Some(expected.id.as_str()));
+    assert_eq!(body["object"].as_str(), Some("model"));
+    assert_eq!(body["owned_by"].as_str(), Some(expected.owned_by.as_str()));
+    assert_eq!(body["created"].as_i64(), Some(expected.created));
+}
+
+#[tokio::test]
+async fn fetching_a_missing_or_hidden_model_is_not_found() {
+    let harness = Harness::build();
+    let (status, _) = send(
+        harness.router(),
+        signed_get("/v1/models/not-in-the-catalogue"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn fetching_one_model_does_not_walk_the_whole_catalogue() {
+    let harness = Harness::build();
+    let id = harness.catalog.models.lock()[0].id.clone();
+    let listed_before = harness.catalog.list_calls();
+    let (status, _) = send(harness.router(), signed_get(&format!("/v1/models/{id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        harness.catalog.list_calls(),
+        listed_before,
+        "detail must look up one id instead of listing every model",
+    );
+    assert!(
+        harness.catalog.get_calls() > 0,
+        "the point-lookup path must have been used",
+    );
+}
+
+// ---------------------------------------------------------------- GET /v1/usage
+
+#[tokio::test]
+async fn reading_usage_without_a_bearer_is_unauthorized() {
+    let harness = Harness::build();
+    let request = axum::http::Request::builder()
+        .uri("/v1/usage")
+        .body(axum::body::Body::empty())
+        .expect("request builds");
+    let (status, _) = send_settled(&harness, request).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+        harness.ledger.calls().is_empty(),
+        "匿名查询不该碰账本：{:?}",
+        harness.ledger.calls(),
+    );
+}
+
+#[tokio::test]
+async fn an_api_key_sees_wallet_balance_and_today_model_tokens() {
+    let harness = Harness::build();
+    let balance = 23.75;
+    *harness.ledger.balance.lock() = balance;
+
+    let mine = |model: &str, input: i64, output: i64| UsageLogEntry {
+        user_id: TEST_USER_ID,
+        model: model.to_owned(),
+        input_tokens: input,
+        output_tokens: output,
+        ..UsageLogEntry::default()
+    };
+    let seeded = [
+        mine("alpha", 10, 4),
+        mine("alpha", 3, 1),
+        mine("beta", 8, 2),
+        UsageLogEntry {
+            user_id: TEST_USER_ID + 1,
+            model: "other".to_owned(),
+            input_tokens: 99,
+            output_tokens: 99,
+            ..UsageLogEntry::default()
+        },
+    ];
+    for entry in &seeded {
+        harness
+            .usage_store
+            .insert_usage_log(entry)
+            .await
+            .expect("seed usage log");
+    }
+
+    let (status, body) = send_settled(&harness, signed_get("/v1/usage")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["object"].as_str(), Some("usage"));
+
+    let quoted = body["balance_usd"].as_f64().expect("balance_usd");
+    let ledger_balance = harness
+        .ledger
+        .available_balance(TEST_USER_ID)
+        .await
+        .expect("ledger balance");
+    assert_eq!(quoted, ledger_balance);
+    assert_eq!(quoted, balance);
+
+    let expected = fold_model_usage(seeded.iter().filter(|entry| entry.user_id == TEST_USER_ID));
+    let got = body["models"].as_array().expect("models array");
+    assert_eq!(got.len(), expected.len());
+    for (row, want) in got.iter().zip(expected.iter()) {
+        assert_eq!(row["model"].as_str(), Some(want.model.as_str()));
+        assert_eq!(row["requests"].as_i64(), Some(want.requests));
+        assert_eq!(row["tokens_in"].as_i64(), Some(want.tokens_in));
+        assert_eq!(row["tokens_out"].as_i64(), Some(want.tokens_out));
+        assert_eq!(row["tokens"].as_i64(), Some(want.tokens()));
+    }
+    assert!(
+        got.iter().all(|row| row["model"].as_str() != Some("other")),
+        "别人的用量不能漏进来",
+    );
+
+    assert!(
+        harness.ledger.calls().is_empty(),
+        "用量查询是只读的，不该 Hold/Settle/Release：{:?}",
+        harness.ledger.calls(),
+    );
+    assert!(harness.usage_store.settled_costs().is_empty());
+}
+
+#[tokio::test]
+async fn usage_with_no_logs_reports_an_empty_model_list() {
+    let harness = Harness::build();
+    let (status, body) = send_settled(&harness, signed_get("/v1/usage")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["models"].as_array().map(Vec::is_empty),
+        Some(true),
+        "没有今日用量必须是空数组，不能缺字段",
+    );
+    assert!(
+        body.get("subscription").is_none() && body.get("has_outstanding_debt").is_none(),
+        "这条接口只报余额和模型 token，不应再带订阅或欠款",
+    );
+}
+
+#[test]
+fn an_empty_model_name_folds_to_unknown() {
+    let entry = UsageLogEntry {
+        model: "  ".to_owned(),
+        input_tokens: 1,
+        output_tokens: 2,
+        ..UsageLogEntry::default()
+    };
+    let folded = fold_model_usage(std::iter::once(&entry));
+    assert_eq!(folded.len(), 1);
+    assert_eq!(folded[0].model, "unknown");
+    assert_eq!(folded[0].tokens(), entry.input_tokens + entry.output_tokens);
 }

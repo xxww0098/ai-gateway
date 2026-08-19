@@ -2,7 +2,7 @@
 //! cannot be observed against a fake.
 
 use super::*;
-use crate::ports::UsageLogEntry;
+use crate::ports::{UsageLogEntry, UsageStore};
 use crate::testsupport::{fresh_db, seed_user};
 
 fn entry(user_id: Id, request_id: &str, cost: f64) -> UsageLogEntry {
@@ -276,4 +276,58 @@ async fn a_balance_event_lands_with_its_reference() {
             .await
             .expect("reading balance_logs");
     assert_eq!(rows, [("balance_depleted".to_owned(), "req-1".to_owned())]);
+}
+
+#[tokio::test]
+#[ignore = "needs a local Postgres: see testsupport::PG_HOWTO"]
+async fn model_usage_since_sums_today_and_ignores_other_users_and_older_rows() {
+    let pool = fresh_db("usage_model_tokens").await;
+    seed_user(&pool, 7, 10.0).await;
+    seed_user(&pool, 8, 10.0).await;
+    let store = store(&pool);
+
+    let mut alpha = entry(7, "req-a", 0.0);
+    alpha.model = "alpha".to_owned();
+    alpha.input_tokens = 10;
+    alpha.output_tokens = 4;
+    let mut alpha_again = entry(7, "req-b", 0.0);
+    alpha_again.model = "alpha".to_owned();
+    alpha_again.input_tokens = 3;
+    alpha_again.output_tokens = 1;
+    let mut yesterday = entry(7, "req-c", 0.0);
+    yesterday.model = "beta".to_owned();
+    yesterday.input_tokens = 8;
+    yesterday.output_tokens = 2;
+    let mut stranger = entry(8, "req-d", 0.0);
+    stranger.model = "other".to_owned();
+    stranger.input_tokens = 99;
+    stranger.output_tokens = 99;
+
+    for row in [&alpha, &alpha_again, &yesterday, &stranger] {
+        store.insert_usage_log(row).await.expect("seed usage_logs");
+    }
+    sqlx::query(
+        "UPDATE usage_logs SET created_at = NOW() - INTERVAL '2 days' WHERE request_id = $1",
+    )
+    .bind("req-c")
+    .execute(&pool)
+    .await
+    .expect("backdate yesterday");
+
+    let since = chrono::Utc::now() - chrono::Duration::hours(1);
+    let rows = store
+        .model_usage_since(7, since)
+        .await
+        .expect("aggregate today");
+    assert_eq!(rows.len(), 1, "昨天的 beta 和别人的 other 都必须排除");
+    assert_eq!(rows[0].model, alpha.model);
+    assert_eq!(
+        rows[0].tokens_in,
+        alpha.input_tokens + alpha_again.input_tokens
+    );
+    assert_eq!(
+        rows[0].tokens_out,
+        alpha.output_tokens + alpha_again.output_tokens
+    );
+    assert_eq!(rows[0].requests, 2);
 }

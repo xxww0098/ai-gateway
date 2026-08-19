@@ -44,8 +44,6 @@ pub struct SettleCtx {
 #[derive(Debug)]
 pub struct RequestBilling {
     pub ctx: SettleCtx,
-    /// Amount actually reserved, used as the conservative fallback cost.
-    pub hold_amount: f64,
     /// True when the reservation came from the process-local budget token
     /// rather than a Redis hold, so the finalizer must not Release.
     pub used_budget_token: bool,
@@ -53,11 +51,10 @@ pub struct RequestBilling {
 }
 
 impl RequestBilling {
-    /// Creates the per-request record. `hold_amount` is what was reserved.
-    pub fn new(ctx: SettleCtx, hold_amount: f64, used_budget_token: bool) -> Self {
+    /// Creates the per-request record.
+    pub fn new(ctx: SettleCtx, used_budget_token: bool) -> Self {
         Self {
             ctx,
-            hold_amount,
             used_budget_token,
             finalized: AtomicBool::new(false),
         }

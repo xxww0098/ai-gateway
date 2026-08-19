@@ -29,7 +29,7 @@ mod calculator;
 #[cfg(test)]
 mod testsupport;
 
-pub use cache::ModelPriceCache;
+pub use cache::{ModelPriceCache, normalize_model_key};
 pub use calculator::{
     Calculator, CostBreakdown, ESTIMATED_TOKENS, STREAM_MULTIPLIER, TOKENS_PER_UNIT, TokenUsage,
 };

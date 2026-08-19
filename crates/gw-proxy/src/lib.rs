@@ -9,9 +9,9 @@
 //! | B | `POST /v1/responses` | OpenAI Responses |
 //! | C | `POST /v1/messages` | Anthropic Messages |
 //!
-//! 另有三条**非推理**路由随入口一起留下，且**全部不计费**
+//! 另有四条**非推理**路由随入口一起留下，且**全部不计费**
 //! （`hold::is_billable`）：`POST /v1/messages/count_tokens`（入口 C 的附属端点）、
-//! `GET /v1/models`、`GET /v1/models/{model}`。
+//! `GET /v1/models`、`GET /v1/models/{model}`、`GET /v1/usage`。
 //!
 //! 只有一个前缀：`/v1/`（[`access::is_proxy_path`]）。
 //!
@@ -173,7 +173,7 @@ impl ProxyState {
 /// Builds the metered proxy routes — 只有 `/v1/*` —— with the billing
 /// middleware stack attached.
 ///
-/// 六条路由，一条不多：三个推理入口 + `count_tokens` + 两条 catalogue 读。
+/// 七条路由，一条不多：三个推理入口 + `count_tokens` + 两条 catalogue 读 + 用量查询。
 /// 被删掉的六条（`POST /v1/completions`、`POST /v1/embeddings`、
 /// `POST /v1/models/{model}`、`GET /v1beta/models`、`GET /v1beta/models/{model}`、
 /// `POST /v1beta/models/{model}`）是**硬删**，不是 410 过渡 —— 判定表见
@@ -198,6 +198,7 @@ pub fn router(state: ProxyState) -> Router {
         // 只挂 `.get()`。历史上这条路径还挂了 `.post(gemini_generate)`
         // —— Google Generative Language API 的 GA 别名 —— 它随 `/v1beta` 一起删了。
         .route("/v1/models/{model}", get(routes::model_detail))
+        .route("/v1/usage", get(routes::usage))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             kernel::layer,

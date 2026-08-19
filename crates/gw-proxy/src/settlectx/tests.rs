@@ -14,7 +14,6 @@ fn billing() -> Arc<RequestBilling> {
             rate_mult: 1.0,
             ..SettleCtx::default()
         },
-        0.5,
         false,
     ))
 }
@@ -54,12 +53,23 @@ async fn exactly_one_of_many_concurrent_claimants_settles() {
 }
 
 #[test]
-fn the_reservation_details_the_finalizer_needs_survive_on_the_handle() {
-    let billing = RequestBilling::new(SettleCtx::default(), 1.25, true);
-    assert_eq!(billing.hold_amount, 1.25);
+fn budget_token_reservations_skip_redis_release_in_the_finalizer() {
+    let billing = RequestBilling::new(SettleCtx::default(), true);
     assert!(
         billing.used_budget_token,
         "a budget-token reservation must be distinguishable, or the finalizer \
          would Release a Redis hold that was never taken",
     );
+}
+
+#[test]
+fn a_late_finalizer_cannot_reclaim_settlement_after_the_dispatcher_wins() {
+    // 模拟 stream/unary claim 已赢、hold::finalize 晚到的情况。
+    let billing = billing();
+    assert!(billing.claim_finalize());
+    assert!(
+        !billing.claim_finalize(),
+        "the hold middleware safety net must stand down once billing is claimed",
+    );
+    assert!(billing.is_finalized());
 }

@@ -508,8 +508,8 @@ impl Settlement {
         }
     }
 
-    /// Ledger handle, for [`crate::reconcile`].
-    pub(crate) fn store(&self) -> &Arc<dyn UsageStore> {
+    /// 用量存储。`GET /v1/usage` 与 [`crate::reconcile`] 共用。
+    pub fn store(&self) -> &Arc<dyn UsageStore> {
         &self.store
     }
 }

@@ -46,7 +46,7 @@ use gw_relay::endpoint::upstream::ChannelResolver;
 
 use crate::ProxyState;
 use crate::channel::ChannelPool;
-use crate::error::DispatchError;
+use crate::error::{DispatchError, HoldRejection};
 use crate::hold::PeekedBody;
 use crate::kernel::{Phase, RelayCtx};
 use crate::ports::{CircuitBreaker, ModelCatalog};
@@ -715,16 +715,72 @@ pub async fn models(State(state): State<ProxyState>) -> Response {
     }
 }
 
+/// `GET /v1/usage` —— 用现有 Bearer 查钱包余额和当地今日按模型的 token 消耗。
+///
+/// **不计费**：`is_billable` 排除全部 GET，不会 Hold/Settle。
+/// 响应是裸 JSON（与 `GET /v1/models` 一样），不是面板 `{code,data}` 信封。
+/// 账本 / 用量读失败走内部错误，不 402 —— 这条路径不进预扣，402 会误导客户端以为被拒付。
+pub async fn usage(State(state): State<ProxyState>, req: Request) -> Response {
+    let Some(meta) = req
+        .extensions()
+        .get::<RelayCtx>()
+        .map(|ctx| ctx.access.clone())
+    else {
+        return HoldRejection::MissingAccessContext.into_response();
+    };
+
+    let (balance, models) = tokio::join!(
+        state.hold.ledger().available_balance(meta.user_id),
+        state
+            .hold
+            .usage_store()
+            .model_usage_since(meta.user_id, local_today_start()),
+    );
+    let (balance_usd, models) = match (balance, models) {
+        (Ok(balance), Ok(models)) => (balance, models),
+        (Err(err), _) => {
+            tracing::warn!(%err, user_id = meta.user_id, "usage ledger lookup failed");
+            return DispatchError::Internal(err.into()).into_response();
+        }
+        (_, Err(err)) => {
+            tracing::warn!(%err, user_id = meta.user_id, "usage model lookup failed");
+            return DispatchError::Internal(err).into_response();
+        }
+    };
+
+    axum::Json(serde_json::json!({
+        "object": "usage",
+        "balance_usd": balance_usd,
+        "models": models.iter().map(|row| serde_json::json!({
+            "model": row.model,
+            "requests": row.requests,
+            "tokens_in": row.tokens_in,
+            "tokens_out": row.tokens_out,
+            "tokens": row.tokens(),
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response()
+}
+
+/// 当地今日零点，与面板 `/user/usage/stats` 的 `today` 窗口同一口径。
+fn local_today_start() -> chrono::DateTime<chrono::Utc> {
+    use chrono::{Local, TimeZone as _};
+    let day = Local::now().date_naive();
+    match Local.from_local_datetime(&day.and_hms_opt(0, 0, 0).unwrap_or_default()) {
+        chrono::LocalResult::Single(at) => at.to_utc(),
+        chrono::LocalResult::Ambiguous(earliest, _) => earliest.to_utc(),
+        chrono::LocalResult::None => chrono::Utc::now(),
+    }
+}
+
 /// `GET /v1/models/{model}` — one catalogue entry.
 pub async fn model_detail(State(state): State<ProxyState>, Path(model): Path<String>) -> Response {
     let Some(catalog) = &state.dispatch.catalog else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    match catalog.list_models().await {
-        Ok(models) => match models.iter().find(|m| m.id == model) {
-            Some(m) => axum::Json(model_json(m)).into_response(),
-            None => StatusCode::NOT_FOUND.into_response(),
-        },
+    match catalog.get_model(&model).await {
+        Ok(Some(entry)) => axum::Json(model_json(&entry)).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(err) => DispatchError::Internal(err).into_response(),
     }
 }

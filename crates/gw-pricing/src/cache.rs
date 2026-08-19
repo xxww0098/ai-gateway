@@ -117,8 +117,14 @@ impl ModelPriceCache {
     /// Looks up a price. The key is trimmed and lower-cased, matching the
     /// normalization applied when the snapshot was built, so callers need not
     /// care about the casing an upstream used for the model id.
+    ///
+    /// A caller that already holds a [`normalize_model_key`] result skips the
+    /// allocation: the hot hold path peeks once and reuses that key.
     #[must_use]
     pub fn get(&self, model_id: &str) -> Option<Arc<ModelPrice>> {
+        if is_canonical_price_key(model_id) {
+            return self.items.load().get(model_id).cloned();
+        }
         let key = normalize_model_key(model_id);
         if key.is_empty() {
             return None;
@@ -205,8 +211,20 @@ impl ModelPriceCache {
 
 /// Canonical cache-key form for a model id. Keeping it in one place is what
 /// lets [`ModelPriceCache::get`] and the snapshot builder agree.
-fn normalize_model_key(model_id: &str) -> String {
+///
+/// Proxy billing calls this once per request and reuses the result across
+/// the three estimators, so lookup does not `trim` + `to_lowercase` again.
+#[must_use]
+pub fn normalize_model_key(model_id: &str) -> String {
     model_id.trim().to_lowercase()
+}
+
+/// Already in [`normalize_model_key`] form: no leading/trailing whitespace
+/// and no uppercase, so [`ModelPriceCache::get`] can hash the slice as-is.
+fn is_canonical_price_key(model_id: &str) -> bool {
+    !model_id.is_empty()
+        && model_id.trim().len() == model_id.len()
+        && !model_id.chars().any(char::is_uppercase)
 }
 
 #[cfg(test)]

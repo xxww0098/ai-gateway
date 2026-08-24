@@ -372,8 +372,7 @@ pub trait UsageStore: Send + Sync {
     async fn insert_balance_event(&self, event: &BalanceEvent) -> anyhow::Result<()>;
 
     /// Releases the Redis reservation after the settle transaction commits.
-    async fn clear_hold(&self, user_id: Id, operation: &BillingOperationId)
-    -> anyhow::Result<()>;
+    async fn clear_hold(&self, user_id: Id, operation: &BillingOperationId) -> anyhow::Result<()>;
 
     /// 当地今日零点以来、按模型折叠的 token 消耗。供 `GET /v1/usage`。
     async fn model_usage_since(

@@ -53,8 +53,12 @@ impl OperationState {
     /// Parses a stored literal. An unrecognised value is `None` — treating an
     /// unknown state as `Held` would let a future state be silently
     /// re-charged.
+    ///
+    /// Deliberately not `FromStr`: that trait's `Err` would have to be a real
+    /// error type, and every caller here wants "unknown → refuse", not a
+    /// message.
     #[must_use]
-    pub fn from_str(raw: &str) -> Option<Self> {
+    pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "held" => Some(Self::Held),
             "settled" => Some(Self::Settled),

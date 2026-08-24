@@ -830,11 +830,13 @@ async fn the_reconcile_scan_reports_only_non_terminal_operations() {
         .expect("settle");
 
     // Age both rows past the cutoff so the only thing separating them is state.
-    sqlx::query("UPDATE billing_operations SET created_at = NOW() - interval '2 hours' WHERE user_id = $1")
-        .bind(user)
-        .execute(&fx.pool)
-        .await
-        .expect("age the rows");
+    sqlx::query(
+        "UPDATE billing_operations SET created_at = NOW() - interval '2 hours' WHERE user_id = $1",
+    )
+    .bind(user)
+    .execute(&fx.pool)
+    .await
+    .expect("age the rows");
 
     let found = fx
         .ledger
@@ -843,7 +845,11 @@ async fn the_reconcile_scan_reports_only_non_terminal_operations() {
         .expect("scan");
     let mine: Vec<_> = found.into_iter().filter(|op| op.user_id == user).collect();
 
-    assert_eq!(mine.len(), 1, "only the held operation is reconcilable: {mine:?}");
+    assert_eq!(
+        mine.len(),
+        1,
+        "only the held operation is reconcilable: {mine:?}"
+    );
     assert_eq!(mine[0].operation_id, held.operation_id);
     assert!(approx(mine[0].reserved_amount, 3.0));
     assert!(mine[0].age_seconds >= 3600);

@@ -15,16 +15,15 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::common::{
-    DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_CLAUDE, ProviderConfig, nested_string, requested_model,
-    resolve_timeout, shared_client, stream_response, string_from_map, usage_stream,
+    PROVIDER_CLAUDE, ProviderConfig, nested_string, relay_timeouts, resolve_timeout,
+    string_from_map,
 };
-use crate::types::{
-    Provider, ProviderError, ProviderRequest, ProviderResponse, StreamResponse,
-    copy_outbound_headers,
-};
+use crate::route::{RoutePlan, RoutePlanner};
+use crate::types::{ProviderError, ProviderRequest};
 use crate::usage::{UsageTokens, max_usage_tokens, parse_claude_usage};
+use gw_relay::{Credential, UpstreamDialect};
 
-use shared::{append_query, default_content_negotiation, upstream_error};
+use shared::{append_query, default_content_negotiation};
 
 const CLAUDE_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const CLAUDE_MESSAGES_PATH: &str = "/v1/messages";
@@ -51,7 +50,6 @@ pub struct ClaudeProvider {
     base_url: String,
     api_key: String,
     timeout: Duration,
-    client: reqwest::Client,
 }
 
 /// A resolved upstream credential plus which shape it came from.
@@ -120,7 +118,6 @@ impl ClaudeProvider {
             base_url,
             api_key: cfg.api_key.trim().to_owned(),
             timeout: resolve_timeout(timeout_seconds),
-            client: shared_client(),
         })
     }
 
@@ -237,81 +234,69 @@ impl ClaudeProvider {
         Ok(parsed)
     }
 
-    /// Stamps the credential onto an outbound header map.
+    /// The provider-owned headers for an outbound Messages request.
     ///
-    /// `x-api-key` replaces whatever the caller sent — an inbound key is about
-    /// the *client* leg and must never reach Anthropic — while
     /// `anthropic-version` only fills a gap, so a caller can still pin an older
-    /// API version.
-    fn inject_credential_headers(
-        headers: &mut HeaderMap,
-        credential: &ClaudeCredential,
-    ) -> Result<(), ProviderError> {
-        let value = HeaderValue::from_str(&credential.value).map_err(|_| {
-            ProviderError::Credential("claude credential is not a valid header value".to_owned())
-        })?;
-        headers.insert("x-api-key", value);
-        if !headers.contains_key("anthropic-version") {
+    /// API version. The credential is **not** here — it travels as
+    /// [`RoutePlan::credential`] and the relay is what strips the client's own
+    /// `x-api-key` and marks the replacement sensitive.
+    fn outbound_headers(req: &ProviderRequest, stream: bool) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        default_content_negotiation(&mut headers, stream);
+        // `default_content_negotiation` only fills gaps in the map it is given,
+        // so anything the client already sent has to be honoured here.
+        for name in [http::header::CONTENT_TYPE, http::header::ACCEPT] {
+            if req.headers.contains_key(&name) && !stream {
+                headers.remove(&name);
+            }
+        }
+        if !req.headers.contains_key("anthropic-version") {
             headers.insert(
                 "anthropic-version",
                 HeaderValue::from_static(CLAUDE_ANTHROPIC_VERSION),
             );
         }
-        Ok(())
+        headers
     }
 
-    /// Assembles an outbound Messages request.
-    fn build_request(
+    /// Plans an outbound Messages request.
+    fn plan_messages(
         &self,
         req: &ProviderRequest,
-        stream: bool,
         credential: &ClaudeCredential,
         base_url: &str,
-    ) -> Result<reqwest::RequestBuilder, ProviderError> {
+    ) -> Result<RoutePlan, ProviderError> {
         if credential.value.is_empty() {
             return Err(ProviderError::Credential(
                 "claude credential is required".to_owned(),
             ));
         }
-        let endpoint = Self::messages_endpoint(&req.query, base_url)?;
-
-        let mut headers = HeaderMap::new();
-        copy_outbound_headers(&mut headers, &req.headers);
-        default_content_negotiation(&mut headers, stream);
-        Self::inject_credential_headers(&mut headers, credential)?;
-
-        let mut builder = self
-            .client
-            .post(endpoint)
-            .headers(headers)
-            .body(req.payload.clone());
-        if !stream {
-            builder = builder.timeout(self.timeout);
-        }
-        Ok(builder)
+        Ok(RoutePlan {
+            provider: PROVIDER_CLAUDE,
+            endpoint: Self::messages_endpoint(&req.query, base_url)?,
+            credential: Credential::XApiKey(credential.value.clone()),
+            headers: Self::outbound_headers(req, req.stream),
+            body: None,
+            timeouts: relay_timeouts(self.timeout),
+            dialect: UpstreamDialect::AnthropicMessages,
+        })
     }
 
     async fn refresh_oauth_token(
         &self,
         refresh_token: &str,
     ) -> Result<ClaudeRefreshResponse, ProviderError> {
-        let response = self
-            .client
-            .post(CLAUDE_OAUTH_TOKEN_URL)
-            .timeout(self.timeout)
-            .header(http::header::ACCEPT, "application/json")
-            .json(&serde_json::json!({
+        let payload = crate::oauth::post_json(
+            CLAUDE_OAUTH_TOKEN_URL,
+            self.timeout,
+            "claude",
+            &serde_json::json!({
                 "client_id": CLAUDE_OAUTH_CLIENT_ID,
                 "grant_type": "refresh_token",
                 "refresh_token": refresh_token,
-            }))
-            .send()
-            .await?;
-        let status = response.status().as_u16();
-        let payload = response.bytes().await?;
-        if status >= 400 {
-            return Err(upstream_error(status, &payload));
-        }
+            }),
+        )
+        .await?;
         serde_json::from_slice(&payload).map_err(|err| {
             ProviderError::Other(anyhow::anyhow!("parsing claude refresh response: {err}"))
         })
@@ -346,69 +331,48 @@ pub fn parse_claude_stream_usage(body: &[u8]) -> Option<UsageTokens> {
 }
 
 #[async_trait::async_trait]
-impl Provider for ClaudeProvider {
+impl RoutePlanner for ClaudeProvider {
     fn name(&self) -> &'static str {
         PROVIDER_CLAUDE
     }
 
-    /// On a non-2xx a failed status becomes [`ProviderError::Upstream`]
-    /// carrying the `(status, payload)` pair.
-    async fn execute(
+    async fn plan(
         &self,
         auth: &AuthRecord,
-        req: ProviderRequest,
-    ) -> Result<ProviderResponse, ProviderError> {
+        req: &ProviderRequest,
+    ) -> Result<RoutePlan, ProviderError> {
         let (credential, base_url) = self.resolve_credentials(Some(auth));
-        let model = requested_model(&req);
-        let response = self
-            .build_request(&req, false, &credential, &base_url)?
-            .send()
-            .await?;
-
-        let status = response.status().as_u16();
-        let headers = response.headers().clone();
-        let body = response.bytes().await?;
-        if status >= 400 {
-            return Err(upstream_error(status, &body));
-        }
-        Ok(ProviderResponse {
-            status,
-            headers,
-            usage: parse_claude_usage(&body).map(|t| t.to_record(model, PROVIDER_CLAUDE)),
-            body,
-        })
+        self.plan_messages(req, &credential, &base_url)
     }
 
-    /// Bytes are relayed verbatim; usage is parsed out of a bounded side buffer
-    /// once the upstream closes and emitted as the final
-    /// [`StreamChunk::Usage`](crate::types::StreamChunk::Usage).
-    async fn execute_stream(
+    /// Anthropic is the only upstream with a real counting endpoint, and the
+    /// inbound surface is already its own dialect, so this is an **identity
+    /// forward**: the same body, the same credential injection, one path
+    /// segment further along.
+    ///
+    /// The response is relayed to the client verbatim — the gateway does not
+    /// re-shape `{"input_tokens": N}`, and it certainly does not fall back to
+    /// an estimate when the upstream declines to answer.
+    async fn plan_count_tokens(
         &self,
         auth: &AuthRecord,
-        req: ProviderRequest,
-    ) -> Result<StreamResponse, ProviderError> {
+        req: &ProviderRequest,
+    ) -> Result<RoutePlan, ProviderError> {
         let (credential, base_url) = self.resolve_credentials(Some(auth));
-        let model = requested_model(&req).to_owned();
-        let response = self
-            .build_request(&req, true, &credential, &base_url)?
-            .send()
-            .await?;
-
-        let status = response.status().as_u16();
-        if status >= 400 {
-            let body = response.bytes().await.unwrap_or_default();
-            return Err(upstream_error(status, &body));
+        if credential.value.is_empty() {
+            return Err(ProviderError::Credential(
+                "claude credential is required".to_owned(),
+            ));
         }
-        Ok(stream_response(response, move |response, status| {
-            usage_stream(
-                response.bytes_stream(),
-                DEFAULT_STREAM_IDLE_TIMEOUT,
-                model,
-                PROVIDER_CLAUDE,
-                parse_claude_stream_usage,
-                status,
-            )
-        }))
+        Ok(RoutePlan {
+            provider: PROVIDER_CLAUDE,
+            endpoint: Self::count_tokens_endpoint(&req.query, &base_url)?,
+            credential: Credential::XApiKey(credential.value.clone()),
+            headers: Self::outbound_headers(req, false),
+            body: None,
+            timeouts: relay_timeouts(self.timeout),
+            dialect: UpstreamDialect::AnthropicMessages,
+        })
     }
 
     /// A record with no refresh token is a plain API-key record: it is only
@@ -454,71 +418,6 @@ impl Provider for ClaudeProvider {
         refreshed.last_refreshed_at = Some(now);
         Ok(refreshed)
     }
-
-    /// **真的去问 Anthropic**：`POST {base}/v1/messages/count_tokens`。
-    ///
-    /// 这里原来返回 `payload.len() / 4` —— 一个和真实 tokenizer 毫无关系的
-    /// **伪造值**（`docs/relay-surface-plan.md` §2.1 缺陷 ①：五个 provider 的实现
-    /// 全是同一句 `approximate_tokens_from_bytes`，没有任何一个真的去问上游）。
-    /// 更糟的是那个假数还在按 LLM 价格计费（同节缺陷 ②，计费范围的修复归 `gw-proxy`）。
-    ///
-    /// 五个 provider 里只有 Anthropic 这一家的上游真的有计数端点，而
-    /// `POST /v1/messages/count_tokens` 本来就是 Anthropic 方言的入口，
-    /// 所以这条路是**恒等转发**：请求体原样送上去，`anthropic-version` 与
-    /// `x-api-key` 走与 [`Self::build_request`] 同一套注入。
-    ///
-    /// 计数请求永远不是流式的，所以走非流式的 content negotiation 与整体超时。
-    async fn count_tokens(
-        &self,
-        auth: &AuthRecord,
-        req: ProviderRequest,
-    ) -> Result<i64, ProviderError> {
-        let (credential, base_url) = self.resolve_credentials(Some(auth));
-        if credential.value.is_empty() {
-            return Err(ProviderError::Credential(
-                "claude credential is required".to_owned(),
-            ));
-        }
-        let endpoint = Self::count_tokens_endpoint(&req.query, &base_url)?;
-
-        let mut headers = HeaderMap::new();
-        copy_outbound_headers(&mut headers, &req.headers);
-        default_content_negotiation(&mut headers, false);
-        Self::inject_credential_headers(&mut headers, &credential)?;
-
-        let response = self
-            .client
-            .post(endpoint)
-            .headers(headers)
-            .timeout(self.timeout)
-            .body(req.payload.clone())
-            .send()
-            .await?;
-        let status = response.status().as_u16();
-        let body = response.bytes().await?;
-        if status >= 400 {
-            return Err(upstream_error(status, &body));
-        }
-        parse_count_tokens(&body)
-    }
-}
-
-/// Anthropic 的计数响应信封：`{"input_tokens": N}`。
-#[derive(Debug, Deserialize)]
-struct ClaudeCountTokens {
-    input_tokens: i64,
-}
-
-/// 解析计数响应。**上游给不出数就报错，绝不回落到估算** ——
-/// 回落等于把伪造值又请回来了，而调用方无从分辨真假。
-fn parse_count_tokens(body: &[u8]) -> Result<i64, ProviderError> {
-    serde_json::from_slice::<ClaudeCountTokens>(body)
-        .map(|counted| counted.input_tokens)
-        .map_err(|err| {
-            ProviderError::Other(anyhow::anyhow!(
-                "parsing claude count_tokens response: {err}"
-            ))
-        })
 }
 
 pub(crate) mod shared {
@@ -676,18 +575,6 @@ pub(crate) mod shared {
             );
         } else if !headers.contains_key(header::ACCEPT) {
             headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
-        }
-    }
-
-    /// Wraps a non-2xx upstream response.
-    ///
-    /// The full payload is relayed back to the caller, so the body is *not*
-    /// truncated here (the 4 KiB clip applies only to the copy stored on a
-    /// usage record).
-    pub(crate) fn upstream_error(status: u16, payload: &[u8]) -> ProviderError {
-        ProviderError::Upstream {
-            status,
-            body: String::from_utf8_lossy(payload).into_owned(),
         }
     }
 

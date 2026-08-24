@@ -8,6 +8,15 @@
 
 use super::*;
 
+/// The NaN a real overflow arrives as, computed rather than named.
+///
+/// Behind a function because `inf - inf` written inline is `clippy::eq_op`,
+/// and silencing that lint at the call site would be louder than this.
+fn nan() -> f64 {
+    let infinity = f64::MAX * 2.0;
+    infinity + f64::MIN * 2.0
+}
+
 /// A deterministic value stream. Not cryptography — the only requirement is
 /// that it walks a wide range of magnitudes without the test hard-coding them.
 struct Lcg(u64);
@@ -38,8 +47,11 @@ impl Lcg {
 fn hostile_values() -> Vec<f64> {
     let zero = 0.0f64;
     let one = 1.0f64;
+    // Produced by arithmetic rather than by naming `f64::NAN`: the point is
+    // that these are values the *program* can compute, not literals a reader
+    // can grep for.
     let mut out = vec![
-        zero / zero,
+        nan(),
         one / zero,
         -one / zero,
         f64::MAX * 2.0,

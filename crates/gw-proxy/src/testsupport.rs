@@ -29,5 +29,5 @@ pub(crate) use infra::{
 };
 pub(crate) use pg::{fresh_db, seed_user};
 pub(crate) use upstream::{
-    FakeAuthStore, FakeCatalog, FakeProvider, auth_record, ok_response, ok_response_without_usage,
+    CannedResponse, FakeAuthStore, FakeCatalog, FakePlanner, FakeTransport, auth_record,
 };

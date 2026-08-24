@@ -148,11 +148,7 @@ impl UsageStore for SqlUsageStore {
         Ok(())
     }
 
-    async fn clear_hold(
-        &self,
-        user_id: Id,
-        operation: &BillingOperationId,
-    ) -> anyhow::Result<()> {
+    async fn clear_hold(&self, user_id: Id, operation: &BillingOperationId) -> anyhow::Result<()> {
         Ok(self.ledger.clear_hold(user_id, operation.as_str()).await?)
     }
 

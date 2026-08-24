@@ -1,9 +1,8 @@
-//! Key-layout invariants. These matter because a stale-hold scan globs the
-//! hold prefix, and the timestamp hashes live *under* that same prefix.
+//! Key-layout invariants. The reservation keys and their companion timestamp
+//! hashes share one prefix, and a running process and a later binary have to
+//! agree on it.
 
-use super::{
-    HOLDS_KEY_PREFIX, balance_key, holds_key, holds_ts_key, shortfall_resolve_reference,
-};
+use super::{HOLDS_KEY_PREFIX, balance_key, holds_key, holds_ts_key, shortfall_resolve_reference};
 use crate::testsupport::Rng;
 
 /// Reservation keys and their companion timestamp hashes share one prefix, so

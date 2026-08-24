@@ -30,33 +30,36 @@ async fn collect_stream(
 }
 
 #[tokio::test]
-async fn a_streamed_response_relays_its_payload_chunks_verbatim() {
+async fn a_streamed_response_relays_every_frame_verbatim() {
+    // Including the usage frame. Usage is read on a **side band**; the relay
+    // does not filter the byte stream, because filtering it means parsing it,
+    // and parsing the write path is what a pass-through must never do.
     let harness = Harness::build();
-    *harness.provider.stream_chunks.lock() = vec![
-        StreamChunk::Payload("data: one\n\n".into()),
-        usage_chunk(10, 20),
-        StreamChunk::Payload("data: [DONE]\n\n".into()),
-    ];
+    harness.transport.queue(Ok(CannedResponse::sse(&[
+        "data: one\n\n",
+        "data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20}}\n\n",
+        "data: [DONE]\n\n",
+    ])));
 
     let (status, content_type, body) = collect_stream(&harness, stream_body("gpt-4o")).await;
 
     assert_eq!(status, StatusCode::OK);
     assert!(content_type.contains("event-stream"), "got {content_type}");
     assert_eq!(
-        body, "data: one\n\ndata: [DONE]\n\n",
-        "the usage chunk is billing metadata and must not reach the client",
+        body,
+        "data: one\n\ndata: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20}}\n\ndata: [DONE]\n\n",
     );
 }
 
 #[tokio::test]
 async fn a_stream_settles_once_it_has_finished_and_uses_the_usage_it_carried() {
     let harness = Harness::build();
-    *harness.provider.stream_chunks.lock() = vec![
-        StreamChunk::Payload("data: one\n\n".into()),
-        usage_chunk(11, 22),
-    ];
+    harness
+        .transport
+        .queue(Ok(CannedResponse::sse(&["data: one\n\n", USAGE_FRAME])));
 
     collect_stream(&harness, stream_body("gpt-4o")).await;
+    harness.wait_idle().await;
 
     let logs = harness.usage_store.logs.lock();
     assert_eq!(logs.len(), 1, "a stream must settle exactly once");
@@ -66,17 +69,14 @@ async fn a_stream_settles_once_it_has_finished_and_uses_the_usage_it_carried() {
 }
 
 #[tokio::test]
-async fn a_stream_that_reports_an_error_releases_instead_of_charging() {
+async fn an_upstream_error_status_releases_instead_of_charging() {
     let harness = Harness::build();
-    *harness.provider.stream_chunks.lock() = vec![
-        StreamChunk::Payload("data: partial\n\n".into()),
-        StreamChunk::Error {
-            status: Some(500),
-            message: "upstream exploded".to_owned(),
-        },
-    ];
+    harness.transport.queue(Ok(CannedResponse::status(500)));
+    harness.transport.queue(Ok(CannedResponse::status(500)));
+    harness.transport.queue(Ok(CannedResponse::status(500)));
 
     collect_stream(&harness, stream_body("gpt-4o")).await;
+    harness.wait_idle().await;
 
     assert!(
         harness
@@ -89,11 +89,14 @@ async fn a_stream_that_reports_an_error_releases_instead_of_charging() {
 }
 
 #[tokio::test]
-async fn a_stream_without_a_usage_chunk_falls_back_rather_than_billing_zero() {
+async fn a_stream_without_a_usage_frame_falls_back_rather_than_billing_zero() {
     let harness = Harness::build();
-    *harness.provider.stream_chunks.lock() = vec![StreamChunk::Payload("data: one\n\n".into())];
+    harness
+        .transport
+        .queue(Ok(CannedResponse::sse(&["data: one\n\n"])));
 
     collect_stream(&harness, stream_body("gpt-4o")).await;
+    harness.wait_idle().await;
 
     let costs = harness.usage_store.settled_costs();
     assert_eq!(costs.len(), 1);
@@ -112,11 +115,11 @@ async fn abandoning_a_stream_mid_flight_settles_through_the_shutdown_tracker() {
     use tower::ServiceExt;
 
     let harness = Harness::build();
-    *harness.provider.stream_chunks.lock() = vec![
-        StreamChunk::Payload("data: one\n\n".into()),
-        usage_chunk(5, 5),
-        StreamChunk::Payload("data: two\n\n".into()),
-    ];
+    harness.transport.queue(Ok(CannedResponse::sse(&[
+        "data: one\n\n",
+        USAGE_FRAME,
+        "data: two\n\n",
+    ])));
 
     let response = harness
         .router()
@@ -161,10 +164,9 @@ async fn a_disconnect_that_lands_during_the_drain_is_still_waited_on() {
     use tower::ServiceExt;
 
     let harness = Harness::build();
-    *harness.provider.stream_chunks.lock() = vec![
-        StreamChunk::Payload("data: one\n\n".into()),
-        usage_chunk(5, 5),
-    ];
+    harness
+        .transport
+        .queue(Ok(CannedResponse::sse(&["data: one\n\n", USAGE_FRAME])));
 
     let response = harness
         .router()
@@ -192,15 +194,20 @@ async fn stream_headers_drop_hop_by_hop_and_keep_repeated_values() {
     // the last value, and cloned the whole map. Moving the map keeps every
     // value and still strips hop-by-hop names.
     let harness = Harness::build();
-    {
-        let mut headers = http::HeaderMap::new();
-        headers.append("set-cookie", "a=1".parse().expect("cookie"));
-        headers.append("set-cookie", "b=2".parse().expect("cookie"));
-        headers.insert("transfer-encoding", "chunked".parse().expect("te"));
-        headers.insert("x-request-id", "req_stream".parse().expect("id"));
-        *harness.provider.stream_headers.lock() = headers;
-    }
-    *harness.provider.stream_chunks.lock() = vec![StreamChunk::Payload("data: one\n\n".into())];
+    let mut canned = CannedResponse::sse(&["data: one\n\n"]);
+    canned
+        .headers
+        .append("set-cookie", "a=1".parse().expect("cookie"));
+    canned
+        .headers
+        .append("set-cookie", "b=2".parse().expect("cookie"));
+    canned
+        .headers
+        .insert("transfer-encoding", "chunked".parse().expect("te"));
+    canned
+        .headers
+        .insert("x-request-id", "req_stream".parse().expect("id"));
+    harness.transport.queue(Ok(canned));
 
     let response = {
         use tower::ServiceExt;
@@ -233,21 +240,23 @@ async fn stream_headers_drop_hop_by_hop_and_keep_repeated_values() {
 }
 
 #[tokio::test]
-async fn a_stream_that_runs_to_completion_settles_inline_and_leaves_the_tracker_empty() {
-    // The tracker is the disconnect path only. A stream the client actually
-    // read has already settled by the time the body ends, so nothing detaches.
+async fn a_stream_that_runs_to_completion_settles_exactly_once() {
+    // Completion and disconnect take the same path — the settler drops either
+    // way — so what matters is that only *one* settlement results, and that the
+    // drain has nothing left once it has run.
     let harness = Harness::build();
-    *harness.provider.stream_chunks.lock() = vec![
-        StreamChunk::Payload("data: one\n\n".into()),
-        usage_chunk(5, 5),
-    ];
+    harness
+        .transport
+        .queue(Ok(CannedResponse::sse(&["data: one\n\n", USAGE_FRAME])));
 
     collect_stream(&harness, stream_body("gpt-4o")).await;
+    harness.wait_idle().await;
 
     assert_eq!(harness.usage_store.logs.lock().len(), 1);
+    assert_eq!(harness.usage_store.settled_costs().len(), 1);
     assert_eq!(
         harness.drain.len(),
         0,
-        "an inline settlement must not also queue a detached one",
+        "a finished settlement must not leave a second task behind",
     );
 }

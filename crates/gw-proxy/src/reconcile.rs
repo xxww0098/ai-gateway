@@ -152,7 +152,10 @@ pub async fn scan_once(
     auto_reconcile: bool,
     stale_after: Duration,
 ) -> usize {
-    let stale = match scanner.scan_non_terminal(stale_after, DEFAULT_SCAN_LIMIT).await {
+    let stale = match scanner
+        .scan_non_terminal(stale_after, DEFAULT_SCAN_LIMIT)
+        .await
+    {
         Ok(stale) => stale,
         Err(err) => {
             tracing::warn!(%err, "non-terminal operation scan failed");

@@ -8,30 +8,22 @@
 //! 带走的不变量。
 
 use axum::http::StatusCode;
-use gw_provider::types::{ProviderResponse, StreamChunk, UsageRecord};
 
 use super::*;
 use crate::testsupport::{
-    Harness, LedgerCall, TEST_API_KEY, anonymous_request, auth_record, chat_body, ok_response,
-    ok_response_without_usage, send, send_settled, signed_get, signed_request,
+    CannedResponse, Harness, LedgerCall, TEST_API_KEY, anonymous_request, auth_record, chat_body,
+    send, send_settled, signed_get, signed_request,
 };
 
 mod dispatch;
 mod stream;
 mod unary;
 
-/// A usage chunk carrying `input`/`output` tokens, as an upstream would emit it
-/// mid-stream.
-fn usage_chunk(input: i64, output: i64) -> StreamChunk {
-    StreamChunk::Usage(UsageRecord {
-        model: "gpt-4o".to_owned(),
-        provider: "openai".to_owned(),
-        input_tokens: Some(input),
-        output_tokens: Some(output),
-        cached_tokens: None,
-        reasoning_tokens: None,
-    })
-}
+/// The terminal SSE frame an OpenAI-shaped upstream ends a stream with.
+///
+/// The counts travel in the frame itself, so the *real* side-band probe is
+/// what extracts them — the same code production runs.
+const USAGE_FRAME: &str = "data: {\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":22}}\n\n";
 
 /// Sends `request` and returns `(status, content-type, relayed body)`.
 async fn collect_sse(
@@ -87,7 +79,7 @@ fn every_surface_survives_the_metadata_round_trip_to_the_executor() {
         Surface::AnthropicMessages,
     ] {
         let request = gw_provider::types::ProviderRequest {
-            metadata: request_metadata(surface, None),
+            metadata: request_metadata(surface, None, None),
             ..Default::default()
         };
         assert_eq!(

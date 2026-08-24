@@ -361,7 +361,7 @@ async fn load_operation(
         return Ok(None);
     };
     let raw_state: Option<String> = row.try_get("state")?;
-    let Some(state) = raw_state.as_deref().and_then(OperationState::from_str) else {
+    let Some(state) = raw_state.as_deref().and_then(OperationState::parse) else {
         tracing::error!(
             operation = %operation_id,
             state = ?raw_state,

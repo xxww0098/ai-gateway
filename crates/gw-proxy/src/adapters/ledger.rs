@@ -161,7 +161,10 @@ impl NonTerminalOperationScanner for SharedLedger {
         older_than: Duration,
         limit: i64,
     ) -> anyhow::Result<Vec<OrphanedOperation>> {
-        let stale = self.0.scan_non_terminal_operations(older_than, limit).await?;
+        let stale = self
+            .0
+            .scan_non_terminal_operations(older_than, limit)
+            .await?;
         Ok(stale
             .into_iter()
             .map(|op| OrphanedOperation {

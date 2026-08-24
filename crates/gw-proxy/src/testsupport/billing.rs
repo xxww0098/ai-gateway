@@ -84,7 +84,12 @@ impl FakeLedger {
     /// Admits `operation` and reserves `amount`, the way the hold middleware
     /// would. A test that wants a live reservation to settle against calls
     /// this instead of reaching for the ledger's request path.
-    pub(crate) async fn plant_hold(&self, user_id: Id, operation: &BillingOperationId, amount: f64) {
+    pub(crate) async fn plant_hold(
+        &self,
+        user_id: Id,
+        operation: &BillingOperationId,
+        amount: f64,
+    ) {
         self.admit_operation(
             &NewOperation {
                 operation_id: operation.clone(),
@@ -362,7 +367,10 @@ impl UsageStore for FakeUsageStore {
         {
             let mut terminated = self.terminated.lock();
             let key = commit.operation.as_str().to_owned();
-            let current = terminated.get(&key).copied().unwrap_or(OperationState::Held);
+            let current = terminated
+                .get(&key)
+                .copied()
+                .unwrap_or(OperationState::Held);
             match terminate(current, OperationState::Settled) {
                 Transition::AlreadyTerminal(_) => return Ok(SettleReceipt::AlreadyTerminal),
                 Transition::Apply(next) => terminated.insert(key, next),
@@ -390,11 +398,7 @@ impl UsageStore for FakeUsageStore {
         Ok(())
     }
 
-    async fn clear_hold(
-        &self,
-        _user_id: Id,
-        operation: &BillingOperationId,
-    ) -> anyhow::Result<()> {
+    async fn clear_hold(&self, _user_id: Id, operation: &BillingOperationId) -> anyhow::Result<()> {
         self.cleared_holds.lock().push(operation.to_string());
         Ok(())
     }

@@ -10,22 +10,20 @@
 use std::time::Duration;
 
 use gw_authcore::{AuthRecord, AuthStatus};
-use http::{HeaderMap, HeaderValue};
+use http::HeaderMap;
 use url::Url;
 
 use crate::claude::shared::{
     self, append_query, default_content_negotiation, path_escape, set_query, trim_base_url,
-    upstream_error,
 };
 use crate::common::{
-    DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_GEMINI, ProviderConfig, nested_string, requested_model,
-    resolve_timeout, shared_client, stream_response, string_from_map, usage_stream,
+    PROVIDER_GEMINI, ProviderConfig, nested_string, relay_timeouts, requested_model,
+    resolve_timeout, string_from_map,
 };
-use crate::types::{
-    Provider, ProviderError, ProviderRequest, ProviderResponse, StreamResponse,
-    copy_outbound_headers,
-};
+use crate::route::{RoutePlan, RoutePlanner};
+use crate::types::{ProviderError, ProviderRequest};
 use crate::usage::{UsageTokens, parse_gemini_usage};
+use gw_relay::{Credential, UpstreamDialect};
 
 const GEMINI_DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
 const GEMINI_MODELS_PATH: &str = "/v1beta/models/";
@@ -42,7 +40,6 @@ pub struct GeminiProvider {
     base_url: String,
     api_key: String,
     timeout: Duration,
-    client: reqwest::Client,
 }
 
 impl GeminiProvider {
@@ -57,7 +54,6 @@ impl GeminiProvider {
             base_url,
             api_key: cfg.api_key.trim().to_owned(),
             timeout: resolve_timeout(timeout_seconds),
-            client: shared_client(),
         })
     }
 
@@ -131,53 +127,45 @@ impl GeminiProvider {
         Ok(parsed)
     }
 
-    /// Stamps the API key onto an outbound header map.
+    /// Plans an outbound GenerateContent request.
     ///
-    /// With no configured key nothing is injected and the request still goes
-    /// out: the caller may have supplied `?key=` on the URL itself, and Google
-    /// — not the gateway — is the right place to reject a request with neither.
-    fn inject_api_key(headers: &mut HeaderMap, api_key: &str) -> Result<(), ProviderError> {
-        let trimmed = api_key.trim();
-        if trimmed.is_empty() {
-            return Ok(());
-        }
-        let value = HeaderValue::from_str(trimmed).map_err(|_| {
-            ProviderError::Credential("gemini api key is not a valid header value".to_owned())
-        })?;
-        headers.insert("x-goog-api-key", value);
-        Ok(())
-    }
-
-    /// Assembles an outbound GenerateContent request.
-    fn build_request(
+    /// A blank API key is refused here rather than sent as an empty
+    /// `x-goog-api-key`: the relay always sets the credential header, so an
+    /// empty one would reach Google as a malformed request instead of as a
+    /// missing one. Failing the plan lets the dispatcher fail over to an
+    /// account that has a key.
+    fn plan_generate_content(
         &self,
         req: &ProviderRequest,
-        stream: bool,
         api_key: &str,
         base_url: &str,
-    ) -> Result<reqwest::RequestBuilder, ProviderError> {
+    ) -> Result<RoutePlan, ProviderError> {
+        let api_key = api_key.trim();
+        if api_key.is_empty() {
+            return Err(ProviderError::Credential(
+                "gemini api key is required".to_owned(),
+            ));
+        }
         let model = requested_model(req);
         if model.is_empty() {
             return Err(ProviderError::Other(anyhow::anyhow!(
                 "gemini model is required"
             )));
         }
-        let endpoint = Self::generate_content_endpoint(&req.query, base_url, model, stream)?;
+        let endpoint = Self::generate_content_endpoint(&req.query, base_url, model, req.stream)?;
 
         let mut headers = HeaderMap::new();
-        copy_outbound_headers(&mut headers, &req.headers);
-        default_content_negotiation(&mut headers, stream);
-        Self::inject_api_key(&mut headers, api_key)?;
+        default_content_negotiation(&mut headers, req.stream);
 
-        let mut builder = self
-            .client
-            .post(endpoint)
-            .headers(headers)
-            .body(req.payload.clone());
-        if !stream {
-            builder = builder.timeout(self.timeout);
-        }
-        Ok(builder)
+        Ok(RoutePlan {
+            provider: PROVIDER_GEMINI,
+            endpoint,
+            credential: Credential::GoogleApiKey(api_key.to_owned()),
+            headers,
+            body: None,
+            timeouts: relay_timeouts(self.timeout),
+            dialect: UpstreamDialect::GoogleGenerateContent,
+        })
     }
 }
 
@@ -236,104 +224,26 @@ fn split_on_blank_line(body: &[u8]) -> impl Iterator<Item = &[u8]> {
 }
 
 #[async_trait::async_trait]
-impl Provider for GeminiProvider {
+impl RoutePlanner for GeminiProvider {
     fn name(&self) -> &'static str {
         PROVIDER_GEMINI
     }
 
-    async fn execute(
+    async fn plan(
         &self,
         auth: &AuthRecord,
-        req: ProviderRequest,
-    ) -> Result<ProviderResponse, ProviderError> {
+        req: &ProviderRequest,
+    ) -> Result<RoutePlan, ProviderError> {
         let (api_key, base_url) = self.resolve_credentials(Some(auth));
-        let model = requested_model(&req);
-        let response = self
-            .build_request(&req, false, &api_key, &base_url)?
-            .send()
-            .await?;
-
-        let status = response.status().as_u16();
-        let headers = response.headers().clone();
-        let body = response.bytes().await?;
-        if status >= 400 {
-            return Err(upstream_error(status, &body));
-        }
-        Ok(ProviderResponse {
-            status,
-            headers,
-            usage: parse_gemini_usage(&body).map(|t| t.to_record(model, PROVIDER_GEMINI)),
-            body,
-        })
+        self.plan_generate_content(req, &api_key, &base_url)
     }
 
-    async fn execute_stream(
-        &self,
-        auth: &AuthRecord,
-        req: ProviderRequest,
-    ) -> Result<StreamResponse, ProviderError> {
-        let (api_key, base_url) = self.resolve_credentials(Some(auth));
-        let model = requested_model(&req).to_owned();
-        let response = self
-            .build_request(&req, true, &api_key, &base_url)?
-            .send()
-            .await?;
-
-        let status = response.status().as_u16();
-        if status >= 400 {
-            let body = response.bytes().await.unwrap_or_default();
-            return Err(upstream_error(status, &body));
-        }
-        Ok(stream_response(response, move |response, status| {
-            usage_stream(
-                response.bytes_stream(),
-                DEFAULT_STREAM_IDLE_TIMEOUT,
-                model,
-                PROVIDER_GEMINI,
-                parse_gemini_stream_usage,
-                status,
-            )
-        }))
-    }
-
-    /// Deliberately a no-op: Gemini records hold an API key, so there is
-    /// nothing to rotate. They are
-    /// re-marked healthy rather than rejected, so loading a persisted
-    /// OAuth-shaped record at startup does not fail the whole credential set.
+    /// A plain API key never expires, so the record is only re-marked healthy.
     async fn refresh(&self, auth: &AuthRecord) -> Result<AuthRecord, ProviderError> {
         let mut refreshed = auth.clone();
         refreshed.status = AuthStatus::Active;
         refreshed.updated_at = chrono::Utc::now();
         Ok(refreshed)
-    }
-
-    /// Estimates token count from the payload byte length.
-    /// **报错，不编数字** —— 尽管 Google 上游确实有 `:countTokens`。
-    ///
-    /// 这里原来返回 `payload.len() / 4` 的伪造值
-    /// （`docs/relay-surface-plan.md` §2.1 缺陷 ①），且那个数还在按 LLM 价格计费。
-    ///
-    /// 那为什么不直接去打 `:countTokens`？因为**入口方言对不上**：`count_tokens`
-    /// 的唯一入口是 `POST /v1/messages/count_tokens`（`gw-proxy/src/routes.rs`），
-    /// 那是 **Anthropic 方言**。把 Anthropic 形状的 body 原样送给 Google 的
-    /// `:countTokens`，Google 会因未知字段回 400 —— 那就造出了一条「看起来在打
-    /// 真实端点、实际每次都 400」的路径，客户端拿到一个它无法理解的错误。
-    /// 那正是 `docs/relay-passthrough-audit.md` 反复点名的那类**静默失败**。
-    ///
-    /// 要真正可用，需要把 anthropic→google 转义器接进这条短路径。转义器本身已在
-    /// `gw_relay::translate::google` 就绪，缺的只是 `gw-proxy` 侧的接线 ——
-    /// 那不在本 crate 里。在那之前，一个明确的「这个组合暂不支持」比一个假数字
-    /// 和一个看不懂的 400 都诚实。
-    async fn count_tokens(
-        &self,
-        _auth: &AuthRecord,
-        _req: ProviderRequest,
-    ) -> Result<i64, ProviderError> {
-        Err(ProviderError::Other(anyhow::anyhow!(
-            "{PROVIDER_GEMINI} token counting is unavailable: the only entry point is the \
-             Anthropic-dialect POST /v1/messages/count_tokens, and reaching Google's \
-             :countTokens needs the anthropic->google translator wired into that path"
-        )))
     }
 }
 

@@ -43,7 +43,8 @@ async fn an_orphaned_operation_is_charged_at_the_reserved_amount_and_then_cleare
     // the tenant can owe — never more.
     let fixture = fixture();
     let op = orphan(1.25);
-    let settled = reconcile_orphaned_operations(&fixture.settlement, &[op.clone()]).await;
+    let settled =
+        reconcile_orphaned_operations(&fixture.settlement, std::slice::from_ref(&op)).await;
 
     assert_eq!(settled, 1);
     let commits = fixture.store.commits.lock();
@@ -61,7 +62,7 @@ async fn the_reconciled_row_carries_the_operation_id_as_its_event_key() {
     // which billing operation it belonged to.
     let fixture = fixture();
     let op = orphan(1.0);
-    reconcile_orphaned_operations(&fixture.settlement, &[op.clone()]).await;
+    reconcile_orphaned_operations(&fixture.settlement, std::slice::from_ref(&op)).await;
 
     let logs = fixture.store.logs.lock();
     assert_eq!(logs[0].event_key, op.operation.to_string());

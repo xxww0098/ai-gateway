@@ -75,28 +75,6 @@ fn caller_query_parameters_reach_the_count_tokens_endpoint() {
     assert_eq!(pairs, query);
 }
 
-/// 上游给不出数就**报错**，绝不回落到估算 —— 回落等于把伪造值请回来，
-/// 而调用方无从分辨真假。
-#[test]
-fn a_count_response_without_a_usable_number_is_an_error_not_an_estimate() {
-    let counted = parse_count_tokens(br#"{"input_tokens":123}"#).expect("well-formed response");
-    assert_eq!(counted, 123);
-
-    for broken in [
-        &b""[..],
-        b"not json",
-        br#"{}"#,
-        br#"{"input_tokens":"twelve"}"#,
-        br#"{"tokens":12}"#,
-    ] {
-        assert!(
-            parse_count_tokens(broken).is_err(),
-            "{} 应当报错而不是编一个数",
-            String::from_utf8_lossy(broken)
-        );
-    }
-}
-
 // --- endpoint ---------------------------------------------------------------
 
 /// The three accepted spellings of a base URL converge on one endpoint. That
@@ -299,25 +277,39 @@ fn token_data_encoded_as_a_json_string_is_still_readable() {
 // --- headers ----------------------------------------------------------------
 
 /// An inbound `x-api-key` belongs to the client leg and must never reach
-/// Anthropic.
+/// Anthropic. The planner does not stamp one at all — the credential rides on
+/// [`RoutePlan::credential`], and `gw-relay` strips the client's carrier
+/// before setting it.
 #[test]
-fn the_resolved_credential_replaces_any_caller_supplied_key() {
+fn the_plan_carries_the_credential_as_a_credential_not_as_a_header() {
+    let provider = provider("https://api.anthropic.com", "sk-config");
     let mut headers = HeaderMap::new();
     headers.insert("x-api-key", HeaderValue::from_static("caller-key"));
-    ClaudeProvider::inject_credential_headers(
-        &mut headers,
-        &ClaudeCredential {
-            value: "real-key".to_owned(),
-            source: CredentialSource::ApiKey,
-        },
-    )
-    .expect("inject");
-    assert_eq!(headers["x-api-key"], "real-key");
-    assert_eq!(headers.get_all("x-api-key").iter().count(), 1);
+    let req = ProviderRequest {
+        headers,
+        ..Default::default()
+    };
+    let plan = provider
+        .plan_messages(
+            &req,
+            &ClaudeCredential {
+                value: "real-key".to_owned(),
+                source: CredentialSource::ApiKey,
+            },
+            "https://api.anthropic.com",
+        )
+        .expect("plans");
+
+    assert!(
+        !plan.headers.contains_key("x-api-key"),
+        "the credential must not be planned as a plain header"
+    );
+    assert!(matches!(&plan.credential, gw_relay::Credential::XApiKey(k) if k == "real-key"));
 }
 
 #[test]
 fn a_caller_supplied_api_version_survives_but_a_missing_one_is_filled_in() {
+    let provider = provider("https://api.anthropic.com", "sk-config");
     let credential = ClaudeCredential {
         value: "k".to_owned(),
         source: CredentialSource::ApiKey,
@@ -325,64 +317,45 @@ fn a_caller_supplied_api_version_survives_but_a_missing_one_is_filled_in() {
 
     let mut pinned = HeaderMap::new();
     pinned.insert("anthropic-version", HeaderValue::from_static("1999-01-01"));
-    ClaudeProvider::inject_credential_headers(&mut pinned, &credential).expect("inject");
-    assert_eq!(pinned["anthropic-version"], "1999-01-01");
-
-    let mut bare = HeaderMap::new();
-    ClaudeProvider::inject_credential_headers(&mut bare, &credential).expect("inject");
-    assert!(bare.contains_key("anthropic-version"));
-}
-
-#[test]
-fn a_credential_that_cannot_be_a_header_value_is_reported_not_panicked() {
-    let mut headers = HeaderMap::new();
-    let err = ClaudeProvider::inject_credential_headers(
-        &mut headers,
-        &ClaudeCredential {
-            value: "bad\nvalue".to_owned(),
-            source: CredentialSource::ApiKey,
-        },
-    )
-    .expect_err("rejected");
-    assert!(matches!(err, ProviderError::Credential(_)));
-}
-
-#[test]
-fn streaming_pins_accept_but_a_plain_request_keeps_the_callers_choice() {
-    let mut streamed = HeaderMap::new();
-    streamed.insert(http::header::ACCEPT, HeaderValue::from_static("text/plain"));
-    default_content_negotiation(&mut streamed, true);
-    assert_eq!(streamed[http::header::ACCEPT], "text/event-stream");
-
-    let mut plain = HeaderMap::new();
-    plain.insert(http::header::ACCEPT, HeaderValue::from_static("text/plain"));
-    default_content_negotiation(&mut plain, false);
-    assert_eq!(plain[http::header::ACCEPT], "text/plain");
-
-    let mut bare = HeaderMap::new();
-    default_content_negotiation(&mut bare, false);
-    assert!(bare.contains_key(http::header::ACCEPT));
-    assert!(bare.contains_key(http::header::CONTENT_TYPE));
-}
-
-#[test]
-fn hop_by_hop_and_authorization_headers_never_reach_the_upstream() {
-    let mut src = HeaderMap::new();
-    src.insert(
-        http::header::AUTHORIZATION,
-        HeaderValue::from_static("Bearer leak"),
+    let plan = provider
+        .plan_messages(
+            &ProviderRequest {
+                headers: pinned,
+                ..Default::default()
+            },
+            &credential,
+            "https://api.anthropic.com",
+        )
+        .expect("plans");
+    assert!(
+        !plan.headers.contains_key("anthropic-version"),
+        "a pinned version is left alone so the relay forwards the client's own"
     );
-    src.insert(
-        http::header::HOST,
-        HeaderValue::from_static("inbound.example"),
-    );
-    src.insert("anthropic-beta", HeaderValue::from_static("tools-2024"));
 
-    let mut dst = HeaderMap::new();
-    copy_outbound_headers(&mut dst, &src);
-    assert!(!dst.contains_key(http::header::AUTHORIZATION));
-    assert!(!dst.contains_key(http::header::HOST));
-    assert_eq!(dst["anthropic-beta"], "tools-2024");
+    let plan = provider
+        .plan_messages(
+            &ProviderRequest::default(),
+            &credential,
+            "https://api.anthropic.com",
+        )
+        .expect("plans");
+    assert!(plan.headers.contains_key("anthropic-version"));
+}
+
+#[test]
+fn a_blank_credential_is_refused_before_anything_is_planned() {
+    let provider = provider("https://api.anthropic.com", "sk-config");
+    let err = provider
+        .plan_messages(
+            &ProviderRequest::default(),
+            &ClaudeCredential {
+                value: String::new(),
+                source: CredentialSource::ApiKey,
+            },
+            "https://api.anthropic.com",
+        )
+        .expect_err("a keyless account must not produce a plan");
+    assert!(matches!(err, ProviderError::Credential(_)), "{err:?}");
 }
 
 // --- stream usage -----------------------------------------------------------
@@ -498,16 +471,4 @@ fn setting_a_query_key_drops_every_earlier_value_for_it() {
             ("alt".to_owned(), "sse".to_owned())
         ]
     );
-}
-
-#[test]
-fn an_upstream_failure_carries_the_status_and_the_whole_body() {
-    let err = upstream_error(429, br#"{"error":{"type":"rate_limit_error"}}"#);
-    match err {
-        ProviderError::Upstream { status, body } => {
-            assert_eq!(status, 429);
-            assert!(body.contains("rate_limit_error"));
-        }
-        other => panic!("expected an upstream error, got {other}"),
-    }
 }

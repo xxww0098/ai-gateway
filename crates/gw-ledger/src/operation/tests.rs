@@ -407,7 +407,7 @@ fn every_state_round_trips_through_its_stored_literal() {
         OperationState::Settled,
         OperationState::Released,
     ] {
-        assert_eq!(OperationState::from_str(state.as_str()), Some(state));
+        assert_eq!(OperationState::parse(state.as_str()), Some(state));
     }
 }
 
@@ -417,7 +417,7 @@ fn an_unknown_stored_state_is_not_mistaken_for_held() {
     // literal must never decode into it.
     for unknown in ["", "HELD", "settling", "abandoned", "0"] {
         assert_eq!(
-            OperationState::from_str(unknown),
+            OperationState::parse(unknown),
             None,
             "{unknown:?} decoded as a state"
         );

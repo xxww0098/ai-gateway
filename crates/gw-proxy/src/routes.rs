@@ -487,7 +487,9 @@ fn request_metadata(
         surface.path().to_owned(),
     );
     if let Some(b) = billing {
-        meta.insert("request_id".to_owned(), b.ctx.request_id.clone());
+        meta.insert("request_id".to_owned(), b.ctx.client_trace.to_string());
+        // The money key, so an upstream log line joins back to the billing row.
+        meta.insert("billing_operation_id".to_owned(), b.ctx.operation.to_string());
         meta.insert("user_id".to_owned(), b.ctx.user_id.to_string());
     }
     meta

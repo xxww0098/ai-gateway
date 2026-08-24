@@ -44,7 +44,7 @@ mod subscription;
 mod support;
 mod user;
 
-pub use billing::{BalanceLog, OperationLog, UsageLog};
+pub use billing::{BalanceLog, BillingOperation, OperationLog, UsageLog};
 pub use catalog::{ModelCatalogEntry, ModelPrice};
 pub use channel::ChannelPolicy;
 pub use commerce::{PaymentOrder, RedeemCode, Refund};

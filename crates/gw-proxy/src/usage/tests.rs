@@ -180,12 +180,14 @@ fn fixture() -> Fixture {
     }
 }
 
+/// A context with a freshly-minted operation. Tests that need the reservation
+/// to line up bind it once and pass `&ctx` — the operation id *is* the key.
 fn ctx() -> SettleCtx {
     SettleCtx {
-        request_id: "req-1".to_owned(),
         user_id: 7,
         rate_mult: 1.0,
         model: "gpt-4o".to_owned(),
+        client_trace: gw_ledger::ClientTraceId::new("trace-the-client-saw"),
         ..SettleCtx::default()
     }
 }
@@ -204,15 +206,12 @@ fn usage(input: i64, output: i64) -> UsageRecord {
 #[tokio::test]
 async fn a_precise_settlement_debits_then_clears_the_reservation() {
     let fixture = fixture();
-    fixture
-        .ledger
-        .hold(7, 1.0, "req-1", std::time::Duration::from_secs(60))
-        .await
-        .expect("hold");
+    let ctx = ctx();
+    fixture.ledger.plant_hold(7, &ctx.operation, 1.0).await;
 
     fixture
         .settlement
-        .settle(&ctx(), UsageOutcome::precise(usage(100, 200)))
+        .settle(&ctx, UsageOutcome::precise(usage(100, 200)))
         .await;
 
     let commits = fixture.store.commits.lock();
@@ -224,7 +223,7 @@ async fn a_precise_settlement_debits_then_clears_the_reservation() {
     );
     assert_eq!(
         fixture.store.cleared_holds.lock().as_slice(),
-        ["req-1"],
+        [ctx.operation.to_string()],
         "the reservation is cleared only after the transaction commits",
     );
     assert!(
@@ -240,15 +239,12 @@ async fn a_precise_settlement_debits_then_clears_the_reservation() {
 #[tokio::test]
 async fn a_missing_envelope_falls_back_to_the_reservation_and_says_so() {
     let fixture = fixture();
-    fixture
-        .ledger
-        .hold(7, 2.5, "req-1", std::time::Duration::from_secs(60))
-        .await
-        .expect("hold");
+    let ctx = ctx();
+    fixture.ledger.plant_hold(7, &ctx.operation, 2.5).await;
 
     fixture
         .settlement
-        .settle(&ctx(), UsageOutcome::default())
+        .settle(&ctx, UsageOutcome::default())
         .await;
 
     let commits = fixture.store.commits.lock();
@@ -272,16 +268,13 @@ async fn a_missing_envelope_falls_back_to_the_reservation_and_says_so() {
 #[tokio::test]
 async fn strict_mode_neither_charges_nor_releases_and_records_the_event() {
     let fixture = fixture();
-    fixture
-        .ledger
-        .hold(7, 2.5, "req-1", std::time::Duration::from_secs(60))
-        .await
-        .expect("hold");
+    let ctx = ctx();
+    fixture.ledger.plant_hold(7, &ctx.operation, 2.5).await;
     fixture.settlement.set_strict_usage_metadata(true);
 
     fixture
         .settlement
-        .settle(&ctx(), UsageOutcome::default())
+        .settle(&ctx, UsageOutcome::default())
         .await;
 
     assert!(
@@ -297,7 +290,7 @@ async fn strict_mode_neither_charges_nor_releases_and_records_the_event() {
         "strict mode must not release either — the hold expires on its TTL",
     );
     assert_eq!(
-        fixture.ledger.held_amount("req-1"),
+        fixture.ledger.held_amount(&ctx.operation),
         Some(2.5),
         "the reservation stays put so reconciliation can match it",
     );
@@ -315,11 +308,12 @@ async fn strict_mode_neither_charges_nor_releases_and_records_the_event() {
 #[tokio::test]
 async fn an_unreadable_hold_leaves_the_reservation_alone_rather_than_zero_billing() {
     let fixture = fixture();
+    let ctx = ctx();
     *fixture.ledger.hold_lookup_errors.lock() = true;
 
     fixture
         .settlement
-        .settle(&ctx(), UsageOutcome::default())
+        .settle(&ctx, UsageOutcome::default())
         .await;
 
     assert!(fixture.store.commits.lock().is_empty());
@@ -334,15 +328,12 @@ async fn an_unreadable_hold_leaves_the_reservation_alone_rather_than_zero_billin
 #[tokio::test]
 async fn a_failed_upstream_gives_the_reservation_back() {
     let fixture = fixture();
-    fixture
-        .ledger
-        .hold(7, 1.0, "req-1", std::time::Duration::from_secs(60))
-        .await
-        .expect("hold");
+    let ctx = ctx();
+    fixture.ledger.plant_hold(7, &ctx.operation, 1.0).await;
 
     fixture
         .settlement
-        .settle(&ctx(), UsageOutcome::failed())
+        .settle(&ctx, UsageOutcome::failed())
         .await;
 
     assert!(
@@ -361,34 +352,32 @@ async fn a_rolled_back_transaction_leaves_the_reservation_for_reconciliation() {
     // Balance and usage stay consistent, and the hold is still there, so the
     // request can be reconciled instead of silently charged.
     let fixture = fixture();
+    let ctx = ctx();
     *fixture.store.commit_fails.lock() = true;
-    fixture
-        .ledger
-        .hold(7, 1.0, "req-1", std::time::Duration::from_secs(60))
-        .await
-        .expect("hold");
+    fixture.ledger.plant_hold(7, &ctx.operation, 1.0).await;
 
     fixture
         .settlement
-        .settle(&ctx(), UsageOutcome::precise(usage(10, 10)))
+        .settle(&ctx, UsageOutcome::precise(usage(10, 10)))
         .await;
 
     assert!(
         fixture.store.cleared_holds.lock().is_empty(),
         "a hold cleared after a rollback would charge nothing but lose the reservation",
     );
-    assert_eq!(fixture.ledger.held_amount("req-1"), Some(1.0));
+    assert_eq!(fixture.ledger.held_amount(&ctx.operation), Some(1.0));
     assert!(fixture.store.logs.lock()[0].failed);
 }
 
 #[tokio::test]
 async fn a_partial_debit_records_the_shortfall_on_the_usage_row() {
     let fixture = fixture();
+    let ctx = ctx();
     *fixture.store.shortfall.lock() = 0.75;
 
     fixture
         .settlement
-        .settle(&ctx(), UsageOutcome::precise(usage(10, 10)))
+        .settle(&ctx, UsageOutcome::precise(usage(10, 10)))
         .await;
 
     let logs = fixture.store.logs.lock();
@@ -425,18 +414,20 @@ async fn a_subscription_accumulates_only_on_a_real_settlement() {
 #[tokio::test]
 async fn crossing_zero_writes_a_depletion_event() {
     let fixture = fixture();
+    let ctx = ctx();
     *fixture.store.balance_before.lock() = 0.4;
     *fixture.store.balance_after.lock() = 0.0;
 
     fixture
         .settlement
-        .settle(&ctx(), UsageOutcome::precise(usage(10, 10)))
+        .settle(&ctx, UsageOutcome::precise(usage(10, 10)))
         .await;
 
     let events = fixture.store.balance_events.lock();
     assert!(events.iter().any(|e| e.event_type == "balance_depleted"));
     assert_eq!(
-        events[0].reference, "req-1",
+        events[0].reference,
+        ctx.operation.to_string(),
         "the event must be traceable to its request"
     );
 }
@@ -444,10 +435,11 @@ async fn crossing_zero_writes_a_depletion_event() {
 #[tokio::test]
 async fn the_usage_row_carries_the_credential_that_served_the_request() {
     let fixture = fixture();
+    let ctx = ctx();
     fixture
         .settlement
         .settle(
-            &ctx(),
+            &ctx,
             UsageOutcome {
                 usage: Some(usage(1, 2)),
                 auth_id: "acct-9".to_owned(),

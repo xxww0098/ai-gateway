@@ -362,14 +362,14 @@ fn both_idempotency_header_spellings_are_accepted() {
 fn an_inbound_trace_id_is_honoured_and_otherwise_generated() {
     let mut headers = HeaderMap::new();
     headers.insert(TRACE_HEADER, HeaderValue::from_static("trace-123"));
-    assert_eq!(trace_id_from(&headers), "trace-123");
+    assert_eq!(client_trace_from(&headers).as_str(), "trace-123");
 
-    let generated = trace_id_from(&HeaderMap::new());
+    let generated = client_trace_from(&HeaderMap::new());
     assert!(!generated.is_empty());
     assert_ne!(
         generated,
-        trace_id_from(&HeaderMap::new()),
-        "generated hold keys must be unique per request",
+        client_trace_from(&HeaderMap::new()),
+        "a generated trace id must be unique per request",
     );
 }
 
@@ -436,28 +436,66 @@ fn compute_reservation_is_invariant_to_model_trim_and_case() {
     assert_ne!(miss, first, "a different model must not collide");
 }
 
-// ---------------------------------------------------------------- hold_gated
+// ------------------------------------------------------------ admit_operation
+
+/// Builds an operation reserving `amount` against `liability`.
+fn new_operation(user_id: crate::ports::Id, amount: f64, liability: f64) -> gw_ledger::NewOperation {
+    gw_ledger::NewOperation {
+        operation_id: gw_ledger::BillingOperationId::mint(),
+        user_id,
+        reserved_amount: amount,
+        admitted_liability: liability,
+        request_fingerprint: "fingerprint".to_owned(),
+        client_trace_id: "trace-the-client-saw".to_owned(),
+    }
+}
 
 #[tokio::test]
-async fn hold_gated_floor_refusal_leaves_no_reservation() {
+async fn a_floor_refusal_leaves_neither_a_reservation_nor_an_operation() {
     let ledger = FakeLedger::with_balance(1.0);
+    let operation = new_operation(1, 0.5, 2.0);
     let admit = ledger
-        .hold_gated(1, 0.5, 2.0, "req-a", Duration::from_secs(60))
+        .admit_operation(&operation, Some(Duration::from_secs(60)))
         .await
         .expect("lookup");
     assert!(matches!(admit, HoldAdmit::Insufficient { .. }));
     assert!(ledger.calls().is_empty());
-    assert!(ledger.held_amount("req-a").is_none());
+    assert!(ledger.held_amount(&operation.operation_id).is_none());
+    assert!(
+        ledger.operation_state(&operation.operation_id).is_none(),
+        "a refused hold must not leave a reconcilable row behind",
+    );
 }
 
 #[tokio::test]
-async fn hold_gated_quotes_the_available_balance_on_floor_refusal() {
+async fn a_floor_refusal_quotes_the_available_balance() {
     let ledger = FakeLedger::with_balance(3.75);
     let admit = ledger
-        .hold_gated(1, 1.0, 5.0, "req-b", Duration::from_secs(60))
+        .admit_operation(&new_operation(1, 1.0, 5.0), Some(Duration::from_secs(60)))
         .await
         .expect("lookup");
     assert_eq!(admit, HoldAdmit::Insufficient { available: 3.75 },);
+}
+
+#[tokio::test]
+async fn a_budget_token_reservation_still_writes_the_durable_operation() {
+    // `None` TTL = the reservation came from the process-local budget token.
+    // The row must exist anyway: it is the operation's identity, and without it
+    // a crash would leave money unaccounted for with nothing to reconcile.
+    let ledger = FakeLedger::with_balance(100.0);
+    let operation = new_operation(1, 1.0, 1.0);
+    ledger
+        .admit_operation(&operation, None)
+        .await
+        .expect("admit");
+    assert_eq!(
+        ledger.operation_state(&operation.operation_id),
+        Some(gw_ledger::operation::OperationState::Held),
+    );
+    assert!(
+        ledger.held_amount(&operation.operation_id).is_none(),
+        "no Redis reservation is taken when the budget token paid",
+    );
 }
 
 #[tokio::test]
@@ -1050,43 +1088,47 @@ async fn requests_without_a_key_are_never_deduplicated() {
 }
 
 #[tokio::test]
-async fn a_balance_lookup_outage_refuses_the_request_rather_than_letting_it_spend() {
+async fn a_balance_store_outage_refuses_the_request_rather_than_letting_it_spend() {
     // Fail closed: spend admitted during a balance-store outage is spend the
-    // ledger may not be able to reclaim.
+    // ledger may not be able to reclaim. The admission is now one call, so the
+    // outage surfaces there — and the middleware must refuse rather than run
+    // the request unreserved.
     let harness = Harness::build();
     struct BlindLedger(std::sync::Arc<crate::testsupport::FakeLedger>);
     #[async_trait::async_trait]
     impl crate::ports::BillingLedger for BlindLedger {
-        async fn hold(
+        /// The store is unreachable, so admission cannot say whether the
+        /// balance covers anything.
+        async fn admit_operation(
             &self,
-            user_id: crate::ports::Id,
-            amount: f64,
-            request_id: &str,
-            ttl: Duration,
-        ) -> Result<(), crate::ports::BillingError> {
-            self.0.hold(user_id, amount, request_id, ttl).await
+            _operation: &gw_ledger::NewOperation,
+            _redis_ttl: Option<Duration>,
+        ) -> Result<crate::ports::HoldAdmit, crate::ports::BillingError> {
+            Err(crate::ports::BillingError::Other(anyhow::anyhow!(
+                "balance store unreachable"
+            )))
         }
-        async fn settle(
+        async fn settle_once(
             &self,
             user_id: crate::ports::Id,
-            request_id: &str,
+            operation: &gw_ledger::BillingOperationId,
             amount: f64,
-        ) -> Result<f64, crate::ports::BillingError> {
-            self.0.settle(user_id, request_id, amount).await
+        ) -> Result<crate::ports::SettleTerminal, crate::ports::BillingError> {
+            self.0.settle_once(user_id, operation, amount).await
         }
-        async fn release(
+        async fn release_once(
             &self,
             user_id: crate::ports::Id,
-            request_id: &str,
+            operation: &gw_ledger::BillingOperationId,
         ) -> Result<(), crate::ports::BillingError> {
-            self.0.release(user_id, request_id).await
+            self.0.release_once(user_id, operation).await
         }
         async fn active_hold_amount(
             &self,
             user_id: crate::ports::Id,
-            request_id: &str,
+            operation: &gw_ledger::BillingOperationId,
         ) -> Result<Option<f64>, crate::ports::BillingError> {
-            self.0.active_hold_amount(user_id, request_id).await
+            self.0.active_hold_amount(user_id, operation).await
         }
         async fn has_unresolved_shortfall(
             &self,
@@ -1132,6 +1174,176 @@ async fn a_balance_lookup_outage_refuses_the_request_rather_than_letting_it_spen
     )
     .await;
     assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
-    assert_eq!(body["error"].as_str(), Some("insufficient_balance"));
-    assert!(harness.ledger.calls().is_empty());
+    assert_eq!(body["error"].as_str(), Some("Payment Required"));
+    assert!(
+        harness.ledger.calls().is_empty(),
+        "an unadmitted request must not have moved money",
+    );
+}
+
+// ============================================ X-Trace-ID is not the money key
+
+/// Adds a client-chosen `X-Trace-ID` to a signed request.
+fn traced(mut request: axum::http::Request<axum::body::Body>, trace: &str) -> axum::http::Request<axum::body::Body> {
+    request.headers_mut().insert(
+        TRACE_HEADER,
+        HeaderValue::from_str(trace).expect("a header value"),
+    );
+    request
+}
+
+/// Drives one billable request carrying `trace` and returns the operation id
+/// the ledger was asked to admit.
+async fn operation_admitted_for(harness: &Harness, trace: &str) -> String {
+    let before: std::collections::HashSet<String> =
+        harness.ledger.admitted_operations().into_iter().collect();
+    let (status, _) = send(
+        harness.stub_router(StatusCode::OK),
+        traced(
+            signed_request("/v1/chat/completions", chat_body("gpt-4o")),
+            trace,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut fresh: Vec<String> = harness
+        .ledger
+        .admitted_operations()
+        .into_iter()
+        .filter(|id| !before.contains(id))
+        .collect();
+    assert_eq!(
+        fresh.len(),
+        1,
+        "one billable request must admit exactly one operation",
+    );
+    fresh.pop().expect("exactly one")
+}
+
+#[tokio::test]
+async fn a_client_trace_id_never_becomes_the_operation_id() {
+    // The bug this pins: the hold, the settle and the usage event key used to
+    // be an inbound header the client picked.
+    let harness = Harness::build();
+    let trace = "a-trace-the-client-chose";
+    let operation = operation_admitted_for(&harness, trace).await;
+
+    assert_ne!(operation, trace);
+    assert!(
+        !operation.contains(trace),
+        "the operation id must not be derived from the trace header",
+    );
+}
+
+#[tokio::test]
+async fn the_operation_key_is_independent_of_whatever_trace_arrives() {
+    // Two requests differing *only* in the header the client controls get two
+    // distinct money keys, and neither key is a function of its header.
+    let harness = Harness::build();
+    for trace in ["trace-alpha", "trace-beta"] {
+        let operation = operation_admitted_for(&harness, trace).await;
+        assert_ne!(operation, trace);
+        assert!(!operation.contains(trace));
+    }
+    let admitted = harness.ledger.admitted_operations();
+    assert_eq!(
+        admitted.len(),
+        2,
+        "each request owns its own operation: {admitted:?}",
+    );
+}
+
+#[tokio::test]
+async fn a_colliding_trace_id_does_not_collide_the_money_key() {
+    // Replay the *same* client trace id many times. Every request is its own
+    // billing operation; if the trace keyed the ledger they would all land on
+    // one row, and the reservations would overwrite each other.
+    let harness = Harness::build();
+    let replayed = "the-same-trace-every-time";
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..8 {
+        assert!(
+            seen.insert(operation_admitted_for(&harness, replayed).await),
+            "a replayed trace id produced a repeated operation id",
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_settled_usage_row_is_keyed_by_the_operation_not_by_the_trace() {
+    // Every settled row must carry the operation id in `event_key` — the
+    // column that was hard-coded to the empty string — while the trace the
+    // client sent stays in `request_id`, where support tickets can find it.
+    let harness = Harness::build();
+    let trace = "a-trace-the-client-chose";
+    let operation = operation_admitted_for(&harness, trace).await;
+
+    let commits = harness.usage_store.commits.lock();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].operation.as_str(), operation);
+    assert_eq!(commits[0].entry.event_key, operation);
+    assert!(!commits[0].entry.event_key.is_empty());
+    assert_eq!(commits[0].entry.request_id, trace);
+    assert_ne!(commits[0].entry.request_id, commits[0].entry.event_key);
+}
+
+#[tokio::test]
+async fn two_tenants_sharing_a_trace_id_get_separate_operations() {
+    // The cross-tenant version of the collision: nothing about the header may
+    // decide which ledger row is touched.
+    let shared_trace = "a-trace-two-tenants-both-picked";
+    let alpha = Harness::build();
+    let beta = Harness::build();
+
+    let one = operation_admitted_for(&alpha, shared_trace).await;
+    let two = operation_admitted_for(&beta, shared_trace).await;
+    assert_ne!(one, two);
+}
+
+#[tokio::test]
+async fn a_request_without_a_trace_header_still_gets_an_operation() {
+    // The trace is optional; the money key is not.
+    let harness = Harness::build();
+    let (status, _) = send(
+        harness.stub_router(StatusCode::OK),
+        signed_request("/v1/chat/completions", chat_body("gpt-4o")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(harness.ledger.admitted_operations().len(), 1);
+
+    let commits = harness.usage_store.commits.lock();
+    assert!(!commits[0].entry.event_key.is_empty());
+}
+
+#[tokio::test]
+async fn the_reservation_is_the_admitted_liability_not_a_smaller_floor() {
+    // Prepaid: what was compared against the balance is what is reserved.
+    // Reserving the smaller `hold_amount` is the under-hold that lets a large
+    // request settle into debt.
+    let harness = Harness::build();
+    let peek = billing_peek(chat_body("gpt-4o").to_string().as_bytes());
+    let (hold_amount, upper_bound) = compute_reservation(&peek, 1.0, harness.calc.as_ref());
+    assert!(
+        upper_bound >= hold_amount,
+        "the upper bound is by construction at least the hold estimate",
+    );
+
+    let (status, _) = send(
+        harness.stub_router(StatusCode::OK),
+        signed_request("/v1/chat/completions", chat_body("gpt-4o")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let reserved = harness
+        .ledger
+        .calls()
+        .into_iter()
+        .find_map(|call| match call {
+            LedgerCall::Hold { amount, .. } => Some(amount),
+            _ => None,
+        })
+        .expect("the request reserved");
+    assert_eq!(reserved, upper_bound);
 }

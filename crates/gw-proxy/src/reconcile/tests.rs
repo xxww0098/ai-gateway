@@ -1,7 +1,10 @@
-//! Orphaned-hold recovery. The property that matters is idempotence: a hold
-//! that has already produced a usage row must never be charged again.
+//! Orphaned-operation recovery. The property that matters is idempotence: an
+//! operation that already reached a terminal state must never be charged
+//! again — and nothing the caller passes in can switch that guard off.
 
 use std::sync::Arc;
+
+use gw_ledger::BillingOperationId;
 
 use super::*;
 use crate::testsupport::{
@@ -25,74 +28,92 @@ fn fixture() -> Fixture {
     }
 }
 
-fn hold(request_id: &str, amount: f64) -> StaleHold {
-    StaleHold {
+fn orphan(amount: f64) -> OrphanedOperation {
+    OrphanedOperation {
         user_id: 7,
-        request_id: request_id.to_owned(),
-        amount,
+        operation: BillingOperationId::mint(),
+        client_trace_id: "trace-the-client-saw".to_owned(),
+        reserved_amount: amount,
     }
 }
 
 #[tokio::test]
-async fn an_orphaned_hold_is_charged_at_the_reserved_amount_and_then_cleared() {
-    // The reservation is a conservative estimate, so charging it is the most
+async fn an_orphaned_operation_is_charged_at_the_reserved_amount_and_then_cleared() {
+    // The reservation is the admitted upper bound, so charging it is the most
     // the tenant can owe — never more.
     let fixture = fixture();
-    let settled = reconcile_orphaned_holds(&fixture.settlement, &[hold("req-1", 1.25)]).await;
+    let op = orphan(1.25);
+    let settled = reconcile_orphaned_operations(&fixture.settlement, &[op.clone()]).await;
 
     assert_eq!(settled, 1);
     let commits = fixture.store.commits.lock();
     assert_eq!(commits[0].actual_cost, 1.25);
-    assert!(
-        commits[0].skip_if_already_logged,
-        "the in-transaction existence check is what makes this safe to re-run",
+    assert_eq!(commits[0].operation, op.operation);
+    assert_eq!(
+        fixture.store.cleared_holds.lock().as_slice(),
+        [op.operation.to_string()]
     );
-    assert_eq!(fixture.store.cleared_holds.lock().as_slice(), ["req-1"]);
+}
+
+#[tokio::test]
+async fn the_reconciled_row_carries_the_operation_id_as_its_event_key() {
+    // `event_key` used to be a hard-coded empty string, so no settled row said
+    // which billing operation it belonged to.
+    let fixture = fixture();
+    let op = orphan(1.0);
+    reconcile_orphaned_operations(&fixture.settlement, &[op.clone()]).await;
+
+    let logs = fixture.store.logs.lock();
+    assert_eq!(logs[0].event_key, op.operation.to_string());
+    assert!(!logs[0].event_key.is_empty());
+    // ... and the client-facing trace still rides along, in its own column.
+    assert_eq!(logs[0].request_id, op.client_trace_id);
+    assert_ne!(logs[0].request_id, logs[0].event_key);
 }
 
 #[tokio::test]
 async fn the_reconciled_row_is_marked_so_it_is_not_mistaken_for_real_traffic() {
     let fixture = fixture();
-    reconcile_orphaned_holds(&fixture.settlement, &[hold("req-1", 1.0)]).await;
+    reconcile_orphaned_operations(&fixture.settlement, &[orphan(1.0)]).await;
     let logs = fixture.store.logs.lock();
     let metadata = logs[0].raw_metadata.as_ref().expect("annotated");
     assert_eq!(metadata["reconciled"].as_bool(), Some(true));
-    assert_eq!(metadata["reason"].as_str(), Some("orphaned_hold"));
+    assert_eq!(metadata["reason"].as_str(), Some("orphaned_operation"));
     assert!(!logs[0].failed);
 }
 
 #[tokio::test]
 async fn re_running_the_reconciler_cannot_double_charge() {
     let fixture = fixture();
-    let holds = [hold("req-1", 1.0)];
+    let operations = [orphan(1.0)];
 
     assert_eq!(
-        reconcile_orphaned_holds(&fixture.settlement, &holds).await,
+        reconcile_orphaned_operations(&fixture.settlement, &operations).await,
         1
     );
-    assert_eq!(
-        reconcile_orphaned_holds(&fixture.settlement, &holds).await,
-        0,
-        "a hold whose request already produced a usage row must be skipped",
-    );
+    for _ in 0..25 {
+        assert_eq!(
+            reconcile_orphaned_operations(&fixture.settlement, &operations).await,
+            0,
+            "an operation that already reached a terminal state must not settle again",
+        );
+    }
     assert_eq!(fixture.store.commits.lock().len(), 1);
 }
 
 #[tokio::test]
-async fn malformed_holds_are_ignored_rather_than_charged() {
+async fn malformed_operations_are_ignored_rather_than_charged() {
     let fixture = fixture();
     let bogus = [
-        hold("", 1.0),
-        hold("req-2", 0.0),
-        hold("req-3", -1.0),
-        StaleHold {
+        orphan(0.0),
+        orphan(-1.0),
+        OrphanedOperation {
             user_id: 0,
-            request_id: "req-4".to_owned(),
-            amount: 1.0,
+            ..orphan(1.0)
         },
     ];
     assert_eq!(
-        reconcile_orphaned_holds(&fixture.settlement, &bogus).await,
+        reconcile_orphaned_operations(&fixture.settlement, &bogus).await,
         0
     );
     assert!(fixture.store.commits.lock().is_empty());
@@ -103,7 +124,7 @@ async fn a_failed_settle_leaves_the_reservation_in_place() {
     let fixture = fixture();
     *fixture.store.commit_fails.lock() = true;
     assert_eq!(
-        reconcile_orphaned_holds(&fixture.settlement, &[hold("req-1", 1.0)]).await,
+        reconcile_orphaned_operations(&fixture.settlement, &[orphan(1.0)]).await,
         0,
     );
     assert!(
@@ -117,7 +138,7 @@ async fn the_scan_always_publishes_the_gauge_even_when_reconciliation_is_disarme
     let fixture = fixture();
     let metrics = RecordingMetrics::default();
     let scanner = FakeScanner::default();
-    *scanner.stale.lock() = vec![hold("req-1", 1.0), hold("req-2", 2.0)];
+    *scanner.stale.lock() = vec![orphan(1.0), orphan(2.0)];
 
     let settled = scan_once(
         &scanner,
@@ -138,7 +159,7 @@ async fn an_armed_scan_reconciles_what_it_finds() {
     let fixture = fixture();
     let metrics = RecordingMetrics::default();
     let scanner = FakeScanner::default();
-    *scanner.stale.lock() = vec![hold("req-1", 1.0)];
+    *scanner.stale.lock() = vec![orphan(1.0)];
 
     let settled = scan_once(
         &scanner,
@@ -201,7 +222,7 @@ use tokio_util::task::TaskTracker;
 struct BlockingScanner {
     entered: tokio::sync::Semaphore,
     release: tokio::sync::Semaphore,
-    stale: parking_lot::Mutex<Vec<StaleHold>>,
+    stale: parking_lot::Mutex<Vec<OrphanedOperation>>,
 }
 
 impl Default for BlockingScanner {
@@ -215,8 +236,12 @@ impl Default for BlockingScanner {
 }
 
 #[async_trait::async_trait]
-impl StaleHoldScanner for BlockingScanner {
-    async fn scan_stale_holds(&self, _older_than: StdDuration) -> anyhow::Result<Vec<StaleHold>> {
+impl NonTerminalOperationScanner for BlockingScanner {
+    async fn scan_non_terminal(
+        &self,
+        _older_than: StdDuration,
+        _limit: i64,
+    ) -> anyhow::Result<Vec<OrphanedOperation>> {
         self.entered.add_permits(1);
         let permit = self.release.acquire().await.expect("never closed");
         permit.forget();
@@ -286,7 +311,7 @@ async fn a_scan_that_can_move_money_is_registered_on_the_drain() {
     let drain = TaskTracker::new();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let scanner = Arc::new(BlockingScanner::default());
-    *scanner.stale.lock() = vec![hold("req-1", 1.0)];
+    *scanner.stale.lock() = vec![orphan(1.0)];
 
     let loop_handle = spawn_scanner(
         scanner.clone(),

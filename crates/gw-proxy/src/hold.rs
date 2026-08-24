@@ -14,9 +14,13 @@
 //! 8. subscription quota (lock, rotate stale counters, compare against estimate)
 //! 9. **upper-bound pre-flight**: `max(hold, EstimateWithMaxTokens, Estimate(stream))`
 //!    vs available balance -> 402 `insufficient_balance`, no hold created
-//! 10. budget token -> else `ledger.Hold`
+//! 10. **mint the server [`BillingOperationId`]**, then budget token ->
+//!     else `ledger.admit_operation`
 //! 11. idempotency claim (only now that funds are reserved)
 //! 12. run downstream, then settle-or-release exactly once
+//!
+//! Step 10 is where the money key comes from, and it comes from the *server*.
+//! The inbound `X-Trace-ID` never reaches it — see [`client_trace_from`].
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,6 +31,7 @@ use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use gw_ledger::{BillingOperationId, ClientTraceId, NewOperation};
 use gw_relay::endpoint::spec::{RequestSpec, SurfaceError, validate};
 
 use crate::ProxyState;
@@ -217,7 +222,7 @@ impl HoldMiddleware {
             1.0
         };
 
-        let request_id = trace_id_from(req.headers());
+        let client_trace = client_trace_from(req.headers());
         let ip_address = extract_ip_address(req.headers());
         let idempotency_key = extract_idempotency_key(req.headers());
         let method = req.method().clone();
@@ -280,7 +285,7 @@ impl HoldMiddleware {
                     meta,
                     rate_mult,
                     peek,
-                    request_id,
+                    client_trace,
                     ip_address,
                     idempotency_key,
                     method,
@@ -308,7 +313,7 @@ impl HoldMiddleware {
             meta,
             rate_mult,
             peek,
-            request_id,
+            client_trace,
             ip_address,
             idempotency_key,
             method,
@@ -402,48 +407,56 @@ impl HoldMiddleware {
             }
         }
 
+        // --- mint the money key ---
+        //
+        // **The server mints it.** Not the inbound `X-Trace-ID`, not the
+        // client `Idempotency-Key`, not a hash of either. A caller can replay
+        // or collide a header it controls; it cannot reach this.
+        let operation_id = BillingOperationId::mint();
+
         // --- upper-bound pre-flight ---
-        // Reject before creating a hold when the balance cannot cover even the
-        // worst case. The reserved amount stays `hold_amount`; the upper bound
-        // only gates the balance comparison.
-        // 预算代币：仅 try_deduct 命中时跳过 Redis hold；无 token / 不足 /
-        // 过期走 hold_gated 单趟 Lua（floor + 预扣 + EXPIRE）。不在 store
-        // 挂载时 peek 余额——那是 acquire 启用前的误接线代价。
+        //
+        // Reject before reserving when the balance cannot cover the worst
+        // case. **Prepaid reserves the bound it checked**: `reserved_amount`
+        // is `upper_bound`, not the smaller `hold_amount` — reserving less
+        // than the liability that was admitted is exactly the under-hold that
+        // lets a large request settle into debt.
+        let operation = NewOperation {
+            operation_id: operation_id.clone(),
+            user_id: meta.user_id,
+            reserved_amount: upper_bound,
+            admitted_liability: upper_bound,
+            request_fingerprint: request_fingerprint(meta.user_id, &method, &path, &peek),
+            client_trace_id: client_trace.as_str().to_owned(),
+        };
+
+        // 预算代币：仅 try_deduct 命中时跳过 Redis 预留；无 token / 不足 /
+        // 过期走 admit_operation 的单趟 Lua（floor + 预扣 + EXPIRE）。
+        // **持久化那一行两条路都写** —— 它是操作的身份，不是它的缓存。
         let used_budget_token = self
             .budget_tokens
             .as_ref()
-            .is_some_and(|bts| bts.try_deduct(meta.user_id, hold_amount));
+            .is_some_and(|bts| bts.try_deduct(meta.user_id, upper_bound));
+        let redis_ttl = (!used_budget_token).then_some(self.ttl);
 
-        if !used_budget_token {
-            match self
-                .ledger
-                .hold_gated(
-                    meta.user_id,
-                    hold_amount,
+        match self.ledger.admit_operation(&operation, redis_ttl).await {
+            Ok(HoldAdmit::Reserved) => {}
+            Ok(HoldAdmit::Insufficient { available }) => {
+                tracing::warn!(
+                    event = "preflight_insufficient_balance",
+                    user_id = meta.user_id,
+                    model = %peek.model,
                     upper_bound,
-                    &request_id,
-                    self.ttl,
-                )
-                .await
-            {
-                Ok(HoldAdmit::Reserved) => {}
-                Ok(HoldAdmit::Insufficient { available }) => {
-                    tracing::warn!(
-                        event = "preflight_insufficient_balance",
-                        user_id = meta.user_id,
-                        model = %peek.model,
-                        upper_bound,
-                        available,
-                    );
-                    return HoldRejection::InsufficientBalance {
-                        current_balance: available,
-                        required_amount: upper_bound,
-                    }
-                    .into_response();
+                    available,
+                );
+                return HoldRejection::InsufficientBalance {
+                    current_balance: available,
+                    required_amount: upper_bound,
                 }
-                Err(err) => {
-                    return self.reject_hold_error(err, meta.user_id, hold_amount).await;
-                }
+                .into_response();
+            }
+            Err(err) => {
+                return self.reject_hold_error(err, meta.user_id, upper_bound).await;
             }
         }
 
@@ -451,7 +464,8 @@ impl HoldMiddleware {
 
         let billing: BillingHandle = Arc::new(RequestBilling::new(
             SettleCtx {
-                request_id: request_id.clone(),
+                operation: operation_id.clone(),
+                client_trace: client_trace.clone(),
                 user_id: meta.user_id,
                 api_key_id: meta.api_key_id,
                 group_id: meta.group_id,
@@ -468,7 +482,8 @@ impl HoldMiddleware {
         kernel::advance_ext(&mut req, Phase::Reserved);
         if let Some(ctx) = req.extensions_mut().get_mut::<RelayCtx>() {
             ctx.peek = Some(peek);
-            ctx.request_id.clone_from(&billing.ctx.request_id);
+            ctx.client_trace = billing.ctx.client_trace.clone();
+            ctx.operation = Some(billing.ctx.operation.clone());
             ctx.ip_address.clone_from(&billing.ctx.ip_address);
             ctx.idempotency_key.clone_from(&billing.ctx.idempotency_key);
             ctx.billing = Some(billing.clone());
@@ -485,9 +500,8 @@ impl HoldMiddleware {
                 Ok(false) => {
                     // Lost the race: give the reservation back, then either
                     // replay the winner's response or report the conflict.
-                    if !used_budget_token {
-                        let _ = with_timeout(self.ledger.release(meta.user_id, &request_id)).await;
-                    }
+                    let _ =
+                        with_timeout(self.ledger.release_once(meta.user_id, &operation_id)).await;
                     if let Ok(Some(other)) = im.check(&idem_store_key).await
                         && !other.processing
                         && !other.truncated
@@ -521,7 +535,7 @@ impl HoldMiddleware {
             self.finalize_idempotency(
                 im,
                 &idem_store_key,
-                &request_id,
+                client_trace.as_str(),
                 status,
                 content_type,
                 captured,
@@ -548,13 +562,14 @@ impl HoldMiddleware {
             self.settlement.settle_missing_usage(&billing.ctx).await;
             return;
         }
-        if !billing.used_budget_token {
-            let _ = with_timeout(
-                self.ledger
-                    .release(billing.ctx.user_id, &billing.ctx.request_id),
-            )
-            .await;
-        }
+        // The durable operation is terminated on **both** reservation paths:
+        // a budget-token request has no Redis hold to give back, but it still
+        // owns a `held` row that reconciliation would otherwise charge.
+        let _ = with_timeout(
+            self.ledger
+                .release_once(billing.ctx.user_id, &billing.ctx.operation),
+        )
+        .await;
     }
 
     /// Stores a replayable 2xx response, or drops the claim so a retry can
@@ -604,6 +619,13 @@ impl HoldMiddleware {
         if matches!(err, BillingError::OutstandingDebt) {
             return HoldRejection::OutstandingDebt.into_response();
         }
+        if let BillingError::OperationConflict(conflict) = &err {
+            // A minted id collided with a live or finished operation. That is
+            // a gateway bug, not a tenant error — refuse rather than reuse the
+            // row, and say so loudly enough to be found.
+            tracing::error!(%conflict, user_id, "billing operation id conflict");
+            return HoldRejection::PaymentRequired.into_response();
+        }
         tracing::warn!(%err, user_id, "hold failed");
         HoldRejection::PaymentRequired.into_response()
     }
@@ -614,7 +636,8 @@ struct ReservationInput {
     meta: AccessMetadata,
     rate_mult: f64,
     peek: BillingPeek,
-    request_id: String,
+    /// Observability only. The money key is minted later, in `handle_reserved`.
+    client_trace: ClientTraceId,
     ip_address: String,
     idempotency_key: String,
     method: Method,
@@ -845,8 +868,18 @@ pub fn approximate_tokens_from_bytes(size: usize) -> i64 {
     size.div_ceil(4) as i64
 }
 
-/// Stable request id used as the ledger hold key: an inbound `X-Trace-ID`, else
-/// a freshly minted one.
+/// The request's **observability** id: an inbound `X-Trace-ID`, else a
+/// process-local one.
+///
+/// # It is not the money key
+///
+/// It used to be. A client-supplied header keyed the Redis hold, the settle,
+/// the reconcile scan and the usage row, so two callers picking the same value
+/// — by replay or by accident — landed on one ledger row. The money key is now
+/// minted by the server ([`BillingOperationId::mint`]) and this value only
+/// reaches logs, the response header and `usage_logs.request_id`. The return
+/// type is [`ClientTraceId`] precisely so it cannot be passed where an
+/// operation id belongs.
 ///
 /// # 为什么不是 `Uuid::new_v4()`
 ///
@@ -858,16 +891,28 @@ pub fn approximate_tokens_from_bytes(size: usize) -> i64 {
 /// （整个进程一次，不是每请求一次），计数器保证同进程内唯一，
 /// 前缀保证跨进程/跨副本不碰撞。`getentropy` 的每请求调用次数归 **0**（验收目标 T12）。
 ///
-/// 形状仍是十六进制文本，长度固定，对既有的 `usage_logs.request_id`
-/// / Redis hold 键完全兼容（列是文本，没有 UUID 约束）。
-pub fn trace_id_from(headers: &HeaderMap) -> String {
+/// 形状仍是十六进制文本，长度固定，对既有的 `usage_logs.request_id` 兼容。
+pub fn client_trace_from(headers: &HeaderMap) -> ClientTraceId {
     headers
         .get(TRACE_HEADER)
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(new_trace_id)
+        .map_or_else(|| ClientTraceId::new(new_trace_id()), ClientTraceId::new)
+}
+
+/// Identifies *which request* an operation is for.
+///
+/// Compared on a re-hold: same operation id + different fingerprint is a
+/// conflict, not an overwrite. It does not have to be unguessable — nothing
+/// is authorised by it — only stable for one request and different for two,
+/// so it is assembled from facts the pre-flight already has rather than
+/// hashing the body a second time.
+fn request_fingerprint(user_id: Id, method: &Method, path: &str, peek: &BillingPeek) -> String {
+    format!(
+        "{user_id}:{method}:{path}:{}:{}:{}:{}",
+        peek.model, peek.stream, peek.max_tokens, peek.input_tokens
+    )
 }
 
 /// 进程级随机前缀。`LazyLock` 保证整个进程**只取一次**熵；

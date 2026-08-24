@@ -20,6 +20,8 @@ use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
+use gw_ledger::{BillingOperationId, ClientTraceId};
+
 use crate::ProxyState;
 use crate::access::{credential_from, is_proxy_path};
 use crate::error::AuthError;
@@ -109,7 +111,10 @@ impl Phase {
 pub struct RelayCtx {
     pub phase: Phase,
     pub access: AccessMetadata,
-    pub request_id: String,
+    /// 观测用的链路 id（入站 `X-Trace-ID` 或进程内生成）。**不是钱的键。**
+    pub client_trace: ClientTraceId,
+    /// 服务端生成的计费操作 id。预扣落下之前是 `None`。
+    pub operation: Option<BillingOperationId>,
     pub ip_address: String,
     pub idempotency_key: String,
     pub peek: Option<BillingPeek>,
@@ -123,7 +128,8 @@ impl RelayCtx {
         Self {
             phase: Phase::Authenticated,
             access,
-            request_id: String::new(),
+            client_trace: ClientTraceId::default(),
+            operation: None,
             ip_address: String::new(),
             idempotency_key: String::new(),
             peek: None,

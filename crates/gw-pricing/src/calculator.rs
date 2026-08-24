@@ -5,6 +5,7 @@ use std::sync::Arc;
 use gw_model::ModelPrice;
 
 use crate::cache::ModelPriceCache;
+use crate::money::{RateMultiplier, TokenCount, UnitPrice};
 
 /// Nominal token count [`Calculator::estimate`] reserves for one request
 /// before the real response is seen. Deliberately a small, generous constant
@@ -59,7 +60,9 @@ pub struct CostBreakdown {
 #[derive(Debug, Clone, Default)]
 pub struct Calculator {
     cache: Option<Arc<ModelPriceCache>>,
-    default_price_per_1m: f64,
+    /// Checked at construction, so no lookup miss can inject a `NaN` or a
+    /// negative price into the arithmetic below. See [`crate::money`].
+    default_price_per_1m: UnitPrice,
 }
 
 impl Calculator {
@@ -73,11 +76,15 @@ impl Calculator {
     ///
     /// [`Calculator::default()`] is a no-cache, zero-default-price value, so
     /// every method returns 0.
+    /// A `NaN`, infinite or negative default price is refused at this
+    /// boundary and becomes [`UnitPrice::ZERO`]: a misconfigured fallback
+    /// price must not be able to reach the ledger, and it is the only value
+    /// that provably cannot over-charge.
     #[must_use]
     pub fn new(cache: Option<Arc<ModelPriceCache>>, default_price_per_1m: f64) -> Self {
         Self {
             cache,
-            default_price_per_1m,
+            default_price_per_1m: UnitPrice::new(default_price_per_1m).unwrap_or(UnitPrice::ZERO),
         }
     }
 
@@ -100,11 +107,12 @@ impl Calculator {
     pub fn estimate(&self, model_id: &str, stream: bool, rate_mult: f64) -> f64 {
         let (input_per_1m, output_per_1m) = self.io_prices(model_id);
         let tokens = ESTIMATED_TOKENS as f64;
-        let mut base = (input_per_1m * tokens + output_per_1m * tokens) / TOKENS_PER_UNIT;
+        let mut base =
+            (input_per_1m.get() * tokens + output_per_1m.get() * tokens) / TOKENS_PER_UNIT;
         if stream {
             base *= STREAM_MULTIPLIER;
         }
-        base * rate_mult
+        base * rate(rate_mult).get()
     }
 
     /// A tighter USD upper bound for a request whose client supplied an output
@@ -136,13 +144,13 @@ impl Calculator {
             return self.estimate(model_id, streaming, rate_mult);
         }
         let (input_per_1m, output_per_1m) = self.io_prices(model_id);
-        let mut base = (input_per_1m * ESTIMATED_TOKENS as f64
-            + output_per_1m * max_output_tokens as f64)
+        let mut base = (input_per_1m.get() * ESTIMATED_TOKENS as f64
+            + output_per_1m.get() * max_output_tokens as f64)
             / TOKENS_PER_UNIT;
         if streaming {
             base *= STREAM_MULTIPLIER;
         }
-        base * rate_mult
+        base * rate(rate_mult).get()
     }
 
     /// The hold reservation computed from a *real* input-token count
@@ -177,12 +185,12 @@ impl Calculator {
         } else {
             max_output_tokens
         };
-        let mut base =
-            (input_per_1m * in_tok as f64 + output_per_1m * out_tok as f64) / TOKENS_PER_UNIT;
+        let mut base = (input_per_1m.get() * in_tok as f64 + output_per_1m.get() * out_tok as f64)
+            / TOKENS_PER_UNIT;
         if stream {
             base *= STREAM_MULTIPLIER;
         }
-        base * rate_mult
+        base * rate(rate_mult).get()
     }
 
     /// The exact USD cost of a completed request: each of the four token
@@ -198,10 +206,10 @@ impl Calculator {
         let (input_per_1m, output_per_1m, cached_per_1m, reasoning_per_1m) =
             match self.lookup(model_id) {
                 Some(p) => (
-                    p.input_price_per_1m,
-                    p.output_price_per_1m,
-                    p.cached_input_price_per_1m,
-                    p.reasoning_price_per_1m,
+                    self.price(p.input_price_per_1m),
+                    self.price(p.output_price_per_1m),
+                    self.price(p.cached_input_price_per_1m),
+                    self.price(p.reasoning_price_per_1m),
                 ),
                 None => {
                     let d = self.default_price_per_1m;
@@ -209,35 +217,63 @@ impl Calculator {
                 }
             };
 
+        // An upstream that reports a negative column would otherwise *credit*
+        // the tenant for that column; clamping bills nothing for it instead.
+        let input = TokenCount::clamped(tokens.input).as_f64();
+        let output = TokenCount::clamped(tokens.output).as_f64();
+        let cached = TokenCount::clamped(tokens.cached).as_f64();
+        let reasoning = TokenCount::clamped(tokens.reasoning).as_f64();
+        let rate = rate(rate_mult).get();
+
         // Sum the raw products, divide once, scale once.
-        let raw = input_per_1m * tokens.input as f64
-            + output_per_1m * tokens.output as f64
-            + cached_per_1m * tokens.cached as f64
-            + reasoning_per_1m * tokens.reasoning as f64;
+        let raw = input_per_1m.get() * input
+            + output_per_1m.get() * output
+            + cached_per_1m.get() * cached
+            + reasoning_per_1m.get() * reasoning;
 
         CostBreakdown {
-            input_cost: input_per_1m * tokens.input as f64 / TOKENS_PER_UNIT * rate_mult,
-            output_cost: output_per_1m * tokens.output as f64 / TOKENS_PER_UNIT * rate_mult,
-            cached_cost: cached_per_1m * tokens.cached as f64 / TOKENS_PER_UNIT * rate_mult,
-            reasoning_cost: reasoning_per_1m * tokens.reasoning as f64 / TOKENS_PER_UNIT
-                * rate_mult,
-            total_cost: raw / TOKENS_PER_UNIT * rate_mult,
+            input_cost: input_per_1m.get() * input / TOKENS_PER_UNIT * rate,
+            output_cost: output_per_1m.get() * output / TOKENS_PER_UNIT * rate,
+            cached_cost: cached_per_1m.get() * cached / TOKENS_PER_UNIT * rate,
+            reasoning_cost: reasoning_per_1m.get() * reasoning / TOKENS_PER_UNIT * rate,
+            total_cost: raw / TOKENS_PER_UNIT * rate,
         }
     }
 
     /// The `(input, output)` per-1M pair the three estimate methods share:
     /// the model's own columns on a cache hit, the default price on a miss.
-    fn io_prices(&self, model_id: &str) -> (f64, f64) {
+    fn io_prices(&self, model_id: &str) -> (UnitPrice, UnitPrice) {
         match self.lookup(model_id) {
-            Some(p) => (p.input_price_per_1m, p.output_price_per_1m),
+            Some(p) => (
+                self.price(p.input_price_per_1m),
+                self.price(p.output_price_per_1m),
+            ),
             None => (self.default_price_per_1m, self.default_price_per_1m),
         }
+    }
+
+    /// One `model_prices` column, checked. A row carrying a `NaN` or a
+    /// negative price falls back to the configured default rather than
+    /// poisoning the arithmetic — the column is `numeric` and nullable, so a
+    /// hostile value there is a data problem, not a request problem.
+    fn price(&self, column: f64) -> UnitPrice {
+        UnitPrice::new(column).unwrap_or(self.default_price_per_1m)
     }
 
     /// Resolves a model id through the cache, tolerating an absent cache.
     fn lookup(&self, model_id: &str) -> Option<Arc<ModelPrice>> {
         self.cache.as_ref()?.get(model_id)
     }
+}
+
+/// The group multiplier, checked.
+///
+/// A `NaN` or negative multiplier falls back to the identity: billing at the
+/// un-discounted rate is the safe direction to fail, and a `NaN` would slip
+/// past every later comparison. Zero stays zero — a zero-rate group is a real
+/// configuration, and the estimate methods document it.
+fn rate(rate_mult: f64) -> RateMultiplier {
+    RateMultiplier::new(rate_mult).unwrap_or(RateMultiplier::ONE)
 }
 
 #[cfg(test)]

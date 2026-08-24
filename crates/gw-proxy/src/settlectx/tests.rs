@@ -9,7 +9,6 @@ use super::*;
 fn billing() -> Arc<RequestBilling> {
     Arc::new(RequestBilling::new(
         SettleCtx {
-            request_id: "req-1".to_owned(),
             user_id: 1,
             rate_mult: 1.0,
             ..SettleCtx::default()

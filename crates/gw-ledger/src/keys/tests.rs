@@ -3,31 +3,17 @@
 
 use super::{
     HOLDS_KEY_PREFIX, balance_key, holds_key, holds_ts_key, shortfall_resolve_reference,
-    user_id_from_holds_key,
 };
 use crate::testsupport::Rng;
 
-/// The trap the scan has to work around: every timestamp hash also matches a
-/// glob for hold sets. If this ever stopped being true the scan's filter would
-/// look like dead code — and if the filter were dropped while it stayed true,
-/// every timestamp hash would be reported as an unparseable hold set.
+/// Reservation keys and their companion timestamp hashes share one prefix, so
+/// anything globbing the prefix sees both. Nothing scans them any more —
+/// reconciliation reads `billing_operations` — but the layout is still what a
+/// running process and a later binary have to agree on.
 #[test]
 fn timestamp_hashes_share_the_hold_set_prefix() {
     assert!(holds_ts_key(42).starts_with(HOLDS_KEY_PREFIX));
     assert!(holds_key(42).starts_with(HOLDS_KEY_PREFIX));
-}
-
-/// A hold-set key round-trips back to its owner, and a timestamp hash never
-/// masquerades as one.
-#[test]
-fn only_hold_set_keys_yield_a_user_id() {
-    let mut rng = Rng::new(0x00C0_FFEE);
-    for _ in 0..500 {
-        let user_id = rng.i64_range(1, i64::MAX / 2);
-        assert_eq!(user_id_from_holds_key(&holds_key(user_id)), Some(user_id));
-        assert_eq!(user_id_from_holds_key(&holds_ts_key(user_id)), None);
-        assert_eq!(user_id_from_holds_key(&balance_key(user_id)), None);
-    }
 }
 
 /// Keys for different users never collide, in either namespace — a collision
@@ -42,22 +28,6 @@ fn distinct_users_get_distinct_keys() {
         assert_ne!(holds_ts_key(a), holds_ts_key(b));
         assert_ne!(balance_key(a), balance_key(b));
         assert_ne!(holds_key(a), balance_key(a));
-    }
-}
-
-/// Unparseable suffixes are rejected rather than silently attributed to some
-/// user — a scan must not invent hold owners out of foreign keys.
-#[test]
-fn foreign_keys_are_rejected() {
-    for key in [
-        "ai-gateway:billing:holds:",
-        "ai-gateway:billing:holds:abc",
-        "ai-gateway:billing:holds:12x",
-        "ai-gateway:billing:holds:ts:7",
-        "some:other:key:1",
-        "",
-    ] {
-        assert_eq!(user_id_from_holds_key(key), None, "{key:?}");
     }
 }
 

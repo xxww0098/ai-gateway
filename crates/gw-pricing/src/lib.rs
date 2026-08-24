@@ -25,6 +25,7 @@
 
 mod cache;
 mod calculator;
+pub mod money;
 
 #[cfg(test)]
 mod testsupport;
@@ -33,3 +34,4 @@ pub use cache::{ModelPriceCache, normalize_model_key};
 pub use calculator::{
     Calculator, CostBreakdown, ESTIMATED_TOKENS, STREAM_MULTIPLIER, TOKENS_PER_UNIT, TokenUsage,
 };
+pub use money::{Money, RateMultiplier, TokenCount, UnitPrice, ValueError};

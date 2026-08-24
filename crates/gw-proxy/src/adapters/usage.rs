@@ -19,6 +19,8 @@ use gw_infra::Db;
 use gw_ledger::Ledger;
 use std::sync::Arc;
 
+use gw_ledger::{BillingOperationId, SettleOnce};
+
 use crate::ports::{
     BalanceEvent, Id, ModelTokenUsage, SettleReceipt, SettlementCommit, UsageLogEntry, UsageStore,
 };
@@ -45,33 +47,30 @@ impl UsageStore for SqlUsageStore {
     async fn commit_settlement(&self, commit: &SettlementCommit) -> anyhow::Result<SettleReceipt> {
         let mut tx = self.db.begin().await?;
 
-        // The reconcile path's idempotency guard. Re-checked HERE, inside the
-        // transaction, rather than by the caller beforehand: two reconcilers
-        // racing on the same orphaned hold would both see "no row" outside it
-        // and both charge.
-        if commit.skip_if_already_logged {
-            // `(i32,)`, not `(i64,)`: the literal `1` is INT4, and sqlx checks
-            // the wire type rather than widening.
-            let existing: Option<(i32,)> =
-                sqlx::query_as("SELECT 1 FROM usage_logs WHERE request_id = $1 LIMIT 1")
-                    .bind(&commit.request_id)
-                    .fetch_optional(&mut *tx)
-                    .await?;
-            if existing.is_some() {
-                tx.rollback().await?;
-                return Ok(SettleReceipt::AlreadySettled);
-            }
-        }
-
-        let outcome = self
+        // The once-guard, unconditional and inside the transaction. The
+        // conditional `UPDATE billing_operations ... WHERE state = 'held'` takes
+        // the row lock, so a second caller — a retry, a concurrent reconciler,
+        // the request's own late finalizer — finds the operation already
+        // terminal and this whole transaction rolls back without a debit.
+        //
+        // There is no caller-supplied flag here on purpose: an idempotency
+        // guard you have to remember to switch on is one you will forget.
+        let outcome = match self
             .ledger
-            .settle_tx(
+            .settle_once_tx(
                 &mut tx,
+                &commit.operation,
                 commit.user_id,
-                &commit.request_id,
                 commit.actual_cost,
             )
-            .await?;
+            .await?
+        {
+            SettleOnce::Debited(outcome) => outcome,
+            SettleOnce::AlreadyTerminal(_) => {
+                tx.rollback().await?;
+                return Ok(SettleReceipt::AlreadyTerminal);
+            }
+        };
 
         // Read the balance back inside the same transaction so it reflects the
         // debit above; the pre-settle figure is what the balance actually lost.
@@ -149,8 +148,12 @@ impl UsageStore for SqlUsageStore {
         Ok(())
     }
 
-    async fn clear_hold(&self, user_id: Id, request_id: &str) -> anyhow::Result<()> {
-        Ok(self.ledger.clear_hold(user_id, request_id).await?)
+    async fn clear_hold(
+        &self,
+        user_id: Id,
+        operation: &BillingOperationId,
+    ) -> anyhow::Result<()> {
+        Ok(self.ledger.clear_hold(user_id, operation.as_str()).await?)
     }
 
     async fn model_usage_since(
@@ -217,11 +220,11 @@ async fn insert_usage_log(
             input_cost, output_cost, total_cost, actual_cost, cost, \
             rate_multiplier, stream, duration_ms, ip_address, raw_metadata, failed, created_at \
          ) VALUES ( \
-            $1, $2, $3, $4, $5, '', \
-            $6, $7, $8, \
-            $9, $10, $9, $10, $11, $12, \
-            0, 0, $13, $14, $15, \
-            $16, $17, $18, $19, $20, $21, NOW() \
+            $1, $2, $3, $4, $5, $6, \
+            $7, $8, $9, \
+            $10, $11, $10, $11, $12, $13, \
+            0, 0, $14, $15, $16, \
+            $17, $18, $19, $20, $21, $22, NOW() \
          )",
     )
     .bind(entry.user_id)
@@ -229,6 +232,9 @@ async fn insert_usage_log(
     .bind(entry.group_id)
     .bind(&entry.request_id)
     .bind(&entry.idempotency_key)
+    // `event_key` used to be a hard-coded empty string. It is the operation id
+    // now: the one column that says *which billing operation* this row is.
+    .bind(&entry.event_key)
     .bind(&entry.model)
     .bind(&entry.provider)
     .bind(&entry.auth_id)

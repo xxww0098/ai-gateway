@@ -105,17 +105,6 @@ async fn releasing_without_redis_succeeds() {
     redisless().clear_hold(1, "req").await.expect("clear_hold");
 }
 
-/// With no Redis there are no reservations, so a scan is empty rather than an
-/// error — an ops scan must not fail a deployment that runs without holds.
-#[tokio::test]
-async fn scanning_without_redis_finds_nothing() {
-    let stale = redisless()
-        .scan_stale_holds(Duration::from_secs(600))
-        .await
-        .expect("scan");
-    assert!(stale.is_empty());
-}
-
 /// Amount guards reject before any state moves. Every rejected call below must
 /// leave the ledger untouched, which is why they are checked first.
 #[tokio::test]

@@ -218,6 +218,16 @@ impl CannedResponse {
     }
 }
 
+/// 一次出网请求里测试需要断言的东西。
+pub(crate) struct SeenRequest {
+    pub(crate) headers: http::HeaderMap,
+    /// 上游最终收到的**全部**字节。
+    pub(crate) body: bytes::Bytes,
+    /// 这份 body 是边收边转的（[`gw_relay::RelayBody::Streaming`]）还是已缓冲的。
+    /// 「超阈值的请求有没有被网关重新缓冲一遍」只能在这里看出来。
+    pub(crate) streamed: bool,
+}
+
 /// A scripted [`Transport`], so dispatch tests drive the **real**
 /// [`RelayEngine`] — probe guard, frame forwarding, idle watchdog and all —
 /// without a socket.
@@ -225,8 +235,8 @@ impl CannedResponse {
 pub(crate) struct FakeTransport {
     pub(crate) outcomes: Mutex<Vec<Result<CannedResponse, String>>>,
     pub(crate) calls: AtomicUsize,
-    /// Every outbound request, for header and URL assertions.
-    pub(crate) seen: Mutex<Vec<(http::Uri, http::HeaderMap)>>,
+    /// Every outbound request, for header, URL and body assertions.
+    pub(crate) seen: Mutex<Vec<SeenRequest>>,
 }
 
 impl FakeTransport {
@@ -255,7 +265,15 @@ impl FakeTransport {
     pub(crate) fn only_headers(&self) -> http::HeaderMap {
         let seen = self.seen.lock();
         assert_eq!(seen.len(), 1, "expected exactly one upstream request");
-        seen[0].1.clone()
+        seen[0].headers.clone()
+    }
+
+    /// `(body, streamed)` of the single outbound request. Panics unless there
+    /// was exactly one.
+    pub(crate) fn only_body(&self) -> (bytes::Bytes, bool) {
+        let seen = self.seen.lock();
+        assert_eq!(seen.len(), 1, "expected exactly one upstream request");
+        (seen[0].body.clone(), seen[0].streamed)
     }
 }
 
@@ -267,10 +285,22 @@ impl Transport for WiredTransport {
     async fn send(&self, req: UpstreamRequest) -> Result<UpstreamHead, RelayTransportError> {
         let this = &self.0;
         this.calls.fetch_add(1, Ordering::SeqCst);
-        this.seen.lock().push((
-            req.url.as_str().parse().expect("a valid uri"),
-            req.headers.clone(),
-        ));
+        let headers = req.headers.clone();
+        // 先把 body 抽干再上锁：跨 await 持有 `parking_lot` 的守卫会让这个
+        // future 不再是 `Send`，引擎就挂不上去了。
+        let streamed = !matches!(req.body, gw_relay::RelayBody::Buffered(_));
+        let body = match req.body {
+            gw_relay::RelayBody::Buffered(bytes) => bytes,
+            gw_relay::RelayBody::Streaming(body) => http_body_util::BodyExt::collect(body)
+                .await
+                .expect("出网 body 不该失败")
+                .to_bytes(),
+        };
+        this.seen.lock().push(SeenRequest {
+            headers,
+            body,
+            streamed,
+        });
         let outcome = {
             let mut outcomes = this.outcomes.lock();
             if outcomes.is_empty() {

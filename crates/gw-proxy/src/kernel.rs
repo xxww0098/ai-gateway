@@ -105,8 +105,8 @@ impl Phase {
 }
 
 /// 一条请求的内核上下文。对应 NewAPI 的 `RelayInfo`，但只装我们热路径
-/// 真正用到的字段：租户、预扣、peek、trace。body 仍走 [`crate::hold::PeekedBody`]
-/// （`Bytes` 引用计数，再拷一份是浪费）。
+/// 真正用到的字段：租户、预扣、peek、trace。body 仍走 [`crate::body::InboundBody`]
+/// （一次性交接，再读一遍要么读到半截、要么把同样的字节再缓冲一次）。
 #[derive(Debug, Clone)]
 pub struct RelayCtx {
     pub phase: Phase,

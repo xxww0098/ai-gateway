@@ -34,8 +34,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
-use axum::body::Bytes;
-use axum::extract::{Path, Request, State};
+use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use gw_authcore::{AuthRecord, AuthStore};
@@ -48,17 +47,19 @@ use gw_relay::engine::{RelayEngine, RelayOptions};
 use gw_relay::{RelayBody, RelayRequest, RelayTransportError, Surface, UpstreamTarget};
 
 use crate::ProxyState;
+use crate::body::{InboundBody, Outbound, read_inbound, rewritable};
 use crate::channel::ChannelPool;
-use crate::error::{DispatchError, HoldRejection};
-use crate::hold::PeekedBody;
+use crate::error::DispatchError;
 use crate::kernel::{Phase, RelayCtx};
 use crate::ports::{CircuitBreaker, ModelCatalog};
 use crate::settlectx::BillingHandle;
 use crate::usage::Settlement;
 
+mod catalogue;
 mod routing;
 mod stream;
 
+pub use catalogue::{count_tokens, model_detail, models, usage};
 pub(crate) use routing::{dialect_error, partition_routable, rewrite_model, select_upstreams};
 #[cfg(test)]
 pub(crate) use stream::is_hop_by_hop;
@@ -302,18 +303,20 @@ impl Dispatcher {
 /// does the sending. That is why an upstream 429 keeps its `retry-after` here
 /// and a mid-stream failure reaches the client as a reset rather than as a
 /// clean EOF: there is no second copy of the response path to lose them in.
-async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) -> Response {
-    let stream = inbound.stream;
-    let billing = inbound.billing.clone();
-    let model = std::mem::take(&mut inbound.model);
+async fn dispatch(state: &ProxyState, surface: Surface, inbound: Inbound) -> Response {
+    let Inbound {
+        model,
+        stream,
+        body,
+        headers,
+        query,
+        billing,
+        mut relay,
+    } = inbound;
     let dispatcher = &state.dispatch;
     let selection = select_upstreams(surface, &model, dispatcher.resolver.as_deref());
     if selection.candidates.is_empty() {
-        return finish_error(
-            state,
-            billing.as_ref(),
-            DispatchError::UnknownModel(model.clone()),
-        );
+        return finish_error(state, billing.as_ref(), DispatchError::UnknownModel(model));
     }
 
     // L1 剥掉了渠道前缀时，**上游收到的模型名也必须跟着变**。
@@ -322,10 +325,27 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
     // `stream_options` 定点注入」，所以剥前缀只算出名字、不改 body。
     // 在这里解：`gw-proxy` 不受那条合同约束，而客户端写 `codex/gpt-5` 时
     // `codex/` 明确是给网关看的 —— 把它原样转给上游只会拿一个「模型不存在」。
+    //
+    // 改不动就**明确 400**（[`crate::body::rewritable`]），不是原样转发：
+    // 一个被静默丢掉的改写，客户端只会看到上游的「模型不存在」。
     let (model, body) = match &selection.upstream_model {
-        Some(stripped) => (stripped.clone(), rewrite_model(&inbound.body, stripped)),
-        None => (model, std::mem::take(&mut inbound.body)),
+        Some(stripped) => {
+            let Some(bytes) = rewritable(&body) else {
+                return finish_error(
+                    state,
+                    billing.as_ref(),
+                    DispatchError::BodyNotRewritable(model),
+                );
+            };
+            (
+                stripped.clone(),
+                RelayBody::Buffered(rewrite_model(bytes, stripped)),
+            )
+        }
+        None => (model, body),
     };
+    // 这份 body 还能不能再发一次 —— failover 的全部依据。
+    let mut outbound = Outbound::new(body);
 
     // 15 格显式表：直通 / 转义 / 400。挑第一个不是 `Reject` 的候选；
     // 全部 `Reject` 时把第一个的错误信封原样回给客户端。
@@ -338,7 +358,7 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
         return dialect_error(status, body);
     }
 
-    if let Some(ctx) = inbound.relay.as_mut() {
+    if let Some(ctx) = relay.as_mut() {
         ctx.advance(Phase::Routed);
     }
 
@@ -352,7 +372,7 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
     // `x-request-id` — instead of a status this gateway made up.
     let mut fallback: Option<Attempt> = None;
 
-    for provider_name in candidates {
+    'providers: for provider_name in candidates {
         let Some(planner) = dispatcher.planner(provider_name) else {
             continue;
         };
@@ -363,7 +383,7 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
         }
 
         while tried.len() < MAX_UPSTREAM_ATTEMPTS {
-            if let Some(ctx) = inbound.relay.as_mut() {
+            if let Some(ctx) = relay.as_mut() {
                 ctx.advance(Phase::Attempting);
             }
             let Some(auth) = dispatcher
@@ -386,11 +406,12 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
                 model: model.clone(),
                 // `Bytes::clone` 是 refcount：三次 failover 重试零拷贝
                 // （审计缺陷 #13/#14 —— 一个 900 KB 的请求此前要 memcpy 约 5.4 MB）。
-                payload: body.clone(),
+                // 看不见的 body 在这里是空的 —— planner 没有东西可改，见 [`Outbound`]。
+                payload: outbound.payload(),
                 stream,
                 metadata: request_metadata(surface, billing.as_ref(), attempt_id.as_ref()),
-                headers: inbound.headers.clone(),
-                query: inbound.query.clone(),
+                headers: headers.clone(),
+                query: query.clone(),
             };
             let plan = match planner.plan(&auth, &request).await {
                 Ok(plan) => plan,
@@ -403,9 +424,15 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
                 }
             };
 
+            // 流式体只有一份：它已经交给上一个账号了，就没有第二次尝试。
+            // 发一个空 body 去重试是把「转发失败」换成「上游收到半个请求」。
+            let Some(outgoing) = outbound.next(plan.body.clone()) else {
+                break 'providers;
+            };
+
             let started = Instant::now();
             let (probe, handle) = usage_probe(plan.dialect);
-            match dispatcher.send(&plan, &request, probe).await {
+            match dispatcher.send(&plan, &request, outgoing, probe).await {
                 Ok(response) if is_retryable_status(response.status) => {
                     // An error status the upstream answered with is still that
                     // account failing: try another credential. Keep the answer
@@ -426,7 +453,7 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
                     } else {
                         record_failure(state, provider_name, &auth.id).await;
                     }
-                    if let Some(ctx) = inbound.relay.as_mut() {
+                    if let Some(ctx) = relay.as_mut() {
                         ctx.advance(Phase::Relaying);
                     }
                     return relay_response(
@@ -456,7 +483,7 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
     // another try, but an answer nonetheless — that answer is what the client
     // gets, headers intact.
     if let Some(attempt) = fallback {
-        if let Some(ctx) = inbound.relay.as_mut() {
+        if let Some(ctx) = relay.as_mut() {
             ctx.advance(Phase::Relaying);
         }
         return relay_response(
@@ -493,10 +520,14 @@ impl Dispatcher {
     /// hop-by-hop denylist and the credential swap, so filtering them a second
     /// time here would give the workspace two denylists to keep in step.
     /// The plan's own headers are layered on top of them.
+    ///
+    /// `body` 由调用方决定（见 [`Outbound`]），**不是**在这里无条件包一层
+    /// `RelayBody::Buffered` —— 那会让一个本来边收边转的体在这里被重新缓冲。
     async fn send(
         &self,
         plan: &RoutePlan,
         req: &ProviderRequest,
+        body: RelayBody,
         probe: Box<dyn gw_relay::UsageProbe>,
     ) -> Result<gw_relay::RelayResponse, RelayTransportError> {
         let (origin, target) = plan
@@ -511,14 +542,14 @@ impl Dispatcher {
             }
         }
 
-        let body = plan.body.clone().unwrap_or_else(|| req.payload.clone());
         self.relay
             .relay(
                 RelayRequest {
                     method: axum::http::Method::POST,
                     target,
                     headers,
-                    body: RelayBody::Buffered(body),
+                    // 已缓冲就 refcount 一份，流式就把流整个交出去 —— **不再无条件缓冲**。
+                    body,
                 },
                 &UpstreamTarget {
                     origin,
@@ -646,7 +677,9 @@ fn finish_error(
 struct Inbound {
     model: String,
     stream: bool,
-    body: Bytes,
+    /// 入站体的两态。**看不见不等于转不出去** —— 超
+    /// [`crate::body::BILLING_PEEK_LIMIT`] 的体是一条流，照样发给上游。
+    body: RelayBody,
     /// Inbound headers, forwarded upstream through
     /// `gw_provider::types::copy_outbound_headers` by each provider.
     headers: HeaderMap,
@@ -657,8 +690,8 @@ struct Inbound {
     relay: Option<RelayCtx>,
 }
 
-/// Reuses the body the hold layer already buffered, or reads it directly when
-/// no pre-flight ran.
+/// Takes the body the hold layer already read, or reads it here when no
+/// pre-flight ran. **两条路都只读前缀**，超阈值的部分边收边转。
 ///
 /// # 全链路唯一一次 body 解析（根除缺陷 #15）
 ///
@@ -682,20 +715,19 @@ async fn inbound(req: Request, surface: Surface) -> Result<Inbound, Response> {
     let (mut parts, body) = req.into_parts();
     let billing = parts.extensions.remove::<BillingHandle>();
     let relay = parts.extensions.remove::<RelayCtx>();
-    let peeked = parts.extensions.remove::<PeekedBody>();
+    let peeked = parts.extensions.remove::<InboundBody>();
     let spec = parts.extensions.remove::<RequestSpec>();
     let headers = parts.headers;
     let query = parse_query(parts.uri.query().unwrap_or_default());
 
-    let body = match peeked {
-        Some(PeekedBody(bytes)) => bytes,
-        None => match axum::body::to_bytes(body, crate::hold::HOLD_REQUEST_BODY_LIMIT).await {
-            Ok(bytes) => bytes,
-            Err(_) => return Err(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
-        },
+    let body = match peeked.and_then(InboundBody::take) {
+        Some(body) => body,
+        // 扩展缺席只有一种成因：这条路径**不计费**，hold 层整个被跳过。
+        // 这里同样只读前缀 —— 超阈值不是 413，是「计费看不见」。
+        None => read_inbound(body).await?,
     };
 
-    let spec = spec.unwrap_or_else(|| RequestSpec::parse(surface, Some(&body)));
+    let spec = spec.unwrap_or_else(|| RequestSpec::parse(surface, body.peek()));
     Ok(Inbound {
         model: billing
             .as_ref()
@@ -754,202 +786,6 @@ endpoint!(
     messages,
     Surface::AnthropicMessages
 );
-
-/// `POST /v1/messages/count_tokens` —— Anthropic 的 token 计数，入口 C 的附属端点。
-///
-/// **不计费**（`hold::is_billable` 排除 `/count_tokens`）：Anthropic 自己对它
-/// 收 0，而收敛前网关按那个模型的 LLM 费率收钱。见 [`crate::hold::is_billable`]。
-///
-/// 它也**不进 dispatch 的重试链**：只挑一个账号，不 failover。
-///
-/// # 上游怎么说，客户端就看到什么
-///
-/// 这是一条**恒等转发**：请求体原样送上去，响应原样送回来。网关不再解析
-/// `{"input_tokens": N}` 再重新拼一个 —— 解析一次就多一个会漏、会改口径的地方，
-/// 而这个信封本来就是 Anthropic 方言入口自己的形状。上游给不出数，客户端就看到
-/// 上游给的那个错误，而不是网关编的一个数字。
-pub async fn count_tokens(State(state): State<ProxyState>, req: Request) -> Response {
-    let inbound = match inbound(req, Surface::AnthropicMessages).await {
-        Ok(i) => i,
-        Err(response) => return response,
-    };
-    let selection = select_upstreams(
-        Surface::AnthropicMessages,
-        &inbound.model,
-        state.dispatch.resolver.as_deref(),
-    );
-    for candidate in &selection.candidates {
-        let name = candidate.as_str();
-        let Some(planner) = state.dispatch.planner(name) else {
-            continue;
-        };
-        let auths = state.dispatch.auths_for(name).await;
-        let Some(auth) = state.dispatch.channels.pick(&auths) else {
-            continue;
-        };
-        let request = ProviderRequest {
-            model: inbound.model.clone(),
-            payload: inbound.body.clone(),
-            stream: false,
-            metadata: request_metadata(Surface::AnthropicMessages, None, None),
-            headers: inbound.headers.clone(),
-            query: inbound.query.clone(),
-        };
-        let plan = match planner.plan_count_tokens(auth, &request).await {
-            Ok(plan) => plan,
-            Err(err) => return map_error(err).into_response(),
-        };
-        let (probe, handle) = usage_probe(plan.dialect);
-        return match state.dispatch.send(&plan, &request, probe).await {
-            Ok(response) => relay_response(
-                &state,
-                Relayed {
-                    response,
-                    handle,
-                    billing: None,
-                    auth_id: auth.id.clone(),
-                    provider: name,
-                    model: inbound.model.clone(),
-                    started: Instant::now(),
-                },
-            ),
-            Err(err) => transport_error(err).into_response(),
-        };
-    }
-    DispatchError::NoUpstream(inbound.model).into_response()
-}
-
-/// `GET /v1/models` —— OpenAI 形状的模型目录。
-///
-/// **必须保留**，理由不是「前端在调」（前端对 `/v1` 的 HTTP 调用数是 0），
-/// 而是面板 `QuickIntegrationPanel.tsx:79` 把 `${origin}/v1` 作为 Base URL
-/// 印给用户 —— 所有 OpenAI 兼容客户端（Cursor / Cline / aider / OpenWebUI /
-/// LobeChat）拿到 base 之后的第一个请求就是 `GET {base}/models`，
-/// 用它渲染模型下拉框。删了它，照面板指引配置的客户端在连接测试阶段就失败。
-///
-/// **不计费**：纯 DB 读，不出网。收敛前它按 fallback estimate 收租户约 $0.004
-/// —— 见 [`crate::hold::is_billable`]。
-pub async fn models(State(state): State<ProxyState>) -> Response {
-    let Some(catalog) = &state.dispatch.catalog else {
-        return axum::Json(serde_json::json!({ "object": "list", "data": [] })).into_response();
-    };
-    match catalog.list_models().await {
-        Ok(models) => axum::Json(serde_json::json!({
-            "object": "list",
-            "data": models.iter().map(model_json).collect::<Vec<_>>(),
-        }))
-        .into_response(),
-        Err(err) => {
-            tracing::warn!(%err, "model catalog lookup failed");
-            DispatchError::Internal(err).into_response()
-        }
-    }
-}
-
-/// `GET /v1/usage` —— 用现有 Bearer 查钱包余额和当地今日按模型的 token 消耗。
-///
-/// **不计费**：`is_billable` 排除全部 GET，不会 Hold/Settle。
-/// 响应是裸 JSON（与 `GET /v1/models` 一样），不是面板 `{code,data}` 信封。
-/// 账本 / 用量读失败走内部错误，不 402 —— 这条路径不进预扣，402 会误导客户端以为被拒付。
-pub async fn usage(State(state): State<ProxyState>, req: Request) -> Response {
-    let Some(meta) = req
-        .extensions()
-        .get::<RelayCtx>()
-        .map(|ctx| ctx.access.clone())
-    else {
-        return HoldRejection::MissingAccessContext.into_response();
-    };
-
-    let (balance, models) = tokio::join!(
-        state.hold.ledger().available_balance(meta.user_id),
-        state
-            .hold
-            .usage_store()
-            .model_usage_since(meta.user_id, local_today_start()),
-    );
-    let (balance_usd, models) = match (balance, models) {
-        (Ok(balance), Ok(models)) => (balance, models),
-        (Err(err), _) => {
-            tracing::warn!(%err, user_id = meta.user_id, "usage ledger lookup failed");
-            return DispatchError::Internal(err.into()).into_response();
-        }
-        (_, Err(err)) => {
-            tracing::warn!(%err, user_id = meta.user_id, "usage model lookup failed");
-            return DispatchError::Internal(err).into_response();
-        }
-    };
-
-    axum::Json(serde_json::json!({
-        "object": "usage",
-        "balance_usd": balance_usd,
-        "models": models.iter().map(|row| serde_json::json!({
-            "model": row.model,
-            "requests": row.requests,
-            "tokens_in": row.tokens_in,
-            "tokens_out": row.tokens_out,
-            "tokens": row.tokens(),
-        })).collect::<Vec<_>>(),
-    }))
-    .into_response()
-}
-
-/// 当地今日零点，与面板 `/user/usage/stats` 的 `today` 窗口同一口径。
-fn local_today_start() -> chrono::DateTime<chrono::Utc> {
-    use chrono::{Local, TimeZone as _};
-    let day = Local::now().date_naive();
-    match Local.from_local_datetime(&day.and_hms_opt(0, 0, 0).unwrap_or_default()) {
-        chrono::LocalResult::Single(at) => at.to_utc(),
-        chrono::LocalResult::Ambiguous(earliest, _) => earliest.to_utc(),
-        chrono::LocalResult::None => chrono::Utc::now(),
-    }
-}
-
-/// `GET /v1/models/{model}` — one catalogue entry.
-pub async fn model_detail(State(state): State<ProxyState>, Path(model): Path<String>) -> Response {
-    let Some(catalog) = &state.dispatch.catalog else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    match catalog.get_model(&model).await {
-        Ok(Some(entry)) => axum::Json(model_json(&entry)).into_response(),
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(err) => DispatchError::Internal(err).into_response(),
-    }
-}
-
-/// OpenAI listing object plus the catalog fields Harness needs.
-pub(crate) fn model_json(model: &crate::ports::ModelEntry) -> serde_json::Value {
-    let mut value = serde_json::json!({
-        "id": model.id,
-        "object": "model",
-        "created": model.created,
-        "owned_by": model.owned_by,
-    });
-    if let Some(n) = model.context_length {
-        value["context_length"] = serde_json::json!(n);
-    }
-    if let Some(n) = model.max_output_tokens {
-        value["max_output_tokens"] = serde_json::json!(n);
-    }
-    if !model.input_modalities.is_empty() {
-        value["input_modalities"] = serde_json::json!(model.input_modalities);
-    }
-    if let Some(reasoning) = &model.reasoning
-        && !reasoning.efforts.is_empty()
-    {
-        let mut body = serde_json::json!({
-            "efforts": reasoning
-                .efforts
-                .iter()
-                .map(|e| serde_json::json!({ "id": e.id, "name": e.name }))
-                .collect::<Vec<_>>(),
-        });
-        if let Some(default_effort) = &reasoning.default_effort {
-            body["default_effort"] = serde_json::json!(default_effort);
-        }
-        value["reasoning"] = body;
-    }
-    value
-}
 
 #[cfg(test)]
 mod tests;

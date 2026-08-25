@@ -464,6 +464,54 @@ async fn a_non_streaming_response_hands_the_probe_the_whole_body() {
     assert_eq!(log.finishes.load(Ordering::SeqCst), 1);
 }
 
+/// 非流式响应的**响应头必须先于 body 收完就回到调用方**。
+///
+/// 这是「非流式不再走 `collect_frames`」的守护测试。曾经这里有一条岔路：
+/// 非流式先把整份 body 收齐再返回 [`RelayResponse`]，因为 usage 在 JSON 末尾、
+/// probe 要整份文档。那是把**计费的需要塞进了回写路径**，代价不只是一次拷贝
+/// —— 上游读与客户端写从并行变成了串行。
+///
+/// 把那条岔路加回去，这里就会挂在一个「吐完第一帧之后永不再产帧」的上游上，
+/// 被外层的 `timeout` 判失败，而不是通过。
+#[tokio::test]
+async fn a_unary_response_head_arrives_before_its_body_finishes() {
+    // 1 MiB 一帧，然后永远 Pending：body 显然**没有**结束。
+    let first = Bytes::from(vec![0x5a; 1 << 20]);
+    let (source, _) = Hanging::new(Some(first.clone()));
+    let timeouts = RelayTimeouts {
+        connect: Duration::from_millis(50),
+        request: Duration::from_millis(50),
+        stream_idle: Duration::from_millis(50),
+    };
+
+    let (response, _) = tokio::time::timeout(
+        Duration::from_secs(5),
+        relay_once(
+            // content-type 不是 event-stream —— 这就是「一元」那一支。
+            head(200, &[("content-type", "application/json")], source.boxed()),
+            "/v1/chat/completions",
+            "https://api.example.test",
+            timeouts,
+            None,
+        ),
+    )
+    .await
+    .expect("响应头不该等 body 收完");
+
+    assert_eq!(response.status, StatusCode::OK);
+    let RelayResponseBody::Stream(body) = response.body else {
+        panic!("一元响应也必须是帧流，不许回到整份缓冲");
+    };
+
+    // 头已经拿到了，body 现在才抽：第一帧是上游那 1 MiB，之后是空闲看门狗。
+    let got = drain(body).await;
+    assert_eq!(payloads(&got), vec![first]);
+    assert!(
+        matches!(got.last(), Some(Err(RelayError::Idle(_)))),
+        "一元路径的超时口径是整请求剩余预算，卡住必须以 Err 收场",
+    );
+}
+
 /// 出站 header 走的是同一套策略：入站凭证被剥掉，上游凭证被装上。
 #[tokio::test]
 async fn the_outbound_request_carries_the_upstream_credential_only() {

@@ -34,6 +34,7 @@
 //! | module | role |
 //! | --- | --- |
 //! | [`kernel`] | request state machine + single [`RelayCtx`] |
+//! | [`body`] | 入站 body 的三道闸：计费 peek / 整体改写 / 传输 |
 //! | [`access`] | tenant authentication |
 //! | [`hold`] | pre-flight reservation + quota gate |
 //! | [`usage`] | usage parsing + settlement |
@@ -65,6 +66,7 @@
 
 pub mod access;
 pub mod adapters;
+pub mod body;
 pub mod budget_token;
 pub mod channel;
 pub mod error;

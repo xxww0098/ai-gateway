@@ -2,6 +2,8 @@
 //! cross-account failover, the streaming relay, and the middleware order the
 //! whole billing pipeline depends on.
 
+use axum::body::Bytes;
+
 use super::*;
 use crate::ports::{BillingLedger, UsageLogEntry, UsageStore, fold_model_usage};
 use crate::testsupport::TEST_USER_ID;
@@ -100,6 +102,41 @@ fn a_body_that_is_not_a_json_object_is_left_exactly_as_it_arrived() {
     // 改不了就不改：绝不把一个转发不出去的 body 变成另一个转发不出去的 body。
     let raw = Bytes::from_static(b"not json at all");
     assert_eq!(rewrite_model(&raw, "whatever"), raw);
+}
+
+// ------------------------------------------------------- 超 peek 上限的直通体
+
+/// 缺陷 #2 的另一半：**上游收到的是完整的原始 body，而且是边收边转的**。
+///
+/// 计费看不见它（模型名为空、预扣走保守估算），转发却不降级 ——
+/// 超阈值的请求在网关里**不会被再完整缓冲一遍**，字节一个不少地流到上游。
+/// 收敛前这条请求在 hold 层就是 413，永远走不到这里。
+#[tokio::test]
+async fn an_oversized_direct_body_reaches_the_upstream_whole_and_streamed() {
+    let harness = Harness::build();
+    // 4 MiB 提示词按 fixture 费率是几百美元；余额抬高，让断言只关于转发。
+    *harness.ledger.balance.lock() = 1_000_000.0;
+
+    // 可辨认载荷：全 `x` 会让「前缀与剩余部分拼错顺序」看不出来。
+    let payload = Bytes::from(
+        (0..crate::body::BILLING_PEEK_LIMIT + 1)
+            .map(|i| (i % 251) as u8)
+            .collect::<Vec<u8>>(),
+    );
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {TEST_API_KEY}"))
+        .body(axum::body::Body::from(payload.clone()))
+        .expect("request builds");
+
+    let (status, _) = send_settled(&harness, request).await;
+    assert_eq!(status, StatusCode::OK, "超 peek 上限不再是 413");
+
+    let (body, streamed) = harness.transport.only_body();
+    assert_eq!(body, payload, "上游必须收到完整的原始字节");
+    assert!(streamed, "超阈值的 body 不许在网关里被重新缓冲一遍");
 }
 
 // ---------------------------------------------------------------- 15 格矩阵

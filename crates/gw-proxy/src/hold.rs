@@ -6,7 +6,7 @@
 //!
 //! 1. skip non-billable paths
 //! 2. read the [`AccessMetadata`] the access layer published (401 if absent)
-//! 3. peek the body for `model` / `stream` / `max_tokens` / input size
+//! 3. peek **a prefix of** the body for `model` / `stream` / `max_tokens` / input size
 //! 4. rate limiter (fail-open on infrastructure error)
 //! 5. idempotency check — replay a completed duplicate, reject an in-flight one
 //! 6. circuit breaker (503 when the provider is broken)
@@ -27,14 +27,16 @@ use std::time::Duration;
 
 use axum::body::{Body, Bytes, HttpBody as _};
 use axum::extract::{Request, State};
-use axum::http::{Method, StatusCode, header};
+use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use gw_ledger::{BillingOperationId, ClientTraceId, IdempotencyScope, NewOperation};
+use gw_relay::RelayBody;
 use gw_relay::endpoint::spec::{RequestSpec, SurfaceError, validate};
 
 use crate::ProxyState;
+use crate::body::{BILLING_PEEK_LIMIT, InboundBody, read_inbound};
 use crate::error::HoldRejection;
 use crate::idempotency::{CachedResponse, IdempotencyManager};
 use crate::kernel::{self, Phase, RelayCtx};
@@ -54,9 +56,6 @@ pub use preflight::{
     next_daily_reset_after, next_monthly_reset_after, next_weekly_reset_after,
     preflight_upper_bound, rotate_counters,
 };
-
-/// Caps how many bytes of the request body are read during pre-flight.
-pub const HOLD_REQUEST_BODY_LIMIT: usize = 1 << 20;
 
 /// Caps how many response bytes are buffered for idempotent replay.
 pub const IDEMPOTENCY_BODY_CAPTURE_LIMIT: usize = 10 << 20;
@@ -108,11 +107,6 @@ impl BillingPeek {
         }
     }
 }
-
-/// The peeked request body, republished as an extension so the dispatcher does
-/// not read the stream twice.
-#[derive(Debug, Clone)]
-pub struct PeekedBody(pub Bytes);
 
 /// Pre-flight balance reservation and quota gate.
 ///
@@ -264,13 +258,17 @@ impl HoldMiddleware {
             }
         };
 
-        // --- body peek (body is restored so the handler sees it unchanged) ---
-        let (spec, body_bytes) = match peek_request_body(&mut req, surface).await {
+        // --- body peek：只读**前缀**，超阈值的部分边收边转 ---
+        //
+        // 这里不再把整份 body 收进内存。超 [`crate::body::BILLING_PEEK_LIMIT`]
+        // 只意味着计费看不见它（`spec.body_visible == false`），
+        // **请求照样转发、hold 照样建**。计费降级，转发不降级。
+        let (spec, body) = match peek_request_body(&mut req, surface).await {
             Ok(v) => v,
             Err(resp) => return resp,
         };
-        let peek = BillingPeek::from_spec(&spec, body_bytes.len());
-        req.extensions_mut().insert(PeekedBody(body_bytes));
+        let peek = BillingPeek::from_spec(&spec, peeked_len(&body, req.headers()));
+        req.extensions_mut().insert(InboundBody::new(body));
         // 唯一一次解析的结果原样交给 handler，`routes::inbound` 直接复用。
         req.extensions_mut().insert(spec);
         kernel::advance_ext(&mut req, Phase::Inspected);
@@ -661,38 +659,55 @@ pub async fn layer(State(state): State<ProxyState>, req: Request, next: Next) ->
 
 // ---------------------------------------------------------------- plumbing
 
-/// 把入站 body 收成一块 [`Bytes`] 供 peek 与转发共用。
+/// 读入站 body 的**前缀**，交出唯一一次解析的结果与那份 body 本身。
 ///
-/// 超 [`HOLD_REQUEST_BODY_LIMIT`] 回 413。**不再写回 `Request`**：
-/// handler 走 [`PeekedBody`]，再 `Body::from(bytes.clone())` 只是多挂一个
-/// `Full`，火焰图上 `peek_request_body` 的一部分就是这个。
+/// 阈值内是一块 [`Bytes`]（peek 与转发共用同一块内存），超阈值是一条流
+/// （前缀接回流头，剩下的边收边转）。**不再写回 `Request`**：
+/// handler 走 [`InboundBody`]，再往请求上挂一个 `Full` 是白搭一次分配。
+///
+/// # 这里不再有 413
+///
+/// 收敛前它是 `to_bytes(body, 1 MiB)`，超限即 413 —— 一个**计费实现细节**
+/// 泄漏成了转发能力限制。现在超限只是 [`RequestSpec::body_visible`] 为 `false`。
 async fn peek_request_body(
     req: &mut Request,
     surface: gw_relay::Surface,
-) -> Result<(RequestSpec, Bytes), Response> {
+) -> Result<(RequestSpec, RelayBody), Response> {
     let body = std::mem::replace(req.body_mut(), Body::empty());
-    let bytes = match axum::body::to_bytes(body, HOLD_REQUEST_BODY_LIMIT).await {
-        Ok(b) => b,
-        Err(_) => {
-            return Err((
-                StatusCode::PAYLOAD_TOO_LARGE,
-                axum::Json(serde_json::json!({
-                    "error": "Payload Too Large",
-                    "message": "request body exceeds the billing pre-flight limit",
-                })),
-            )
-                .into_response());
-        }
-    };
+    let body = read_inbound(body).await?;
 
     // **全链路唯一一次** JSON 解析（根除缺陷 #15）。结果作为扩展下发，
     // `routes::inbound` 直接复用，不再解第二遍。
-    let spec = RequestSpec::parse(surface, Some(&bytes));
+    // `peek()` 为 `None`（看不见 body）时 spec 全是缺省值且 `body_visible=false`
+    // —— 计费必须显式面对这一支，见 [`peeked_len`]。
+    let spec = RequestSpec::parse(surface, body.peek());
     // 规则 S3：`Accept` 与 body 的 `stream` 冲突时**以 body 为准**，只告警不改行为
     // （告警由被调用方自己打，返回值这里不需要）。
     let _conflicted =
         gw_relay::endpoint::accept_conflicts_with_body(&spec, req.headers(), req.uri().path());
-    Ok((spec, bytes))
+    Ok((spec, body))
+}
+
+/// 计费按多少字节估算输入 token。
+///
+/// 看得见就用真实长度。**看不见时取一个下界当估计**：body 一定超过了
+/// [`BILLING_PEEK_LIMIT`]（否则它就被缓冲了），客户端给了 `Content-Length`
+/// 就用更大的那个。往大了估是预扣唯一安全的方向 —— 预留得比认可的责任少，
+/// 正是大请求结算成欠款的来路（AGENTS.md「计费身份」）。
+fn peeked_len(body: &RelayBody, headers: &HeaderMap) -> usize {
+    match body.peek() {
+        Some(bytes) => bytes.len(),
+        None => content_length(headers).unwrap_or(0).max(BILLING_PEEK_LIMIT),
+    }
+}
+
+fn content_length(headers: &HeaderMap) -> Option<usize> {
+    headers
+        .get(header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()
 }
 
 /// Buffers a response body for idempotent replay when it is small enough and

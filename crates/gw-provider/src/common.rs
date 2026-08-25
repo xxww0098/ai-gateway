@@ -98,11 +98,49 @@ pub fn relay_timeouts(request: Duration) -> gw_relay::RelayTimeouts {
 ///
 /// Deliberately local rather than a `gw_config` re-export: the executors need
 /// exactly these three fields.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// `Debug` 是手写的：`api_key` 是活密钥，见 [`Redacted`]。
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct ProviderConfig {
     pub base_url: String,
     pub api_key: String,
     pub enabled: bool,
+}
+
+impl std::fmt::Debug for ProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderConfig")
+            .field("base_url", &self.base_url)
+            .field("api_key", &Redacted(&self.api_key))
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
+/// 密文在 `Debug` 里的替身：打一个**稳定**掩码，绝不打原文。
+///
+/// 只在 `fmt` 里出现，不进任何字段类型 —— 换掉字段类型会波及构造、序列化与
+/// 上游请求的拼装，而这里要解决的只是「一个 `{:?}` 就把上游 key 写进日志」。
+/// 本 crate 的密钥来自面板存的凭证，能不能被看到不由本进程说了算：
+/// tracing 的 sink、panic 的 stderr、被谁收走、留多久，全在外面。
+///
+/// 掩码只报长度：留 head/tail 已经足够把一把 key 和它的持有者对上号，
+/// 而稳定的哈希指纹同样能把两条日志串起来，还更像是安全的。
+/// `<empty>` 与 `<redacted:N bytes>` 的区别要留着 —— 「压根没配凭证」与
+/// 「配了但这里不给看」的排查方向相反。
+///
+/// 与 `gw_relay::Credential` 的脱敏是同一条规矩的两处落点（那边收的是**出站**
+/// 凭证，这边收的是 executor 手里的**长期**凭证）；`gw-panel` 的 `mask_secret`
+/// 是第三件事 —— 它是给管理员认自己那把 key 的 UI 预览，本 crate 不引它。
+pub(crate) struct Redacted<'a>(pub(crate) &'a str);
+
+impl std::fmt::Debug for Redacted<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.is_empty() {
+            return f.write_str("<empty>");
+        }
+        write!(f, "<redacted:{} bytes>", self.0.len())
+    }
 }
 
 /// Connection-pool settings shared by every executor client.

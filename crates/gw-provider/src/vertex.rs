@@ -29,7 +29,7 @@ use crate::claude::shared::{
     self, append_query, default_content_negotiation, path_escape, trim_base_url,
 };
 use crate::common::{
-    PROVIDER_VERTEX, ProviderConfig, nested_string, relay_timeouts, requested_model,
+    PROVIDER_VERTEX, ProviderConfig, Redacted, nested_string, relay_timeouts, requested_model,
     resolve_timeout, string_from_map,
 };
 use crate::route::{RoutePlan, RoutePlanner};
@@ -64,7 +64,6 @@ const VERTEX_TOKEN_FALLBACK_EXPIRATION: chrono::TimeDelta = chrono::TimeDelta::h
 const VERTEX_ASSERTION_LIFETIME_SECS: i64 = 3600;
 
 /// Vertex AI executor.
-#[derive(Debug)]
 pub struct VertexProvider {
     base_url: String,
     service_account_json: String,
@@ -77,14 +76,37 @@ pub struct VertexProvider {
     token_cache: Mutex<HashMap<String, CachedToken>>,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for VertexProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VertexProvider")
+            .field("base_url", &self.base_url)
+            .field(
+                "service_account_json",
+                &Redacted(&self.service_account_json),
+            )
+            .field("timeout", &self.timeout)
+            .field("token_cache", &self.token_cache)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 struct CachedToken {
     token: String,
     expires_at: DateTime<Utc>,
 }
 
+impl std::fmt::Debug for CachedToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedToken")
+            .field("token", &Redacted(&self.token))
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
 /// The fields of a Google service-account key this executor needs.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 struct VertexServiceAccount {
     #[serde(default)]
     client_email: String,
@@ -96,12 +118,32 @@ struct VertexServiceAccount {
     project_id: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+impl std::fmt::Debug for VertexServiceAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VertexServiceAccount")
+            .field("client_email", &self.client_email)
+            .field("private_key", &Redacted(&self.private_key))
+            .field("token_uri", &self.token_uri)
+            .field("project_id", &self.project_id)
+            .finish()
+    }
+}
+
+#[derive(Default, Deserialize)]
 struct VertexTokenResponse {
     #[serde(default)]
     access_token: String,
     #[serde(default)]
     expires_in: i64,
+}
+
+impl std::fmt::Debug for VertexTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VertexTokenResponse")
+            .field("access_token", &Redacted(&self.access_token))
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 /// Claims of the JWT assertion exchanged for an access token.

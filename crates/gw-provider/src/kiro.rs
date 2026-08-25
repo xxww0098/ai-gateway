@@ -7,7 +7,8 @@
 //! payload is forwarded as-is with a Bearer token.
 
 use crate::common::{
-    PROVIDER_KIRO, ProviderConfig, nested_string, relay_timeouts, resolve_timeout, string_from_map,
+    PROVIDER_KIRO, ProviderConfig, Redacted, nested_string, relay_timeouts, resolve_timeout,
+    string_from_map,
 };
 use crate::route::{RoutePlan, RoutePlanner};
 use crate::types::{ProviderError, ProviderRequest};
@@ -36,7 +37,7 @@ const META_EXPIRES_AT: &str = "expires_at";
 const META_EXPIRED: &str = "expired";
 const META_LAST_REFRESH: &str = "last_refresh";
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 struct KiroRefreshResponse {
     #[serde(default, alias = "accessToken")]
     access_token: String,
@@ -48,12 +49,33 @@ struct KiroRefreshResponse {
     expires_in: i64,
 }
 
+impl std::fmt::Debug for KiroRefreshResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KiroRefreshResponse")
+            .field("access_token", &Redacted(&self.access_token))
+            .field("refresh_token", &Redacted(&self.refresh_token))
+            .field("id_token", &Redacted(&self.id_token))
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
+}
+
 /// Executor for Kiro / AWS Builder ID credentials.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct KiroProvider {
     base_url: String,
     access_token: String,
     timeout: Duration,
+}
+
+impl std::fmt::Debug for KiroProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KiroProvider")
+            .field("base_url", &self.base_url)
+            .field("access_token", &Redacted(&self.access_token))
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 impl KiroProvider {

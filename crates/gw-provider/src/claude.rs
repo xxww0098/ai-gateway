@@ -15,7 +15,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::common::{
-    PROVIDER_CLAUDE, ProviderConfig, nested_string, relay_timeouts, resolve_timeout,
+    PROVIDER_CLAUDE, ProviderConfig, Redacted, nested_string, relay_timeouts, resolve_timeout,
     string_from_map,
 };
 use crate::route::{RoutePlan, RoutePlanner};
@@ -45,23 +45,42 @@ const META_EMAIL: &str = "email";
 /// One pooled client suffices because `reqwest` scopes the timeout per request;
 /// a whole-request timeout would also bound *reading the body* and truncate a
 /// healthy long stream, so streaming simply attaches none.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClaudeProvider {
     base_url: String,
     api_key: String,
     timeout: Duration,
 }
 
+impl std::fmt::Debug for ClaudeProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaudeProvider")
+            .field("base_url", &self.base_url)
+            .field("api_key", &Redacted(&self.api_key))
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
 /// A resolved upstream credential plus which shape it came from.
 ///
 /// `source` is what makes the precedence ladder in
 /// [`ClaudeProvider::resolve_credentials`] observable without a socket.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ClaudeCredential {
     /// The secret sent as `x-api-key`.
     pub value: String,
     /// Which rung of the ladder produced [`ClaudeCredential::value`].
     pub source: CredentialSource,
+}
+
+impl std::fmt::Debug for ClaudeCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaudeCredential")
+            .field("value", &Redacted(&self.value))
+            .field("source", &self.source)
+            .finish()
+    }
 }
 
 /// Which credential shape [`ClaudeProvider::resolve_credentials`] selected.
@@ -85,7 +104,7 @@ impl CredentialSource {
 }
 
 /// Body of `POST /v1/oauth/token`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 struct ClaudeRefreshResponse {
     #[serde(default)]
     access_token: String,
@@ -95,6 +114,17 @@ struct ClaudeRefreshResponse {
     expires_in: i64,
     #[serde(default)]
     account: ClaudeRefreshAccount,
+}
+
+impl std::fmt::Debug for ClaudeRefreshResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaudeRefreshResponse")
+            .field("access_token", &Redacted(&self.access_token))
+            .field("refresh_token", &Redacted(&self.refresh_token))
+            .field("expires_in", &self.expires_in)
+            .field("account", &self.account)
+            .finish()
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]

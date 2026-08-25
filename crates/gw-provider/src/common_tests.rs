@@ -422,3 +422,121 @@ fn a_base_url_without_a_host_is_rejected() {
         );
     }
 }
+
+// --- 密钥不许被 Debug 带出去 -------------------------------------------------
+
+/// [`Redacted`] 的守护测试：**每一个** executor 的 `Debug` 都不许打出配置里的活密钥。
+///
+/// 密文是这条测试自己造的（生产源码里不存在这个串），所以断言的期望值来自输入
+/// 而不是源码字面量（规范 2.11）。
+///
+/// 守护的 bug：给这些结构体加回 `#[derive(Debug)]`。那时一句
+/// `tracing::debug!(?provider)`、一个带上下文的 `expect`，写进日志的就是一把
+/// 能直接拿去用的上游 key —— 而日志落到哪、留多久、被谁看到，都不由本进程决定。
+///
+/// 逐个列出来而不是只测一个：这七个 executor 是同一条规矩的七处落点，
+/// 新加第八个上游时漏掉脱敏，这条会红。
+#[test]
+fn no_executor_debug_carries_its_api_key() {
+    const LIVE: &str = "sk-live-UNIQUE-KNIFE3-provider-4b81de";
+
+    let cfg = ProviderConfig {
+        base_url: "https://upstream.test/v1".to_owned(),
+        api_key: LIVE.to_owned(),
+        enabled: true,
+    };
+
+    let dumps: Vec<(&str, String)> = vec![
+        ("ProviderConfig", format!("{cfg:?}")),
+        (
+            "ClaudeProvider",
+            format!(
+                "{:?}",
+                crate::claude::ClaudeProvider::new(&cfg, 0).expect("claude")
+            ),
+        ),
+        (
+            "OpenAiCompatibleProvider",
+            format!(
+                "{:?}",
+                crate::openai::OpenAiCompatibleProvider::new(&cfg, 0).expect("openai")
+            ),
+        ),
+        (
+            "GeminiProvider",
+            format!(
+                "{:?}",
+                crate::gemini::GeminiProvider::new(&cfg, 0).expect("gemini")
+            ),
+        ),
+        (
+            "KiroProvider",
+            format!(
+                "{:?}",
+                crate::kiro::KiroProvider::new(&cfg, 0).expect("kiro")
+            ),
+        ),
+        (
+            "CodexProvider",
+            format!(
+                "{:?}",
+                crate::codex::CodexProvider::new(&cfg, 0).expect("codex")
+            ),
+        ),
+        (
+            "XaiProvider",
+            format!("{:?}", crate::xai::XaiProvider::new(&cfg, 0).expect("xai")),
+        ),
+        (
+            "VertexProvider",
+            format!(
+                "{:?}",
+                crate::vertex::VertexProvider::new(&cfg, 0).expect("vertex")
+            ),
+        ),
+    ];
+
+    for (name, dump) in &dumps {
+        assert!(
+            !dump.contains(LIVE),
+            "{name} 的 Debug 把活密钥打了出来：{dump}"
+        );
+        assert!(
+            dump.contains(name),
+            "脱敏不许把类型名一起吃掉，否则日志读不出这是谁：{dump}"
+        );
+    }
+
+    // 掩码必须稳定：同一份配置两次 dump 一模一样，否则日志里同一把 key
+    // 会变成两把，关联与去重全部失效。
+    assert_eq!(format!("{cfg:?}"), dumps[0].1, "掩码不稳定");
+}
+
+/// [`crate::RoutePlan`] 是凭证在本 crate 里唯一的出口值，它的 `Debug` 同样不许漏。
+///
+/// 计划里的凭证是 `gw_relay::Credential`，脱敏收在**它**那一层，所以 `RoutePlan`
+/// 照常 `derive(Debug)`。这条测的正是那个「照常」还成不成立 —— 谁要是往
+/// `RoutePlan` 上加了第二个装密文的裸 `String` 字段，这条会红。
+#[test]
+fn a_route_plan_never_dumps_the_credential_it_carries() {
+    const LIVE: &str = "sk-live-UNIQUE-KNIFE3-plan-e5d9a2";
+
+    for credential in [
+        gw_relay::Credential::Bearer(LIVE.to_owned()),
+        gw_relay::Credential::XApiKey(LIVE.to_owned()),
+        gw_relay::Credential::GoogleApiKey(LIVE.to_owned()),
+    ] {
+        let plan = crate::RoutePlan {
+            provider: PROVIDER_OPENAI,
+            endpoint: url::Url::parse("https://upstream.test/v1/chat/completions")
+                .expect("测试用的 endpoint"),
+            credential,
+            headers: http::HeaderMap::new(),
+            body: None,
+            timeouts: relay_timeouts(DEFAULT_TIMEOUT),
+            dialect: gw_relay::UpstreamDialect::OpenAiChat,
+        };
+        let dump = format!("{plan:?}");
+        assert!(!dump.contains(LIVE), "RoutePlan 把活密钥打了出来：{dump}");
+    }
+}

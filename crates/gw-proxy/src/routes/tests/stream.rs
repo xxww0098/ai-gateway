@@ -2,15 +2,55 @@
 
 use super::*;
 
-#[test]
-fn hop_by_hop_headers_are_not_relayed() {
-    assert!(is_hop_by_hop("connection"));
-    assert!(is_hop_by_hop("transfer-encoding"));
-    assert!(
-        is_hop_by_hop("content-length"),
-        "relaying a stale length would truncate the body we actually send",
+/// 逐跳头留在这一跳 —— 包括这条响应自己 `Connection` **点名**的那些。
+///
+/// 从前这里断言的是「那张写死的名单里有 `connection`」，即常量等于常量
+/// （规范 2.11）：名单漏了什么、`Connection` 的值有没有被读，它一概测不出来 ——
+/// 而当时那张名单确实既漏了 `expect`，也从不看 `Connection` 的值。现在断言的是
+/// **客户端到底收到了什么**，`x-foo` 是这条测试自己造的名字，生产源码里没有它。
+#[tokio::test]
+async fn hop_by_hop_headers_are_not_relayed() {
+    let harness = Harness::build();
+    let mut canned = CannedResponse::sse(&["data: one\n\n"]);
+    for (name, value) in [
+        // 这条消息把 x-foo 声明成只在这一跳有效。
+        ("connection", "close, x-foo"),
+        ("x-foo", "hop-scoped"),
+        ("transfer-encoding", "chunked"),
+        // 上游那份长度描述的是上游那份 body，不是我们发出去的这份。
+        ("content-length", "17"),
+        ("x-request-id", "req_hop"),
+    ] {
+        canned
+            .headers
+            .insert(name, value.parse().expect("测试用的 header 值"));
+    }
+    harness.transport.queue(Ok(canned));
+
+    let response = {
+        use tower::ServiceExt;
+        harness
+            .router()
+            .oneshot(signed_request(
+                "/v1/chat/completions",
+                stream_body("gpt-4o"),
+            ))
+            .await
+            .expect("router responds")
+    };
+
+    assert_eq!(response.status(), StatusCode::OK);
+    for name in ["connection", "x-foo", "transfer-encoding", "content-length"] {
+        assert!(
+            response.headers().get(name).is_none(),
+            "{name} 属于这一跳，不该到达客户端",
+        );
+    }
+    assert_eq!(
+        response.headers().get("x-request-id").map(|v| v.as_bytes()),
+        Some(&b"req_hop"[..]),
+        "普通 header 一个都不许丢",
     );
-    assert!(!is_hop_by_hop("content-type"));
 }
 
 // ---------------------------------------------------------------- streaming

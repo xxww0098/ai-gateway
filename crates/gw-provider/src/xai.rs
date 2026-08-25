@@ -8,9 +8,9 @@
 //! This executor still exists so a stored `xai` row can be refreshed.
 
 use crate::common::{
-    PROVIDER_XAI, ProviderConfig, chat_completions_endpoint, ensure_include_usage, nested_string,
-    relay_timeouts, request_surface, resolve_timeout, responses_endpoint, string_from_map,
-    upstream_dialect,
+    PROVIDER_XAI, ProviderConfig, Redacted, chat_completions_endpoint, ensure_include_usage,
+    nested_string, relay_timeouts, request_surface, resolve_timeout, responses_endpoint,
+    string_from_map, upstream_dialect,
 };
 use crate::route::{RoutePlan, RoutePlanner};
 use crate::types::{ProviderError, ProviderRequest};
@@ -40,7 +40,7 @@ const META_EXPIRED: &str = "expired";
 const META_LAST_REFRESH: &str = "last_refresh";
 const META_ID_TOKEN: &str = "id_token";
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 struct XaiRefreshResponse {
     #[serde(default)]
     access_token: String,
@@ -52,12 +52,33 @@ struct XaiRefreshResponse {
     expires_in: i64,
 }
 
+impl std::fmt::Debug for XaiRefreshResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("XaiRefreshResponse")
+            .field("access_token", &Redacted(&self.access_token))
+            .field("refresh_token", &Redacted(&self.refresh_token))
+            .field("id_token", &Redacted(&self.id_token))
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
+}
+
 /// Executor for xAI Grok OAuth credentials.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct XaiProvider {
     base_url: String,
     access_token: String,
     timeout: Duration,
+}
+
+impl std::fmt::Debug for XaiProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("XaiProvider")
+            .field("base_url", &self.base_url)
+            .field("access_token", &Redacted(&self.access_token))
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 impl XaiProvider {

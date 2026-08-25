@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useState } from 'react'
-import { Bell, Menu, ShieldCheck, User, Wallet } from 'lucide-react'
+import { Bell, Menu, Wallet } from 'lucide-react'
 import { cn } from '@/shared/utils/utils'
 import { useNavigate } from 'react-router-dom'
 import { useAppStore } from '@/shared/store/app_store'
@@ -17,6 +17,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuItem,
 } from '@/shared/components/ui/dropdown-menu'
+import { AccountMenu } from './AccountMenu'
 
 type NotificationItem = {
   id: number
@@ -55,8 +56,6 @@ export const Header = memo(function Header() {
   const { data: profile } = useProfile()
   const displayBalance =
     profile?.available_balance ?? (typeof user?.balance === 'number' ? user.balance : undefined)
-
-  const isAdmin = user?.role === 'admin'
 
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -305,64 +304,7 @@ export const Header = memo(function Header() {
               </button>
             )}
 
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button
-                  type="button"
-                  title={user.email}
-                  aria-label={isAdmin ? '管理员账户' : '用户账户'}
-                  className={cn(
-                    'h-11 w-11 rounded-full flex items-center justify-center shadow-sm transition-colors',
-                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2',
-                    isAdmin
-                      ? 'bg-emerald-100 dark:bg-emerald-900/30 border border-emerald-200 dark:border-emerald-800 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-200/80 dark:hover:bg-emerald-900/50 focus-visible:ring-emerald-500'
-                      : 'bg-primary-100 dark:bg-primary-900/30 border border-primary-200 dark:border-primary-800 text-primary-600 dark:text-primary-400 hover:bg-primary-200/80 dark:hover:bg-primary-900/50 focus-visible:ring-primary-500'
-                  )}
-                >
-                  {isAdmin ? (
-                    <ShieldCheck className="w-4 h-4" aria-hidden />
-                  ) : (
-                    <User className="w-4 h-4" aria-hidden />
-                  )}
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-56">
-                <DropdownMenuLabel className="font-normal space-y-1">
-                  <div className="flex items-center gap-2">
-                    {isAdmin ? (
-                      <ShieldCheck className="h-4 w-4 text-emerald-600 dark:text-emerald-400 shrink-0" aria-hidden />
-                    ) : (
-                      <User className="h-4 w-4 text-primary-600 dark:text-primary-400 shrink-0" aria-hidden />
-                    )}
-                    <p className="text-xs font-semibold text-muted-foreground">
-                      {isAdmin ? '管理员' : '用户'}
-                    </p>
-                  </div>
-                  <p className="text-sm font-medium text-foreground break-all">
-                    {user.email}
-                  </p>
-                </DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  className="cursor-pointer"
-                  onSelect={() => navigate(userRoutes.finance)}
-                >
-                  财务中心
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  className="cursor-pointer"
-                  onSelect={() => navigate(userRoutes.tickets)}
-                >
-                  我的工单
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  className="cursor-pointer"
-                  onSelect={() => navigate(userRoutes.keys)}
-                >
-                  API 密钥
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <AccountMenu />
           </div>
         )}
       </div>

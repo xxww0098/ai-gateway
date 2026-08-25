@@ -10,7 +10,6 @@ fn billing() -> Arc<RequestBilling> {
     Arc::new(RequestBilling::new(
         SettleCtx {
             user_id: 1,
-            rate_mult: 1.0,
             ..SettleCtx::default()
         },
         false,

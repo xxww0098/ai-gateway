@@ -1,6 +1,7 @@
 //! In-memory snapshot of the `model_prices` table.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -48,6 +49,8 @@ const SELECT_PRICES: &str = "SELECT id, \
 #[derive(Debug)]
 pub struct ModelPriceCache {
     items: ArcSwap<HashMap<String, Arc<ModelPrice>>>,
+    /// 已发布过多少份快照。见 [`generation`](Self::generation)。
+    generation: AtomicU64,
 }
 
 impl Default for ModelPriceCache {
@@ -65,6 +68,7 @@ impl ModelPriceCache {
     pub fn empty() -> Self {
         Self {
             items: ArcSwap::from_pointee(HashMap::new()),
+            generation: AtomicU64::new(0),
         }
     }
 
@@ -138,6 +142,19 @@ impl ModelPriceCache {
         self.items.load().values().cloned().collect()
     }
 
+    /// 当前快照的**代次**：这个缓存发布过多少份快照。
+    ///
+    /// 每次 [`store_rows`](Self::store_rows) / [`invalidate`](Self::invalidate)
+    /// 加一。空缓存是 0。
+    ///
+    /// 这是 [`PricingQuote::version`](crate::PricingQuote::version) 的来源:
+    /// 一笔已结算的账因此能回答「它冻的是第几版价目表」，而管理员改价改的是
+    /// 下一版 —— 在途请求看不到。
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
     /// Number of distinct model ids in the current snapshot.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -206,6 +223,8 @@ impl ModelPriceCache {
             next.insert(key, Arc::new(row));
         }
         self.items.store(Arc::new(next));
+        // 代次在快照发布**之后**加一，于是任何读到新代次的人一定也能读到新快照。
+        self.generation.fetch_add(1, Ordering::Release);
     }
 }
 

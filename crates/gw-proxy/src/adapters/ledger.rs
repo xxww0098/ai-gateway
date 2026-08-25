@@ -139,6 +139,20 @@ impl BillingLedger for SharedLedger {
             .map_err(map_error)
     }
 
+    async fn renew_lease(
+        &self,
+        user_id: Id,
+        operation: &BillingOperationId,
+    ) -> Result<f64, BillingError> {
+        // 只把返回值收窄成「金额」。`LeaseRenewal::held_for` 是账本自己的
+        // 诊断量，端口不需要它 —— 调用方（流式包装）唯一要确认的是**金额没变**。
+        self.0
+            .renew_lease(user_id, operation)
+            .await
+            .map(|renewal| renewal.reserved_amount)
+            .map_err(map_error)
+    }
+
     async fn has_unresolved_shortfall(&self, user_id: Id) -> Result<bool, BillingError> {
         self.0
             .has_unresolved_shortfall(user_id)

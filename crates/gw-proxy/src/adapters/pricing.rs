@@ -1,19 +1,19 @@
 //! [`PricingCalculator`] over `gw_pricing::Calculator`.
 //!
-//! The calculator and token estimator were once two interfaces because old test
-//! stubs only implemented the first; the production `*pricing.Calculator` always
-//! implemented both, and the middleware type-asserted its way to the better
-//! estimate. Here they are one trait, so the assertion — and the silent fallback
-//! to a flat reservation when it failed — is gone.
+//! 一个方法的适配器，因为端口本身只有一个方法：计价在一次请求里只发生一次，
+//! 就是 Hold 处那一次报价。估算与精算都在返回的 [`PricingQuote`] 上做，
+//! 而那个值拿不到价目表缓存 —— 结算侧因此**没有**二次查价的入口。
 
 use std::sync::Arc;
 
-use gw_pricing::{Calculator, TokenUsage as PricingTokens};
+use gw_pricing::{Calculator, PricingQuote};
 
-use crate::ports::{PricingCalculator, TokenUsage};
+use crate::ports::PricingCalculator;
 
 /// The production calculator, sharing one `ModelPriceCache` with the panel's
 /// price editor so an admin upsert invalidates the cache this reads.
+///
+/// 「立即可见」说的是**下一次报价**：已经铸造出去的报价按定义冻住了。
 #[derive(Debug, Clone)]
 pub struct SharedCalculator(Arc<Calculator>);
 
@@ -35,50 +35,8 @@ impl From<Arc<Calculator>> for SharedCalculator {
 }
 
 impl PricingCalculator for SharedCalculator {
-    fn estimate(&self, model: &str, stream: bool, rate_mult: f64) -> f64 {
-        self.0.estimate(model, stream, rate_mult)
-    }
-
-    fn estimate_with_max_tokens(
-        &self,
-        model: &str,
-        max_output_tokens: i64,
-        stream: bool,
-        rate_mult: f64,
-    ) -> f64 {
-        self.0
-            .estimate_with_max_tokens(model, max_output_tokens, stream, rate_mult)
-    }
-
-    fn estimate_with_tokens(
-        &self,
-        model: &str,
-        input_tokens: i64,
-        max_output_tokens: i64,
-        stream: bool,
-        rate_mult: f64,
-    ) -> f64 {
-        self.0
-            .estimate_with_tokens(model, input_tokens, max_output_tokens, stream, rate_mult)
-    }
-
-    fn compute(&self, model: &str, tokens: TokenUsage, rate_mult: f64) -> f64 {
-        // The port wants the single number that gets debited; the itemised
-        // breakdown is for the `usage_logs` cost columns, which stay zero on
-        // this path (input_cost / output_cost are never set).
-        self.0
-            .compute(model, into_pricing(tokens), rate_mult)
-            .total_cost
-    }
-}
-
-/// The two token structs are the same four columns under different names.
-fn into_pricing(tokens: TokenUsage) -> PricingTokens {
-    PricingTokens {
-        input: tokens.input,
-        output: tokens.output,
-        cached: tokens.cached,
-        reasoning: tokens.reasoning,
+    fn quote(&self, model: &str, rate_mult: f64) -> PricingQuote {
+        self.0.quote(model, rate_mult)
     }
 }
 

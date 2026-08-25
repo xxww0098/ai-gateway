@@ -1,16 +1,23 @@
 //! Scaffolding for the database-backed adapter tests.
 //!
 //! Every caller is `#[ignore]`d (rule 2.9: fail loud with instructions, never
-//! silently skip), so a missing `DATABASE_URL` panics with [`PG_HOWTO`] rather
-//! than reporting a pass.
+//! silently skip), so a missing connection string panics with [`PG_HOWTO`]
+//! rather than reporting a pass.
 
 use crate::ports::Id;
+
+/// 连接串的两个变量名，按优先级。
+///
+/// `GW_TEST_DATABASE_URL` 是工作区里跑 `--ignored` 的统一口径
+/// （`gw-authcore` / `gw-infra` / `gw-ledger` / `gw-panel` 都读它）；
+/// `DATABASE_URL` 留作兼容单独跑本 crate 的习惯，也是 `gw-model` 读的那个。
+const PG_ENV: [&str; 2] = ["GW_TEST_DATABASE_URL", "DATABASE_URL"];
 
 /// How to run the database-backed adapter tests. They are `#[ignore]`d rather
 /// than silently skipped (rule 2.9), so a missing variable fails loudly with
 /// this text instead of quietly reporting a pass.
-pub(crate) const PG_HOWTO: &str = "database-backed adapter tests need DATABASE_URL, e.g.\n  \
-     DATABASE_URL=postgres://postgres@127.0.0.1:5432/postgres \
+pub(crate) const PG_HOWTO: &str = "database-backed adapter tests need GW_TEST_DATABASE_URL (or DATABASE_URL), e.g.\n  \
+     GW_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5432/postgres \
      cargo test -p gw-proxy -- --ignored";
 
 /// Creates an empty database named after `tag`, migrates it, and connects.
@@ -26,7 +33,11 @@ pub(crate) async fn fresh_db(tag: &str) -> sqlx::PgPool {
         "the database name is interpolated, so a tag may only be [a-z0-9_]",
     );
 
-    let url = std::env::var("DATABASE_URL").expect(PG_HOWTO);
+    let url = PG_ENV
+        .iter()
+        .find_map(|name| std::env::var(name).ok())
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| panic!("{PG_HOWTO}"));
     let opts = sqlx::postgres::PgConnectOptions::from_str(&url)
         .expect("DATABASE_URL is not a valid Postgres connection string");
     let admin = sqlx::PgPool::connect_with(opts.clone())

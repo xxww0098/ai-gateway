@@ -9,10 +9,11 @@
 use axum::http::{HeaderMap, Method};
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use gw_ledger::ClientTraceId;
+use gw_pricing::PricingQuote;
 
 use super::{BillingPeek, TRACE_HEADER};
 use crate::access::is_proxy_path;
-use crate::ports::{Id, PricingCalculator, SubscriptionQuota};
+use crate::ports::{Id, SubscriptionQuota};
 
 // ---------------------------------------------------------------- pure logic
 
@@ -56,52 +57,47 @@ pub fn is_billable(method: &Method, path: &str) -> bool {
         && !path.ends_with("/count_tokens")
 }
 
-/// Conservative worst case used by the balance gate:
-/// `max(hold, EstimateWithMaxTokens, Estimate(stream = true))`.
+/// 余额闸门用的保守最坏情况：
+/// `max(hold, EstimateWithMaxTokens, Estimate(stream = true))`。
 ///
-/// `EstimateWithMaxTokens` tightens the bound when the client supplied a cap;
-/// the streaming estimate guards the case where the cap is absent or absurd.
-/// The upper-bound computation for the balance gate.
+/// 客户端给了输出上限时 `EstimateWithMaxTokens` 会收紧这个界；流式估算
+/// 兜住「上限缺失或荒唐」的那一支。
+///
+/// 三个估算都取自**同一份冻结报价** —— 它们不许各查各的价目表。
 pub fn preflight_upper_bound(
-    calc: &dyn PricingCalculator,
-    model: &str,
+    quote: &PricingQuote,
     max_tokens: i64,
     stream: bool,
-    rate_mult: f64,
     hold_amount: f64,
 ) -> f64 {
-    let with_max = calc.estimate_with_max_tokens(model, max_tokens, stream, rate_mult);
-    let streaming = calc.estimate(model, true, rate_mult);
+    let with_max = quote.estimate_with_max_tokens(max_tokens, stream);
+    let streaming = quote.estimate(true);
     hold_amount.max(with_max).max(streaming)
 }
 
-/// 从 peek 一次算出预扣额与 floor 上界，避免 middleware 重复调 estimator。
-pub fn compute_reservation(
-    peek: &BillingPeek,
-    rate_mult: f64,
-    calc: &dyn PricingCalculator,
-) -> (f64, f64) {
-    let hold_amount = calc.estimate_with_tokens(
-        &peek.price_key,
-        peek.input_tokens,
-        peek.max_tokens,
-        peek.stream,
-        rate_mult,
-    );
-    let upper_bound = preflight_upper_bound(
-        calc,
-        &peek.price_key,
-        peek.max_tokens,
-        peek.stream,
-        rate_mult,
-        hold_amount,
-    );
+/// 从 peek 与冻结报价一次算出预扣额与 floor 上界。
+pub fn compute_reservation(peek: &BillingPeek, quote: &PricingQuote) -> (f64, f64) {
+    let hold_amount = quote.estimate_with_tokens(peek.input_tokens, peek.max_tokens, peek.stream);
+    let upper_bound = preflight_upper_bound(quote, peek.max_tokens, peek.stream, hold_amount);
     (hold_amount, upper_bound)
 }
 
-/// Returns the rejection reason when `estimated` would push any period over its
-/// limit.
-pub fn evaluate_quota(quota: &SubscriptionQuota, estimated: f64) -> Option<&'static str> {
+/// 当 `reserved + estimated` 会顶穿任何一个周期的限额时，给出拒绝理由。
+///
+/// # `reserved` 是什么：在途的那些请求
+///
+/// 收敛前这个函数只看 `daily_usage_usd` —— 也就是**已经结算过的**用量。
+/// 一千个在途请求对限额而言完全隐形，限额只在它们陆续结算之后才追上来，
+/// 那时超的已经超了。所以在途预留合计必须一起进这个比较：
+/// 预留 = 「这笔钱已经被认领了，只是还没落账」。
+///
+/// 落在限额上正好**允许**（`>` 而不是 `>=`）：额度是可以用完的，
+/// 用完的下一笔才被拒。
+pub fn evaluate_quota(
+    quota: &SubscriptionQuota,
+    reserved: f64,
+    estimated: f64,
+) -> Option<&'static str> {
     let periods = [
         (
             quota.daily_limit_usd,
@@ -121,7 +117,7 @@ pub fn evaluate_quota(quota: &SubscriptionQuota, estimated: f64) -> Option<&'sta
     ];
     for (limit, used, reason) in periods {
         if let Some(limit) = limit
-            && used + estimated > limit
+            && used + reserved + estimated > limit
         {
             return Some(reason);
         }

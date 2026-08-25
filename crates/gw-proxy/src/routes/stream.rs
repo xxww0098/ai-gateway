@@ -19,6 +19,15 @@
 //! [`ProxyState::drain`] so a settle straddling shutdown is waited out rather
 //! than aborted with the runtime.
 //!
+//! # 长流的租约
+//!
+//! Redis 里的预留只有一片 TTL（[`gw_ledger::DEFAULT_HOLD_TTL`]，300 秒）。
+//! 一条跑得比它久的健康流会在**自己还活着的时候**被过期清理掉，那之后余额
+//! 闸门就看不见这笔在途负债了。所以 body 每动一次就检查一下租约，
+//! 到点了就续一片 —— 见 [`LEASE_RENEW_PERIOD`]。
+//!
+//! 续租挂在这里（回写包装），**不在 `gw-relay::engine` 里**：中继层是计费盲的。
+//!
 //! `claim_finalize` 三入口（每请求恰一次结算权）：
 //! | 入口 | 语义 |
 //! | [`relay_response`] | 上游出了 body：settler 持票，body 结束或断开时结算 |
@@ -28,7 +37,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -43,6 +52,15 @@ use tokio_util::task::TaskTracker;
 use crate::ProxyState;
 use crate::settlectx::{BillingHandle, SettleCtx};
 use crate::usage::{Settlement, UsageOutcome};
+
+/// 多久续一次租约：一片租约（[`gw_ledger::DEFAULT_HOLD_TTL`]）的**一半**。
+///
+/// 这个比例是有意义的：丢掉一次续租（Redis 抖一下、任务被调度晚了）之后
+/// 还剩整整半片的余量，预留不会因为一次瞬时故障就消失。
+///
+/// 由那个 TTL **算出来**而不是抄一个数字，所以 TTL 改了这里跟着改；
+/// 但它不读配置 —— 它是这条回路的阻尼系数，不是运维旋钮。
+const LEASE_RENEW_PERIOD: Duration = Duration::from_secs(gw_ledger::DEFAULT_HOLD_TTL.as_secs() / 2);
 
 /// The side-band probe for one attempt, plus the handle its result lands in.
 ///
@@ -111,6 +129,10 @@ pub(super) fn relay_response(state: &ProxyState, relayed: Relayed) -> Response {
             provider: provider.to_owned(),
             model,
             started,
+            // 预算代币付的账在 Redis 里根本没有预留，续租只会得到
+            // HoldNotFound —— 不去问，省掉每分钟一次的噪音告警。
+            renewable: !b.used_budget_token,
+            last_renew: started,
             done: false,
         })
     });
@@ -159,6 +181,9 @@ pub(super) fn schedule_release(state: &ProxyState, billing: Option<&BillingHandl
         provider: String::new(),
         model: String::new(),
         started: Instant::now(),
+        // 这条路上没有 body，也就没有要续的租约。
+        renewable: false,
+        last_renew: Instant::now(),
         done: false,
     };
 }
@@ -209,7 +234,13 @@ impl Stream for SettledBody {
             return Poll::Ready(None);
         };
         match ready!(inner.as_mut().poll_next(cx)) {
-            Some(Ok(bytes)) => Poll::Ready(Some(Ok(bytes))),
+            Some(Ok(bytes)) => {
+                // 客户端的 body 还在动 = 这个请求还活着 = 它的预留不该过期。
+                if let Some(settler) = this.settler.as_mut() {
+                    settler.maybe_renew_lease();
+                }
+                Poll::Ready(Some(Ok(bytes)))
+            }
             Some(Err(err)) => {
                 // A mid-stream failure is a real error, not a clean EOF: hyper
                 // turns it into RST_STREAM so the client can tell it was cut
@@ -265,10 +296,43 @@ struct StreamSettler {
     /// produces — the probe reads token counts, not model names.
     model: String,
     started: Instant,
+    /// 这个请求在 Redis 里有没有预留可续。预算代币那条路没有。
+    renewable: bool,
+    /// 上一次续租（或开始）的时刻。
+    last_renew: Instant,
     done: bool,
 }
 
 impl StreamSettler {
+    /// 到点就续一片租约，**在结算之外**：它不动金额，也不重新检查余额。
+    ///
+    /// 失败只记日志，绝不中断这条流 —— 预留会在剩下的 TTL 里自然过期，
+    /// 那一行留给对账。为了一次 Redis 抖动把客户端的回复切断是明显更坏的交易。
+    ///
+    /// 账本写在 [`ProxyState::drain`] 上，所以 poll 不会被 I/O 卡住。
+    fn maybe_renew_lease(&mut self) {
+        if !self.renewable || self.last_renew.elapsed() < LEASE_RENEW_PERIOD {
+            return;
+        }
+        self.last_renew = Instant::now();
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let ledger = self.settlement.ledger().clone();
+        let user_id = self.ctx.user_id;
+        let operation = self.ctx.operation.clone();
+        self.drain.spawn(async move {
+            if let Err(err) = ledger.renew_lease(user_id, &operation).await {
+                tracing::warn!(
+                    user_id,
+                    operation = %operation,
+                    %err,
+                    "hold lease renew failed; the reservation will expire on its TTL",
+                );
+            }
+        });
+    }
+
     fn outcome(&self) -> UsageOutcome {
         UsageOutcome {
             usage: self.usage.clone(),

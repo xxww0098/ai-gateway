@@ -99,6 +99,30 @@ Redis 清理失败时，那一行仍然可对账。
   写 `UsageLog{failed=true, reason=missing_upstream_usage_strict}`；操作停在 `held`，
   预留随 TTL 过期，那一行留给对账
 
+**计价在一次请求里只发生一次。** hold 处 `Calculator::quote(price_key, rate_mult)` 把四列单价、
+倍率与价目表代次冻成一个 `PricingQuote`，放进 `SettleCtx`；预扣的三个估算与结算的精算都在它上面做，
+**结算侧没有第二次查价目表的入口**。于是两件事都不可能发生：管理员的在途改价追上一个已准入的请求，
+以及上游回一个别的模型名把价格键换掉（那等于让上游决定按什么价收租户的钱）。上游那个名字只上
+`usage_logs.model`。
+
+**计价的四列必须互斥。** 上游原话是 `ObservedUsage`（写 `usage_logs` 的就是它，审计要和上游账单对得上），
+计价看的是 `normalize(dialect, observed)` 折出来的 `BillableUsage`。OpenAI / Codex 的 `completion_tokens`
+与 Anthropic 的 `output_tokens` **含**思考，所以可见输出是两者之差；Google 的 `candidatesTokenCount`
+**不含**，思考是并列项。按四条独立价格列直接相乘就是把前两家的思考 token 收两遍。
+负数或自相矛盾的信封**拒绝**（不 clamp、不截断），结算按「上游没报 usage」走既有 fallback / strict。
+`reasoning` 那一列没有价时思考按**输出价**收，不是免费 —— 建表默认值是 0，照字面收就是每次少收一大块。
+
+**配额的比较必须在锁里。** `quota_reservations`（键 = `BillingOperationId`）是在途的那份配额负债：
+hold 在**同一个事务**里锁订阅行 → 轮转 → 比「已用 + 在途预留合计 + 这一笔」→ 落预留行，超限整个回滚。
+提交完再比一次，两个抢最后一格额度的并发请求就都会放行。结算在**扣款那个事务里**删预留 + 加实际
+（只删不加 = 白用一次额度，只加不删 = 算两遍）；释放只删不加。准入失败 / 4xx / 上游失败都要还回去。
+
+**HoldLease 会续期。** `DEFAULT_HOLD_TTL`（300 秒）是**一片租约**，不是一条流的最长时长 ——
+它决定的是进程崩在结算之前时余额被冻多久，所以不该为了迁就长流而调大。活着的流由 `gw-proxy`
+的流式回写包装每隔半片调 `Ledger::renew_lease` 续一次（`gw-relay` 是计费盲的，续租不在中继层）。
+续租**只推时间戳**：不碰 zset 分数、不收金额参数、不重做余额检查。`DEFAULT_MAX_HOLD_DURATION`
+（30 分钟，从 `billing_operations.created_at` 算起）是硬顶 —— 一条永不结束的流不许永久冻结余额。
+
 其余不变量：`settle` 按 `min(balance, actual)` 做 partial-debit，欠款写 `BalanceLog.Metadata.shortfall_usd`，
 通过 `shortfall_resolve:<billingOperationID>:<debitLogID>` 的 Credit 配对解除；订阅购买 `Debit` 成功但建订阅失败时，
 立刻以 `subscription_purchase:<pkgID>:compensate:<debitRef>` 回滚。

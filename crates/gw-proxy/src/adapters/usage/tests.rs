@@ -329,6 +329,10 @@ async fn model_usage_since_sums_today_and_ignores_other_users_and_older_rows() {
     yesterday.model = "beta".to_owned();
     yesterday.input_tokens = 8;
     yesterday.output_tokens = 2;
+    // 回拨这一行的时间要挑得中它：`entry()` 给每一行的 `request_id` 都是同一个
+    // 常量，所以 `WHERE request_id = 'req-c'` 一行都改不到 —— 那样「昨天」
+    // 其实还在今天，断言测的就不是它写的那件事了。
+    yesterday.request_id = "req-c".to_owned();
     let mut stranger = entry(8, &BillingOperationId::mint(), 0.0);
     stranger.model = "other".to_owned();
     stranger.input_tokens = 99;
@@ -340,7 +344,7 @@ async fn model_usage_since_sums_today_and_ignores_other_users_and_older_rows() {
     sqlx::query(
         "UPDATE usage_logs SET created_at = NOW() - INTERVAL '2 days' WHERE request_id = $1",
     )
-    .bind("req-c")
+    .bind(yesterday.request_id.clone())
     .execute(&pool)
     .await
     .expect("backdate yesterday");

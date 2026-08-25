@@ -161,6 +161,15 @@ pub enum DispatchError {
     /// The model name did not resolve to any known provider.
     #[error("unsupported model: {0}")]
     UnknownModel(String),
+    /// 客户端写了 `<渠道>/<模型>`，而网关看不见（或大到不该整体重序列化）
+    /// 这份 body，没法把顶层 `model` 改成上游认识的名字。
+    ///
+    /// **明确 400，不原样转发**：带着网关前缀的 `model` 送到上游只会换回一个
+    /// 「模型不存在」，客户端从那个错误里读不出「前缀是给网关看的」。
+    #[error(
+        "cannot rewrite the channel-prefixed model {0}: request body is not readable as a whole"
+    )]
+    BodyNotRewritable(String),
     /// Upstream answered with a non-2xx status; relayed verbatim.
     #[error("upstream error {status}")]
     Upstream { status: StatusCode, body: String },
@@ -174,7 +183,7 @@ impl DispatchError {
     pub fn status(&self) -> StatusCode {
         match self {
             Self::NoUpstream(_) => StatusCode::SERVICE_UNAVAILABLE,
-            Self::UnknownModel(_) => StatusCode::BAD_REQUEST,
+            Self::UnknownModel(_) | Self::BodyNotRewritable(_) => StatusCode::BAD_REQUEST,
             Self::Upstream { status, .. } => *status,
             Self::Internal(_) => StatusCode::BAD_GATEWAY,
         }

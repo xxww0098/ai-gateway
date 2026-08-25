@@ -472,3 +472,28 @@ fn setting_a_query_key_drops_every_earlier_value_for_it() {
         ]
     );
 }
+
+/// [`ClaudeCredential`] 的 `Debug` 不许带出解析出来的活密钥。
+///
+/// 这个类型存在的理由就是「密钥 + 它来自哪一级」，于是任何一句
+/// `tracing::debug!(?cred)` 或 `assert_eq!` 失败信息都会把密钥原样打出来 ——
+/// 而 `source` 才是排错要看的那一半，它留着。
+///
+/// 密文是这条测试自己造的，生产源码里没有它（规范 2.11）。
+#[test]
+fn claude_credential_debug_never_carries_the_live_secret() {
+    const LIVE: &str = "sk-ant-UNIQUE-KNIFE3-claude-7c2f10";
+
+    for source in [CredentialSource::ApiKey, CredentialSource::OauthToken] {
+        let cred = ClaudeCredential {
+            value: LIVE.to_owned(),
+            source,
+        };
+        let dump = format!("{cred:?}");
+        assert!(!dump.contains(LIVE), "凭证的 Debug 打出了活密钥：{dump}");
+        assert!(
+            dump.contains(source.as_str()) || dump.contains(&format!("{source:?}")),
+            "来源是排错要看的那一半，不该跟着被抹掉：{dump}"
+        );
+    }
+}

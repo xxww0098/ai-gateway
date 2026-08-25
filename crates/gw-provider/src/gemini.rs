@@ -17,7 +17,7 @@ use crate::claude::shared::{
     self, append_query, default_content_negotiation, path_escape, set_query, trim_base_url,
 };
 use crate::common::{
-    PROVIDER_GEMINI, ProviderConfig, nested_string, relay_timeouts, requested_model,
+    PROVIDER_GEMINI, ProviderConfig, Redacted, nested_string, relay_timeouts, requested_model,
     resolve_timeout, string_from_map,
 };
 use crate::route::{RoutePlan, RoutePlanner};
@@ -35,11 +35,21 @@ const GEMINI_ACCESS_TOKEN: &str = "access_token";
 const GEMINI_ALT_QUERY: &str = "alt";
 
 /// Generative Language API executor.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GeminiProvider {
     base_url: String,
     api_key: String,
     timeout: Duration,
+}
+
+impl std::fmt::Debug for GeminiProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeminiProvider")
+            .field("base_url", &self.base_url)
+            .field("api_key", &Redacted(&self.api_key))
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 impl GeminiProvider {

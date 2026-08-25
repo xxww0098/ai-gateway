@@ -40,7 +40,7 @@ use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{StatusCode, header};
 use axum::response::Response;
 use futures_util::Stream;
 use gw_provider::types::UsageRecord;
@@ -150,7 +150,12 @@ pub(super) fn relay_response(state: &ProxyState, relayed: Relayed) -> Response {
 
     let mut response = Response::new(Body::from_stream(stream));
     *response.status_mut() = status;
-    apply_upstream_headers(response.headers_mut(), headers);
+    // 上游 header 回写：复制**只有一份实现**，在 `gw-relay`。它保住 `set-cookie`
+    // 这类同名多值（逐个 `insert` 会折成最后一条），并按 RFC 7230 §6.1 剥掉这条
+    // 消息自己 `Connection` 点名的逐跳头。这里曾经有第二张写死的 `HOP_BY_HOP`
+    // 名单 —— 两张名单必然漂：那张漏了 `expect`，也从不看 `Connection` 的值，
+    // 于是上游一句 `Connection: close, x-foo` 里的 `x-foo` 被原样发给客户端。
+    gw_relay::copy_preserving_multivalue(response.headers_mut(), &headers);
     if !response.headers().contains_key(header::CONTENT_TYPE) {
         response.headers_mut().insert(
             header::CONTENT_TYPE,
@@ -372,36 +377,6 @@ impl Drop for StreamSettler {
                 .spawn(async move { settlement.settle(&ctx, outcome).await });
         }
     }
-}
-
-/// Moves upstream headers onto the client response, dropping hop-by-hop names.
-///
-/// A move, not a clone: the relay is done with the map. Replacing the
-/// destination keeps repeated values (`set-cookie`) that a per-name `insert`
-/// would collapse.
-fn apply_upstream_headers(dst: &mut HeaderMap, mut src: HeaderMap) {
-    for name in HOP_BY_HOP {
-        src.remove(*name);
-    }
-    *dst = src;
-}
-
-/// Headers that describe one hop and must not be forwarded.
-const HOP_BY_HOP: &[&str] = &[
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-    "content-length",
-];
-
-#[cfg(test)]
-pub(crate) fn is_hop_by_hop(name: &str) -> bool {
-    HOP_BY_HOP.contains(&name)
 }
 
 /// Status codes that mean "this account, right now" rather than "this request".

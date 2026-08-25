@@ -61,8 +61,6 @@ mod stream;
 
 pub use catalogue::{count_tokens, model_detail, models, usage};
 pub(crate) use routing::{dialect_error, partition_routable, rewrite_model, select_upstreams};
-#[cfg(test)]
-pub(crate) use stream::is_hop_by_hop;
 use stream::{Relayed, is_retryable_status, relay_response, schedule_release, usage_probe};
 
 /// How many upstream accounts one client request may burn through.

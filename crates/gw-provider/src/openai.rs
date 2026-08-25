@@ -3,7 +3,7 @@
 //! OWNER: worker `provider-openai`.
 
 use crate::common::{
-    PROVIDER_OPENAI, ProviderConfig, chat_completions_endpoint, ensure_include_usage,
+    PROVIDER_OPENAI, ProviderConfig, Redacted, chat_completions_endpoint, ensure_include_usage,
     nested_string, relay_timeouts, request_surface, resolve_timeout, responses_endpoint,
     string_from_map, upstream_dialect,
 };
@@ -17,12 +17,23 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 /// Executor for any OpenAI-compatible API.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenAiCompatibleProvider {
     provider: &'static str,
     base_url: String,
     api_key: String,
     timeout: Duration,
+}
+
+impl std::fmt::Debug for OpenAiCompatibleProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiCompatibleProvider")
+            .field("provider", &self.provider)
+            .field("base_url", &self.base_url)
+            .field("api_key", &Redacted(&self.api_key))
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 impl OpenAiCompatibleProvider {

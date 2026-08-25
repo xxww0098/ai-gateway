@@ -203,3 +203,70 @@ fn the_outbound_credential_is_marked_sensitive() {
         .expect("Bearer 落在 authorization 上");
     assert!(value.is_sensitive());
 }
+
+/// RFC 7230 §6.1 的守护测试：`Connection` **点名**的头必须在这一跳被消费掉。
+///
+/// 走的是真正会发往上游的那条路径（[`upstream_headers`]），不是它下面的复制函数 ——
+/// 名单收错地方的话，只测复制函数是看不出来的。
+///
+/// 守护的 bug：把逐跳判定退回一张写死的短名单。那样客户端一句
+/// `Connection: close, x-foo` 里的 `x-foo` 会被原样转给上游：一个显式声明
+/// 「只在这一跳有效」的头越跳跑掉了，而静态名单里永远不会有 `x-foo`。
+///
+/// `x-foo` 是**测试自己造的**名字，生产源码里没有它 —— 断言测的是性质，
+/// 不是把源码的字面量抄进来（规范 2.11）。
+#[test]
+fn connection_named_headers_are_consumed_before_the_upstream() {
+    let hop = "x-foo";
+    let kept = [("x-custom-trace", "abc123"), ("content-type", "text/plain")];
+
+    // 一条逗号分隔的 Connection，与拆成两条的 Connection，必须同样处理。
+    let combined = {
+        let mut pairs = vec![("connection", "close, x-foo"), (hop, "hop-scoped")];
+        pairs.extend_from_slice(&kept);
+        map(&pairs)
+    };
+    let split = {
+        let mut pairs = vec![
+            ("connection", "close"),
+            ("connection", "x-foo"),
+            (hop, "hop-scoped"),
+        ];
+        pairs.extend_from_slice(&kept);
+        map(&pairs)
+    };
+
+    for inbound in [combined, split] {
+        let out = upstream_headers(&inbound, &bearer(), false).expect("凭证合法");
+
+        assert!(
+            !out.contains_key(hop),
+            "{hop} 被 Connection 点了名，不许越过这一跳"
+        );
+        assert!(!out.contains_key("connection"), "Connection 自己也是逐跳头");
+        for (name, _) in kept {
+            assert_eq!(out.get(name), inbound.get(name), "{name} 必须原样过");
+        }
+    }
+}
+
+/// 同一条规则在**回写**方向：上游的 `Connection` 点名同样在这一跳消费掉。
+///
+/// 两个方向共用 [`copy_preserving_multivalue`]，所以这里测的是「共用」本身 ——
+/// 哪天有人给回写方向另开一套判定，这条会红。
+#[test]
+fn connection_named_headers_are_consumed_on_the_way_back_too() {
+    let hop = "x-foo";
+    let upstream = map(&[
+        ("connection", "keep-alive, x-foo"),
+        (hop, "hop-scoped"),
+        ("x-request-id", "req-1"),
+    ]);
+
+    let mut client = HeaderMap::new();
+    copy_preserving_multivalue(&mut client, &upstream);
+
+    assert!(!client.contains_key(hop), "{hop} 不该到达客户端");
+    assert!(!client.contains_key("connection"));
+    assert_eq!(client.get("x-request-id"), upstream.get("x-request-id"));
+}

@@ -50,7 +50,7 @@ use gw_provider::common::ProviderConfig;
 use gw_provider::gemini::GeminiProvider;
 use gw_provider::kiro::KiroProvider;
 use gw_provider::openai::OpenAiCompatibleProvider;
-use gw_provider::types::Provider;
+use gw_provider::route::RoutePlanner;
 use gw_provider::vertex::VertexProvider;
 use gw_provider::xai::XaiProvider;
 use gw_proxy::adapters::{
@@ -434,7 +434,7 @@ fn sdk_seed_config(config: &Config) -> SdkSeedConfig {
 /// # Errors
 /// An unparseable `base_url` is rejected at wiring time rather than on the
 /// first request.
-fn build_providers(sdk: &gw_config::SdkConfig) -> anyhow::Result<Vec<Arc<dyn Provider>>> {
+fn build_providers(sdk: &gw_config::SdkConfig) -> anyhow::Result<Vec<Arc<dyn RoutePlanner>>> {
     let timeout = i64::from(sdk.timeout_seconds);
     let cfg = |p: &gw_config::SdkProviderConfig| ProviderConfig {
         base_url: p.base_url.clone(),
@@ -442,7 +442,7 @@ fn build_providers(sdk: &gw_config::SdkConfig) -> anyhow::Result<Vec<Arc<dyn Pro
         enabled: p.enabled,
     };
 
-    let mut providers: Vec<Arc<dyn Provider>> = Vec::with_capacity(7);
+    let mut providers: Vec<Arc<dyn RoutePlanner>> = Vec::with_capacity(7);
 
     let openai = sdk.openai_provider_config();
     if openai.complete() {

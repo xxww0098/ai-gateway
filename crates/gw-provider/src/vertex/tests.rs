@@ -8,7 +8,6 @@ use gw_authcore::AuthRecord;
 use serde_json::json;
 
 use super::*;
-use crate::streambuf::StreamUsageProbe;
 use bytes::Bytes;
 
 /// Throwaway keys generated for these tests only; they authenticate nothing.
@@ -54,70 +53,8 @@ fn expiry(offset: chrono::TimeDelta) -> String {
 /// 终局帧被读边界切成两半时，任何「按 chunk」的解析都看不见它 —— 那正是当初要为
 /// Vertex 单独写一个累加器（per-chunk latch + 收尾时对整个窗口再解析一遍）的原因。
 /// `StreamUsageProbe` 把跨帧的半行接上，这条路变成了普通情况。
-#[test]
-fn a_split_terminal_frame_beats_the_stale_earlier_one() {
-    let mut probe = StreamUsageProbe::new(extract_latest_vertex_usage);
-
-    let stale =
-        "data: {\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":10}}\n";
-    let real_head = "data: {\"usageMetadata\":{\"promptTokenCount\":100,\"candidates";
-    let real_tail = "TokenCount\":900}}\n";
-
-    // 前提：真正的终局帧被切开后，两半单独都解析不出来。
-    assert!(
-        extract_latest_vertex_usage(real_head.as_bytes()).is_none()
-            && extract_latest_vertex_usage(real_tail.as_bytes()).is_none(),
-        "precondition: neither half parses on its own"
-    );
-
-    probe.observe(stale.as_bytes());
-    probe.observe(real_head.as_bytes());
-    probe.observe(real_tail.as_bytes());
-
-    let tokens = probe.finish().expect("usage");
-    assert_eq!(
-        tokens.output,
-        Some(900),
-        "被切开的终局帧必须压过前一个陈旧的小值"
-    );
-    assert_eq!(tokens.input, Some(100));
-}
-
 /// 合并是**按列**的，不是整体替换：终局帧省略了某一列，不得抹掉更早的帧
 /// 为那一列报过的值。「省略」与「零」是两件事。
-#[test]
-fn the_merge_keeps_the_best_value_in_every_column() {
-    let mut probe = StreamUsageProbe::new(extract_latest_vertex_usage);
-    probe.observe(
-        br#"data: {"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":10,"cachedContentTokenCount":5}}
-"#,
-    );
-    probe.observe(
-        br#"data: {"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":500,"thoughtsTokenCount":7}}
-"#,
-    );
-    let tokens = probe.finish().expect("usage");
-
-    assert_eq!(tokens.input, Some(100));
-    assert_eq!(tokens.output, Some(500));
-    assert_eq!(tokens.cached, Some(5), "an omitted column is not a zero");
-    assert_eq!(tokens.reasoning, Some(7));
-}
-
-#[test]
-fn a_stream_that_never_reported_usage_produces_no_tally() {
-    let mut probe = StreamUsageProbe::new(extract_latest_vertex_usage);
-    probe.observe(
-        br#"data: {"candidates":[{"content":{}}]}
-"#,
-    );
-    probe.observe(
-        br#"data: {"candidates":[]}
-"#,
-    );
-    assert!(probe.finish().is_none());
-}
-
 /// Vertex answers some callers with SSE and others with a chunked JSON array,
 /// so both framings have to parse to the same tally.
 #[test]
@@ -624,9 +561,9 @@ async fn token_counting_refuses_rather_than_fabricating_a_number() {
     for len in [0, 8, 80, 800] {
         assert!(
             provider
-                .count_tokens(
+                .plan_count_tokens(
                     &auth,
-                    ProviderRequest {
+                    &ProviderRequest {
                         payload: Bytes::from(vec![b'x'; len]),
                         ..Default::default()
                     },

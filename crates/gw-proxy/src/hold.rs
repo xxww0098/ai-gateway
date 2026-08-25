@@ -14,32 +14,46 @@
 //! 8. subscription quota (lock, rotate stale counters, compare against estimate)
 //! 9. **upper-bound pre-flight**: `max(hold, EstimateWithMaxTokens, Estimate(stream))`
 //!    vs available balance -> 402 `insufficient_balance`, no hold created
-//! 10. budget token -> else `ledger.Hold`
+//! 10. **mint the server [`BillingOperationId`]**, then budget token ->
+//!     else `ledger.admit_operation`
 //! 11. idempotency claim (only now that funds are reserved)
 //! 12. run downstream, then settle-or-release exactly once
+//!
+//! Step 10 is where the money key comes from, and it comes from the *server*.
+//! The inbound `X-Trace-ID` never reaches it — see [`client_trace_from`].
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::{Body, Bytes, HttpBody as _};
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, Method, StatusCode, header};
+use axum::http::{Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use chrono::Utc;
+use gw_ledger::{BillingOperationId, ClientTraceId, IdempotencyScope, NewOperation};
 use gw_relay::endpoint::spec::{RequestSpec, SurfaceError, validate};
 
 use crate::ProxyState;
-use crate::access::is_proxy_path;
 use crate::error::HoldRejection;
 use crate::idempotency::{CachedResponse, IdempotencyManager};
 use crate::kernel::{self, Phase, RelayCtx};
 use crate::ports::{
     AccessMetadata, BillingError, BillingLedger, CircuitBreaker, HoldAdmit, Id, PricingCalculator,
-    RateLimiter, SubscriptionQuota, SubscriptionQuotaStore,
+    RateLimiter, SubscriptionQuotaStore,
 };
 use crate::settlectx::{BillingHandle, RequestBilling, SettleCtx};
 use crate::usage::Settlement;
+
+mod preflight;
+
+use preflight::request_fingerprint;
+pub use preflight::{
+    approximate_tokens_from_bytes, client_trace_from, compute_reservation, evaluate_quota,
+    extract_idempotency_key, extract_ip_address, infer_provider, is_billable,
+    next_daily_reset_after, next_monthly_reset_after, next_weekly_reset_after,
+    preflight_upper_bound, rotate_counters,
+};
 
 /// Caps how many bytes of the request body are read during pre-flight.
 pub const HOLD_REQUEST_BODY_LIMIT: usize = 1 << 20;
@@ -217,7 +231,7 @@ impl HoldMiddleware {
             1.0
         };
 
-        let request_id = trace_id_from(req.headers());
+        let client_trace = client_trace_from(req.headers());
         let ip_address = extract_ip_address(req.headers());
         let idempotency_key = extract_idempotency_key(req.headers());
         let method = req.method().clone();
@@ -280,7 +294,7 @@ impl HoldMiddleware {
                     meta,
                     rate_mult,
                     peek,
-                    request_id,
+                    client_trace,
                     ip_address,
                     idempotency_key,
                     method,
@@ -308,7 +322,7 @@ impl HoldMiddleware {
             meta,
             rate_mult,
             peek,
-            request_id,
+            client_trace,
             ip_address,
             idempotency_key,
             method,
@@ -402,48 +416,56 @@ impl HoldMiddleware {
             }
         }
 
+        // --- mint the money key ---
+        //
+        // **The server mints it.** Not the inbound `X-Trace-ID`, not the
+        // client `Idempotency-Key`, not a hash of either. A caller can replay
+        // or collide a header it controls; it cannot reach this.
+        let operation_id = BillingOperationId::mint();
+
         // --- upper-bound pre-flight ---
-        // Reject before creating a hold when the balance cannot cover even the
-        // worst case. The reserved amount stays `hold_amount`; the upper bound
-        // only gates the balance comparison.
-        // 预算代币：仅 try_deduct 命中时跳过 Redis hold；无 token / 不足 /
-        // 过期走 hold_gated 单趟 Lua（floor + 预扣 + EXPIRE）。不在 store
-        // 挂载时 peek 余额——那是 acquire 启用前的误接线代价。
+        //
+        // Reject before reserving when the balance cannot cover the worst
+        // case. **Prepaid reserves the bound it checked**: `reserved_amount`
+        // is `upper_bound`, not the smaller `hold_amount` — reserving less
+        // than the liability that was admitted is exactly the under-hold that
+        // lets a large request settle into debt.
+        let operation = NewOperation {
+            operation_id: operation_id.clone(),
+            user_id: meta.user_id,
+            reserved_amount: upper_bound,
+            admitted_liability: upper_bound,
+            request_fingerprint: request_fingerprint(meta.user_id, &method, &path, &peek),
+            client_trace_id: client_trace.as_str().to_owned(),
+        };
+
+        // 预算代币：仅 try_deduct 命中时跳过 Redis 预留；无 token / 不足 /
+        // 过期走 admit_operation 的单趟 Lua（floor + 预扣 + EXPIRE）。
+        // **持久化那一行两条路都写** —— 它是操作的身份，不是它的缓存。
         let used_budget_token = self
             .budget_tokens
             .as_ref()
-            .is_some_and(|bts| bts.try_deduct(meta.user_id, hold_amount));
+            .is_some_and(|bts| bts.try_deduct(meta.user_id, upper_bound));
+        let redis_ttl = (!used_budget_token).then_some(self.ttl);
 
-        if !used_budget_token {
-            match self
-                .ledger
-                .hold_gated(
-                    meta.user_id,
-                    hold_amount,
+        match self.ledger.admit_operation(&operation, redis_ttl).await {
+            Ok(HoldAdmit::Reserved) => {}
+            Ok(HoldAdmit::Insufficient { available }) => {
+                tracing::warn!(
+                    event = "preflight_insufficient_balance",
+                    user_id = meta.user_id,
+                    model = %peek.model,
                     upper_bound,
-                    &request_id,
-                    self.ttl,
-                )
-                .await
-            {
-                Ok(HoldAdmit::Reserved) => {}
-                Ok(HoldAdmit::Insufficient { available }) => {
-                    tracing::warn!(
-                        event = "preflight_insufficient_balance",
-                        user_id = meta.user_id,
-                        model = %peek.model,
-                        upper_bound,
-                        available,
-                    );
-                    return HoldRejection::InsufficientBalance {
-                        current_balance: available,
-                        required_amount: upper_bound,
-                    }
-                    .into_response();
+                    available,
+                );
+                return HoldRejection::InsufficientBalance {
+                    current_balance: available,
+                    required_amount: upper_bound,
                 }
-                Err(err) => {
-                    return self.reject_hold_error(err, meta.user_id, hold_amount).await;
-                }
+                .into_response();
+            }
+            Err(err) => {
+                return self.reject_hold_error(err, meta.user_id, upper_bound).await;
             }
         }
 
@@ -451,7 +473,8 @@ impl HoldMiddleware {
 
         let billing: BillingHandle = Arc::new(RequestBilling::new(
             SettleCtx {
-                request_id: request_id.clone(),
+                operation: operation_id.clone(),
+                client_trace: client_trace.clone(),
                 user_id: meta.user_id,
                 api_key_id: meta.api_key_id,
                 group_id: meta.group_id,
@@ -468,7 +491,8 @@ impl HoldMiddleware {
         kernel::advance_ext(&mut req, Phase::Reserved);
         if let Some(ctx) = req.extensions_mut().get_mut::<RelayCtx>() {
             ctx.peek = Some(peek);
-            ctx.request_id.clone_from(&billing.ctx.request_id);
+            ctx.client_trace = billing.ctx.client_trace.clone();
+            ctx.operation = Some(billing.ctx.operation.clone());
             ctx.ip_address.clone_from(&billing.ctx.ip_address);
             ctx.idempotency_key.clone_from(&billing.ctx.idempotency_key);
             ctx.billing = Some(billing.clone());
@@ -485,9 +509,8 @@ impl HoldMiddleware {
                 Ok(false) => {
                     // Lost the race: give the reservation back, then either
                     // replay the winner's response or report the conflict.
-                    if !used_budget_token {
-                        let _ = with_timeout(self.ledger.release(meta.user_id, &request_id)).await;
-                    }
+                    let _ =
+                        with_timeout(self.ledger.release_once(meta.user_id, &operation_id)).await;
                     if let Ok(Some(other)) = im.check(&idem_store_key).await
                         && !other.processing
                         && !other.truncated
@@ -521,7 +544,7 @@ impl HoldMiddleware {
             self.finalize_idempotency(
                 im,
                 &idem_store_key,
-                &request_id,
+                client_trace.as_str(),
                 status,
                 content_type,
                 captured,
@@ -548,13 +571,14 @@ impl HoldMiddleware {
             self.settlement.settle_missing_usage(&billing.ctx).await;
             return;
         }
-        if !billing.used_budget_token {
-            let _ = with_timeout(
-                self.ledger
-                    .release(billing.ctx.user_id, &billing.ctx.request_id),
-            )
-            .await;
-        }
+        // The durable operation is terminated on **both** reservation paths:
+        // a budget-token request has no Redis hold to give back, but it still
+        // owns a `held` row that reconciliation would otherwise charge.
+        let _ = with_timeout(
+            self.ledger
+                .release_once(billing.ctx.user_id, &billing.ctx.operation),
+        )
+        .await;
     }
 
     /// Stores a replayable 2xx response, or drops the claim so a retry can
@@ -562,7 +586,7 @@ impl HoldMiddleware {
     async fn finalize_idempotency(
         &self,
         im: &IdempotencyManager,
-        store_key: &str,
+        store_key: &IdempotencyScope,
         request_id: &str,
         status: StatusCode,
         content_type: Option<String>,
@@ -604,6 +628,13 @@ impl HoldMiddleware {
         if matches!(err, BillingError::OutstandingDebt) {
             return HoldRejection::OutstandingDebt.into_response();
         }
+        if let BillingError::OperationConflict(conflict) = &err {
+            // A minted id collided with a live or finished operation. That is
+            // a gateway bug, not a tenant error — refuse rather than reuse the
+            // row, and say so loudly enough to be found.
+            tracing::error!(%conflict, user_id, "billing operation id conflict");
+            return HoldRejection::PaymentRequired.into_response();
+        }
         tracing::warn!(%err, user_id, "hold failed");
         HoldRejection::PaymentRequired.into_response()
     }
@@ -614,7 +645,8 @@ struct ReservationInput {
     meta: AccessMetadata,
     rate_mult: f64,
     peek: BillingPeek,
-    request_id: String,
+    /// Observability only. The money key is minted later, in `handle_reserved`.
+    client_trace: ClientTraceId,
     ip_address: String,
     idempotency_key: String,
     method: Method,
@@ -625,294 +657,6 @@ struct ReservationInput {
 /// the access metadata (blocker B1).
 pub async fn layer(State(state): State<ProxyState>, req: Request, next: Next) -> Response {
     state.hold.clone().handle(req, next).await
-}
-
-// ---------------------------------------------------------------- pure logic
-
-/// 一个请求要不要走计费 preflight。
-///
-/// 路径集合来自 [`crate::access::is_proxy_path`]，与鉴权层共用，
-/// 所以一条路由**不可能**在没被鉴权的情况下被计费。
-///
-/// # 三个零成本端点已被移出计费范围（本轮修复，用户已批准）
-///
-/// `GET /v1/models`、`GET /v1/models/{model}`、`POST /v1/messages/count_tokens`
-/// 此前是**按 LLM 价格收钱的**。三者都会带着「没有 usage 信封」抵达结算：
-///
-/// * 两条 catalogue 读落到 usage 解析的默认分支；
-/// * `count_tokens` 命中它的 `/messages` 分支，但 Anthropic 的回复是裸
-///   `{"input_tokens": N}`，没有 `usage` 包装，所以 usage 解析器什么也找不到，
-///   报 `present = false`。
-///
-/// 「usage 缺失 + 非 strict」= fallback 结算，于是每次调用被收
-/// `max(ActiveHoldAmount, Estimate(model, stream = true, rate_mult))`。
-/// 按发布配置（`default_price_per_1k_tokens: 0.001`、`estimatedTokens = 1000`），
-/// 一次 catalogue 读要收租户约 $0.004；`count_tokens` 带着真实模型名，
-/// 按那个模型的费率计价，**可能贵得多**。而上游对这三者都收 0
-/// —— Anthropic 的 token 计数是免费的，catalogue 读根本不出网（纯 DB 读）。
-///
-/// 此前不敢改的理由是「Go parity：改了会漂移成没人能与移植 bug 区分的差异」。
-/// **这个理由已经被证伪**：`docs/relay-surface-plan.md` 证据 C 显示 Go 侧 149 条
-/// 路由里 `/v1` 与 `/v1beta` 的匹配数为 **0** —— 整个 `/v1` 面来自先前 SDK 的
-/// Builder，根本不在 Go 权威参照内，不存在 A/B 对账时被误判的风险。
-///
-/// # 这改的是「计费范围」，不是「计费语义」
-///
-/// Hold / Settle / Release 三段式、partial-debit shortfall、strict-usage-metadata
-/// 模式 —— 签名与语义一行未动。变的只是**哪些路径进入这条管线**。
-/// 这是 `CONTRACT.md` 硬约束「计费语义不变」允许的那一半。
-///
-/// `GET /v1/usage` 同样不计费：全部 GET 已被排除，它只读账本与鉴权元数据。
-pub fn is_billable(method: &Method, path: &str) -> bool {
-    is_proxy_path(path)
-        && !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
-        && !path.ends_with("/count_tokens")
-}
-
-/// Conservative worst case used by the balance gate:
-/// `max(hold, EstimateWithMaxTokens, Estimate(stream = true))`.
-///
-/// `EstimateWithMaxTokens` tightens the bound when the client supplied a cap;
-/// the streaming estimate guards the case where the cap is absent or absurd.
-/// The upper-bound computation for the balance gate.
-pub fn preflight_upper_bound(
-    calc: &dyn PricingCalculator,
-    model: &str,
-    max_tokens: i64,
-    stream: bool,
-    rate_mult: f64,
-    hold_amount: f64,
-) -> f64 {
-    let with_max = calc.estimate_with_max_tokens(model, max_tokens, stream, rate_mult);
-    let streaming = calc.estimate(model, true, rate_mult);
-    hold_amount.max(with_max).max(streaming)
-}
-
-/// 从 peek 一次算出预扣额与 floor 上界，避免 middleware 重复调 estimator。
-pub fn compute_reservation(
-    peek: &BillingPeek,
-    rate_mult: f64,
-    calc: &dyn PricingCalculator,
-) -> (f64, f64) {
-    let hold_amount = calc.estimate_with_tokens(
-        &peek.price_key,
-        peek.input_tokens,
-        peek.max_tokens,
-        peek.stream,
-        rate_mult,
-    );
-    let upper_bound = preflight_upper_bound(
-        calc,
-        &peek.price_key,
-        peek.max_tokens,
-        peek.stream,
-        rate_mult,
-        hold_amount,
-    );
-    (hold_amount, upper_bound)
-}
-
-/// Returns the rejection reason when `estimated` would push any period over its
-/// limit.
-pub fn evaluate_quota(quota: &SubscriptionQuota, estimated: f64) -> Option<&'static str> {
-    let periods = [
-        (
-            quota.daily_limit_usd,
-            quota.daily_usage_usd,
-            "subscription daily quota exceeded",
-        ),
-        (
-            quota.weekly_limit_usd,
-            quota.weekly_usage_usd,
-            "subscription weekly quota exceeded",
-        ),
-        (
-            quota.monthly_limit_usd,
-            quota.monthly_usage_usd,
-            "subscription monthly quota exceeded",
-        ),
-    ];
-    for (limit, used, reason) in periods {
-        if let Some(limit) = limit
-            && used + estimated > limit
-        {
-            return Some(reason);
-        }
-    }
-    None
-}
-
-/// Zeroes any period counter whose reset boundary has passed and advances that
-/// boundary. Returns whether anything changed.
-///
-/// `pub` so a [`SubscriptionQuotaStore`] implementation can apply the identical
-/// rotation inside its `SELECT ... FOR UPDATE` transaction instead of
-/// re-deriving the rule in SQL.
-pub fn rotate_counters(quota: &mut SubscriptionQuota, now: DateTime<Utc>) -> bool {
-    let mut dirty = false;
-    if let Some(at) = quota.daily_reset_at
-        && now > at
-    {
-        quota.daily_usage_usd = 0.0;
-        quota.daily_reset_at = Some(next_daily_reset_after(now));
-        dirty = true;
-    }
-    if let Some(at) = quota.weekly_reset_at
-        && now > at
-    {
-        quota.weekly_usage_usd = 0.0;
-        quota.weekly_reset_at = Some(next_weekly_reset_after(now));
-        dirty = true;
-    }
-    if let Some(at) = quota.monthly_reset_at
-        && now > at
-    {
-        quota.monthly_usage_usd = 0.0;
-        quota.monthly_reset_at = Some(next_monthly_reset_after(now));
-        dirty = true;
-    }
-    dirty
-}
-
-fn midnight(date: NaiveDate) -> DateTime<Utc> {
-    date.and_hms_opt(0, 0, 0)
-        .expect("midnight is always a valid time")
-        .and_utc()
-}
-
-/// Next UTC midnight strictly after `t`.
-pub fn next_daily_reset_after(t: DateTime<Utc>) -> DateTime<Utc> {
-    midnight(t.date_naive() + chrono::Duration::days(1))
-}
-
-/// Next UTC Monday 00:00 strictly after `t` (ISO weeks start on Monday),
-/// including the "today is Monday midnight counts as past" rule.
-pub fn next_weekly_reset_after(t: DateTime<Utc>) -> DateTime<Utc> {
-    let day = t.date_naive();
-    let iso = i64::from(day.weekday().number_from_monday()); // Mon=1 .. Sun=7
-    midnight(day + chrono::Duration::days(8 - iso))
-}
-
-/// First day of the next UTC month at 00:00.
-pub fn next_monthly_reset_after(t: DateTime<Utc>) -> DateTime<Utc> {
-    let d = t.date_naive();
-    let (year, month) = if d.month() == 12 {
-        (d.year() + 1, 1)
-    } else {
-        (d.year(), d.month() + 1)
-    };
-    midnight(NaiveDate::from_ymd_opt(year, month, 1).expect("first of month is always valid"))
-}
-
-/// Maps a model name onto the circuit-breaker key (NOT the dispatch registry —
-/// 派发用的是 `gw_relay::endpoint::upstream::select` 的四级链，见
-/// [`crate::routes::select_upstreams`]).
-pub fn infer_provider(model: &str) -> Option<&'static str> {
-    // 不分配：热路径上每个请求都会走到这里，to_ascii_lowercase 只为几个前缀。
-    if starts_ignore_ascii(model, "gpt-")
-        || starts_ignore_ascii(model, "o1")
-        || starts_ignore_ascii(model, "o3")
-        || starts_ignore_ascii(model, "o4")
-    {
-        Some("openai")
-    } else if starts_ignore_ascii(model, "claude-") {
-        Some("anthropic")
-    } else if starts_ignore_ascii(model, "gemini-") {
-        Some("google")
-    } else if contains_ignore_ascii(model, "codex") {
-        Some("codex")
-    } else {
-        None
-    }
-}
-
-fn starts_ignore_ascii(hay: &str, prefix: &str) -> bool {
-    hay.len() >= prefix.len()
-        && hay.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
-}
-
-fn contains_ignore_ascii(hay: &str, needle: &str) -> bool {
-    hay.as_bytes()
-        .windows(needle.len())
-        .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
-}
-
-/// Approximates a token count from a byte length (`ceil(size / 4)`).
-pub fn approximate_tokens_from_bytes(size: usize) -> i64 {
-    if size == 0 {
-        return 0;
-    }
-    size.div_ceil(4) as i64
-}
-
-/// Stable request id used as the ledger hold key: an inbound `X-Trace-ID`, else
-/// a freshly minted one.
-///
-/// # 为什么不是 `Uuid::new_v4()`
-///
-/// 基线实测（`docs/relay-perf-baseline.md` 热点 #6）：`Uuid::new_v4()` 每请求
-/// 一次 `getentropy` 系统调用，占有效 CPU **1.93%**。trace id 不是密码学材料
-/// —— 它只需要在**这个进程的生命周期内**不重复，供账本 hold 键与日志关联。
-///
-/// 所以换成「**进程随机前缀 + 单调原子计数**」：前缀在进程启动时取一次熵
-/// （整个进程一次，不是每请求一次），计数器保证同进程内唯一，
-/// 前缀保证跨进程/跨副本不碰撞。`getentropy` 的每请求调用次数归 **0**（验收目标 T12）。
-///
-/// 形状仍是十六进制文本，长度固定，对既有的 `usage_logs.request_id`
-/// / Redis hold 键完全兼容（列是文本，没有 UUID 约束）。
-pub fn trace_id_from(headers: &HeaderMap) -> String {
-    headers
-        .get(TRACE_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(new_trace_id)
-}
-
-/// 进程级随机前缀。`LazyLock` 保证整个进程**只取一次**熵；
-/// 复用 `uuid` 的 v4 生成器只是为了不多引一个熵源，那一次 `getentropy`
-/// 摊到进程生命周期上等于零。
-static TRACE_PREFIX: std::sync::LazyLock<u64> =
-    std::sync::LazyLock::new(|| uuid::Uuid::new_v4().as_u64_pair().0);
-
-/// 同进程内的单调计数器。`Relaxed` 足够：这里只要求**唯一**，不要求跨线程有序。
-static TRACE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-fn new_trace_id() -> String {
-    let n = TRACE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("{:016x}{n:016x}", *TRACE_PREFIX)
-}
-
-/// Client IP: `X-Forwarded-For` (first entry) -> `X-Real-IP` -> nothing.
-///
-/// The `RemoteAddr` fallback is the caller's job here because axum surfaces the
-/// peer address as a `ConnectInfo` extension rather than on the request itself.
-pub fn extract_ip_address(headers: &HeaderMap) -> String {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        let first = xff.split(',').next().unwrap_or("").trim();
-        if !first.is_empty() {
-            return first.to_owned();
-        }
-    }
-    headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.trim().to_owned())
-        .unwrap_or_default()
-}
-
-/// Reads `Idempotency-Key`, then `X-Idempotency-Key`.
-pub fn extract_idempotency_key(headers: &HeaderMap) -> String {
-    for name in ["idempotency-key", "x-idempotency-key"] {
-        if let Some(v) = headers.get(name).and_then(|v| v.to_str().ok()) {
-            let v = v.trim();
-            if !v.is_empty() {
-                return v.to_owned();
-            }
-        }
-    }
-    String::new()
 }
 
 // ---------------------------------------------------------------- plumbing

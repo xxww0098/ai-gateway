@@ -6,10 +6,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use chrono::Utc;
 use gw_authcore::{AuthRecord, AuthStore};
-use gw_provider::types::{
-    Provider, ProviderError, ProviderRequest, ProviderResponse, StreamChunk, StreamResponse,
-    UsageRecord,
-};
+use gw_provider::route::{RoutePlan, RoutePlanner};
+use gw_provider::types::{ProviderError, ProviderRequest};
+use gw_relay::engine::{Transport, UpstreamHead, UpstreamRequest};
+use gw_relay::{Credential, RelayError, RelayTimeouts, RelayTransportError, UpstreamDialect};
 use parking_lot::Mutex;
 
 use crate::ports::{ModelCatalog, ModelEntry};
@@ -62,41 +62,32 @@ pub(crate) fn auth_record(id: &str, provider: &str) -> AuthRecord {
     AuthRecord::new(id, provider, Utc::now())
 }
 
-/// Scripted upstream. Each call pops the next queued outcome, so a test can
-/// stage "first account fails, second succeeds" for the failover assertions.
-pub(crate) struct FakeProvider {
+/// A planner that always points at one fixed test origin.
+///
+/// It records what the dispatcher handed over — the Gemini dialect carries its
+/// model and its streaming flag in the URL and neither in the body, and the
+/// tenant credential rides on headers the kernel is supposed to consume, none
+/// of which is observable anywhere else.
+pub(crate) struct FakePlanner {
     pub(crate) name: &'static str,
-    pub(crate) outcomes: Mutex<Vec<Result<ProviderResponse, ProviderError>>>,
-    pub(crate) stream_chunks: Mutex<Vec<StreamChunk>>,
-    pub(crate) stream_headers: Mutex<http::HeaderMap>,
-    pub(crate) calls: AtomicUsize,
     pub(crate) seen_auth_ids: Mutex<Vec<String>>,
-    /// Every request as the dispatcher handed it over. The Gemini dialect
-    /// carries its model and its streaming flag in the URL and neither in the
-    /// body, and the tenant credential rides on headers the kernel is supposed
-    /// to consume — none of which is observable anywhere else.
     pub(crate) seen_requests: Mutex<Vec<ProviderRequest>>,
+    /// When set, `plan` fails instead of producing a plan — a broken account.
+    pub(crate) plan_fails: Mutex<bool>,
 }
 
-impl FakeProvider {
+impl FakePlanner {
     pub(crate) fn new(name: &'static str) -> Arc<Self> {
         Arc::new(Self {
             name,
-            outcomes: Mutex::new(Vec::new()),
-            stream_chunks: Mutex::new(Vec::new()),
-            stream_headers: Mutex::new(http::HeaderMap::new()),
-            calls: AtomicUsize::new(0),
             seen_auth_ids: Mutex::new(Vec::new()),
             seen_requests: Mutex::new(Vec::new()),
+            plan_fails: Mutex::new(false),
         })
     }
 
-    pub(crate) fn queue(self: &Arc<Self>, outcome: Result<ProviderResponse, ProviderError>) {
-        self.outcomes.lock().push(outcome);
-    }
-
     pub(crate) fn call_count(&self) -> usize {
-        self.calls.load(Ordering::SeqCst)
+        self.seen_requests.lock().len()
     }
 
     /// `(model, stream)` per call, which is what most routing assertions want.
@@ -108,7 +99,7 @@ impl FakeProvider {
             .collect()
     }
 
-    /// The single request this provider was handed. Panics if it was not
+    /// The single request this planner was handed. Panics if it was not
     /// called exactly once, so a test cannot silently assert against the
     /// wrong attempt.
     pub(crate) fn only_request(&self) -> ProviderRequest {
@@ -118,89 +109,192 @@ impl FakeProvider {
     }
 }
 
-/// A 200 response carrying the given token counts.
-pub(crate) fn ok_response(input: i64, output: i64) -> ProviderResponse {
-    ProviderResponse {
-        status: 200,
-        headers: http::HeaderMap::new(),
-        body: bytes::Bytes::from_static(br#"{"ok":true}"#),
-        usage: Some(UsageRecord {
-            model: "test-model".to_owned(),
-            provider: "openai".to_owned(),
-            input_tokens: Some(input),
-            output_tokens: Some(output),
-            cached_tokens: None,
-            reasoning_tokens: None,
-        }),
-    }
-}
-
-/// A 200 response with no usage envelope, driving the fallback / strict paths.
-pub(crate) fn ok_response_without_usage() -> ProviderResponse {
-    ProviderResponse {
-        status: 200,
-        headers: http::HeaderMap::new(),
-        body: bytes::Bytes::from_static(br#"{"ok":true}"#),
-        usage: None,
-    }
-}
+/// The origin every [`FakePlanner`] points at. Nothing resolves it — the fake
+/// transport answers before DNS would.
+pub(crate) const FAKE_UPSTREAM: &str = "https://upstream.test";
 
 #[async_trait]
-impl Provider for FakeProvider {
+impl RoutePlanner for FakePlanner {
     fn name(&self) -> &'static str {
         self.name
     }
 
-    async fn execute(
+    async fn plan(
         &self,
         auth: &AuthRecord,
-        req: ProviderRequest,
-    ) -> Result<ProviderResponse, ProviderError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+        req: &ProviderRequest,
+    ) -> Result<RoutePlan, ProviderError> {
         self.seen_auth_ids.lock().push(auth.id.clone());
-        self.seen_requests.lock().push(req);
-        let mut outcomes = self.outcomes.lock();
-        if outcomes.is_empty() {
-            return Ok(ok_response(10, 20));
+        self.seen_requests.lock().push(req.clone());
+        if *self.plan_fails.lock() {
+            return Err(ProviderError::Credential("planner refused".to_owned()));
         }
-        outcomes.remove(0)
+        Ok(RoutePlan {
+            provider: self.name,
+            endpoint: url::Url::parse(&format!("{FAKE_UPSTREAM}/v1/chat/completions"))
+                .expect("a valid endpoint"),
+            credential: Credential::Bearer("test-token".to_owned()),
+            headers: http::HeaderMap::new(),
+            body: None,
+            timeouts: RelayTimeouts::default(),
+            dialect: match self.name {
+                "claude" => UpstreamDialect::AnthropicMessages,
+                "gemini" | "vertex" => UpstreamDialect::GoogleGenerateContent,
+                _ => UpstreamDialect::OpenAiChat,
+            },
+        })
     }
 
-    async fn execute_stream(
+    async fn plan_count_tokens(
         &self,
         auth: &AuthRecord,
-        req: ProviderRequest,
-    ) -> Result<StreamResponse, ProviderError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.seen_auth_ids.lock().push(auth.id.clone());
-        self.seen_requests.lock().push(req);
-        {
-            let mut outcomes = self.outcomes.lock();
-            if !outcomes.is_empty()
-                && let Err(err) = outcomes.remove(0)
-            {
-                return Err(err);
-            }
-        }
-        let chunks = self.stream_chunks.lock().clone();
-        let headers = self.stream_headers.lock().clone();
-        Ok(StreamResponse {
-            status: 200,
-            headers,
-            chunks: Box::pin(futures_util::stream::iter(chunks)),
-        })
+        req: &ProviderRequest,
+    ) -> Result<RoutePlan, ProviderError> {
+        let mut plan = self.plan(auth, req).await?;
+        plan.endpoint = url::Url::parse(&format!("{FAKE_UPSTREAM}/v1/messages/count_tokens"))
+            .expect("a valid endpoint");
+        Ok(plan)
     }
 
     async fn refresh(&self, auth: &AuthRecord) -> Result<AuthRecord, ProviderError> {
         Ok(auth.clone())
     }
+}
 
-    async fn count_tokens(
-        &self,
-        _auth: &AuthRecord,
-        _req: ProviderRequest,
-    ) -> Result<i64, ProviderError> {
-        Ok(42)
+/// One canned upstream answer.
+pub(crate) struct CannedResponse {
+    pub(crate) status: u16,
+    pub(crate) headers: http::HeaderMap,
+    /// Frames, in order. A single-element vec is the non-streaming shape.
+    pub(crate) frames: Vec<bytes::Bytes>,
+}
+
+impl CannedResponse {
+    /// A 200 whose body carries an OpenAI usage envelope, so the *real*
+    /// side-band probe extracts the counts exactly as it would in production.
+    pub(crate) fn ok(input: i64, output: i64) -> Self {
+        Self {
+            status: 200,
+            headers: http::HeaderMap::new(),
+            frames: vec![bytes::Bytes::from(format!(
+                r#"{{"ok":true,"usage":{{"prompt_tokens":{input},"completion_tokens":{output}}}}}"#
+            ))],
+        }
+    }
+
+    /// A 200 with no usage envelope, driving the fallback / strict paths.
+    pub(crate) fn ok_without_usage() -> Self {
+        Self {
+            status: 200,
+            headers: http::HeaderMap::new(),
+            frames: vec![bytes::Bytes::from_static(br#"{"ok":true}"#)],
+        }
+    }
+
+    /// A non-2xx the upstream *answered* with — still a response, headers and
+    /// all.
+    pub(crate) fn status(status: u16) -> Self {
+        Self {
+            status,
+            headers: http::HeaderMap::new(),
+            frames: vec![bytes::Bytes::from_static(br#"{"error":"upstream"}"#)],
+        }
+    }
+
+    pub(crate) fn sse(frames: &[&'static str]) -> Self {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/event-stream"),
+        );
+        Self {
+            status: 200,
+            headers,
+            frames: frames
+                .iter()
+                .map(|f| bytes::Bytes::from_static(f.as_bytes()))
+                .collect(),
+        }
+    }
+}
+
+/// A scripted [`Transport`], so dispatch tests drive the **real**
+/// [`RelayEngine`] — probe guard, frame forwarding, idle watchdog and all —
+/// without a socket.
+#[derive(Default)]
+pub(crate) struct FakeTransport {
+    pub(crate) outcomes: Mutex<Vec<Result<CannedResponse, String>>>,
+    pub(crate) calls: AtomicUsize,
+    /// Every outbound request, for header and URL assertions.
+    pub(crate) seen: Mutex<Vec<(http::Uri, http::HeaderMap)>>,
+}
+
+impl FakeTransport {
+    pub(crate) fn shared() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// The engine takes ownership of its transport, so the shared handle is
+    /// wrapped in a local newtype (the orphan rule forbids implementing
+    /// `Transport` for `Arc<T>` directly).
+    pub(crate) fn wired(self: &Arc<Self>) -> WiredTransport {
+        WiredTransport(Arc::clone(self))
+    }
+
+    /// Queues one answer. Calls beyond the queue get a default 200 with usage.
+    pub(crate) fn queue(self: &Arc<Self>, outcome: Result<CannedResponse, String>) {
+        self.outcomes.lock().push(outcome);
+    }
+
+    pub(crate) fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    /// The headers of the single outbound request. Panics unless there was
+    /// exactly one.
+    pub(crate) fn only_headers(&self) -> http::HeaderMap {
+        let seen = self.seen.lock();
+        assert_eq!(seen.len(), 1, "expected exactly one upstream request");
+        seen[0].1.clone()
+    }
+}
+
+/// [`FakeTransport`] as the engine's owned transport.
+pub(crate) struct WiredTransport(Arc<FakeTransport>);
+
+#[async_trait]
+impl Transport for WiredTransport {
+    async fn send(&self, req: UpstreamRequest) -> Result<UpstreamHead, RelayTransportError> {
+        let this = &self.0;
+        this.calls.fetch_add(1, Ordering::SeqCst);
+        this.seen.lock().push((
+            req.url.as_str().parse().expect("a valid uri"),
+            req.headers.clone(),
+        ));
+        let outcome = {
+            let mut outcomes = this.outcomes.lock();
+            if outcomes.is_empty() {
+                Ok(CannedResponse::ok(10, 20))
+            } else {
+                outcomes.remove(0)
+            }
+        };
+        let canned = match outcome {
+            Ok(canned) => canned,
+            // The transport could not reach an upstream at all.
+            Err(_) => return Err(RelayTransportError::BadTarget("fake transport".to_owned())),
+        };
+        let frames = futures_util::stream::iter(
+            canned
+                .frames
+                .into_iter()
+                .map(|f| Ok::<_, RelayError>(http_body::Frame::data(f))),
+        );
+        Ok(UpstreamHead {
+            status: http::StatusCode::from_u16(canned.status).expect("a valid status"),
+            headers: canned.headers,
+            body: http_body_util::BodyExt::boxed(http_body_util::StreamBody::new(frames)),
+        })
     }
 }
 

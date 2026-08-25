@@ -22,7 +22,9 @@ gw-relay.workspace = true
 axum = { workspace = true, features = ["http1", "http2", "json", "query", "form", "matched-path", "original-uri", "tokio", "macros", "tracing"] }
 tower = { workspace = true, features = ["util"] }
 http.workspace = true
+http-body.workspace = true
 http-body-util.workspace = true
+url.workspace = true
 bytes.workspace = true
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true, features = ["std"] }

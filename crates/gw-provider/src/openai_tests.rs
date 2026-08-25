@@ -1,10 +1,11 @@
 //! Unit tests for [`crate::openai`].
 //!
-//! These lock in the executor's wiring: endpoint shape, credential precedence
-//! and the outbound header contract.
+//! These lock in the planner's wiring: endpoint shape, credential precedence
+//! and the provider-owned headers. What is *not* here any more is header
+//! forwarding — the relay owns that denylist now, and asserting it twice is
+//! how two denylists drift apart.
 
 use super::*;
-use crate::types::is_skipped_proxy_header;
 use bytes::Bytes;
 use gw_authcore::AuthRecord;
 use serde_json::json;
@@ -131,18 +132,12 @@ fn both_base_url_spellings_are_accepted_with_underscore_winning() {
     assert_eq!(base, "https://b.example.com");
 }
 
-// --- outbound request ---------------------------------------------------------
+// --- route plan ---------------------------------------------------------------
 
-fn built(
-    provider: &OpenAiCompatibleProvider,
-    req: &ProviderRequest,
-    stream: bool,
-) -> reqwest::Request {
+fn planned(provider: &OpenAiCompatibleProvider, req: &ProviderRequest) -> RoutePlan {
     provider
-        .build_request(req, stream, "sk-live", provider.base_url())
-        .expect("request must build")
-        .build()
-        .expect("request must be valid")
+        .plan_request(req, "sk-live", provider.base_url())
+        .expect("the plan must build")
 }
 
 #[test]
@@ -152,19 +147,17 @@ fn the_outbound_request_carries_the_bearer_token_and_json_defaults() {
         payload: Bytes::from_static(br#"{"model":"gpt-4o"}"#),
         ..Default::default()
     };
-    let request = built(&provider, &req, false);
+    let plan = planned(&provider, &req);
 
-    assert_eq!(request.method(), http::Method::POST);
     assert_eq!(
-        request.url().as_str(),
+        plan.endpoint.as_str(),
         "https://api.example.com/v1/chat/completions"
     );
-    assert_eq!(request.headers()[AUTHORIZATION], "Bearer sk-live");
-    assert_eq!(request.headers()[CONTENT_TYPE], "application/json");
-    assert_eq!(request.headers()[ACCEPT], "application/json");
-    assert_eq!(
-        request.body().and_then(reqwest::Body::as_bytes),
-        Some(req.payload.as_ref()),
+    assert!(matches!(&plan.credential, gw_relay::Credential::Bearer(t) if t == "sk-live"));
+    assert_eq!(plan.headers[CONTENT_TYPE], "application/json");
+    assert_eq!(plan.headers[ACCEPT], "application/json");
+    assert!(
+        plan.body.is_none(),
         "a non-streaming payload must go out untouched"
     );
 }
@@ -177,34 +170,23 @@ fn streaming_requests_ask_for_sse_and_force_include_usage() {
         stream: true,
         ..Default::default()
     };
-    let request = built(&provider, &req, true);
+    let plan = planned(&provider, &req);
 
-    assert_eq!(request.headers()[ACCEPT], "text/event-stream");
-    assert_declares_the_spliced_length(&request, &req.payload);
+    assert_eq!(plan.headers[ACCEPT], "text/event-stream");
+    assert_carries_the_spliced_body(&plan, &req.payload);
 }
 
-/// 定点插入之后 body 是**两帧零拷贝流**（前缀 + 原 body 的切片），不再是一块能
-/// 直接读回来的缓冲区 —— 那正是省掉那次全量拷贝的代价。上游真正看到的长度契约
-/// 是网关显式声明的 `content-length`，所以 executor 这一层就断言它。
-///
 /// 插入段的内容与幂等性由 `common_tests` 的全量矩阵覆盖，这里只证明
-/// **executor 确实接上了那条路，并且把长度算对了**。
-fn assert_declares_the_spliced_length(request: &reqwest::Request, payload: &Bytes) {
-    let declared: usize = request.headers()[http::header::CONTENT_LENGTH]
-        .to_str()
-        .expect("content-length must be ASCII")
-        .parse()
-        .expect("content-length must be a number");
-    assert!(
-        declared > payload.len(),
-        "content-length 没有把插入的那一段算进去"
-    );
+/// **planner 确实接上了那条路，并且把两段都带上了**。
+fn assert_carries_the_spliced_body(plan: &RoutePlan, payload: &Bytes) {
+    let body = plan.body.as_ref().expect("a streaming plan must rewrite");
+    assert!(body.len() > payload.len(), "插入的那一段没算进来");
     assert_eq!(
-        declared,
+        body.len(),
         crate::common::ensure_include_usage(payload, Surface::OpenAiCompletions)
             .expect("fixture must be spliceable")
             .len(),
-        "声明的长度必须等于两段之和，否则上游会读短或读挂"
+        "长度必须等于两段之和，否则上游会读短或读挂"
     );
 }
 
@@ -218,54 +200,33 @@ fn a_body_that_does_not_declare_stream_is_never_rewritten() {
         stream: true,
         ..Default::default()
     };
-    let request = built(&provider, &req, true);
-    assert_eq!(
-        request.body().and_then(reqwest::Body::as_bytes),
-        Some(req.payload.as_ref())
+    assert!(
+        planned(&provider, &req).body.is_none(),
+        "a body that does not declare `stream` must not be rewritten"
     );
 }
 
 #[test]
-fn inbound_headers_are_forwarded_except_the_denied_ones() {
+fn the_plan_carries_no_credential_header_of_its_own() {
+    // The credential travels as `RoutePlan::credential` so the relay can strip
+    // the client's carrier and mark the replacement sensitive. A provider that
+    // also stamped a header would defeat both.
     let provider = provider();
     let mut headers = http::HeaderMap::new();
-    headers.insert("x-custom", HeaderValue::from_static("keep"));
-    headers.insert("openai-organization", HeaderValue::from_static("org-1"));
-    headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer inbound"));
-    headers.insert(
-        http::header::HOST,
-        HeaderValue::from_static("gateway.local"),
-    );
-    headers.insert(
-        http::header::TRANSFER_ENCODING,
-        HeaderValue::from_static("chunked"),
-    );
-
+    headers.insert("authorization", HeaderValue::from_static("Bearer inbound"));
     let req = ProviderRequest {
-        headers: headers.clone(),
+        headers,
         ..Default::default()
     };
-    let request = built(&provider, &req, false);
+    let plan = planned(&provider, &req);
 
-    assert_eq!(request.headers()["x-custom"], "keep");
-    assert_eq!(request.headers()["openai-organization"], "org-1");
-    assert_eq!(
-        request.headers()[AUTHORIZATION],
-        "Bearer sk-live",
-        "the inbound Authorization must be replaced, never forwarded"
-    );
-    for denied in headers
-        .keys()
-        .filter(|k| is_skipped_proxy_header(k.as_str()))
-    {
-        if denied == AUTHORIZATION {
-            continue;
-        }
+    for carrier in ["authorization", "x-api-key", "x-goog-api-key"] {
         assert!(
-            !request.headers().contains_key(denied),
-            "{denied} must not reach the upstream"
+            !plan.headers.contains_key(carrier),
+            "{carrier} must not be planned as a plain header"
         );
     }
+    assert!(matches!(&plan.credential, gw_relay::Credential::Bearer(t) if t == "sk-live"));
 }
 
 #[test]
@@ -278,29 +239,31 @@ fn an_inbound_accept_header_survives_on_non_streaming_requests_only() {
         ..Default::default()
     };
 
-    assert_eq!(
-        built(&provider, &req, false).headers()[ACCEPT],
-        "application/x-ndjson"
+    assert!(
+        !planned(&provider, &req).headers.contains_key(ACCEPT),
+        "an inbound Accept is left alone, so the relay forwards it verbatim"
     );
+
+    let streaming = ProviderRequest {
+        stream: true,
+        ..req
+    };
     assert_eq!(
-        built(&provider, &req, true).headers()[ACCEPT],
+        planned(&provider, &streaming).headers[ACCEPT],
         "text/event-stream",
         "a stream must override whatever the client asked to accept"
     );
 }
 
 #[test]
-fn a_credential_that_cannot_be_encoded_as_a_header_is_rejected() {
+fn a_blank_credential_is_refused_before_anything_is_planned() {
     let provider = provider();
-    let err = provider
-        .build_request(
-            &ProviderRequest::default(),
-            false,
-            "bad\nkey",
-            provider.base_url(),
-        )
-        .expect_err("a newline in a credential must not reach the wire");
-    assert!(matches!(err, ProviderError::Credential(_)), "{err:?}");
+    for blank in ["", "   "] {
+        let err = provider
+            .plan_request(&ProviderRequest::default(), blank, provider.base_url())
+            .expect_err("a keyless account must not produce a plan");
+        assert!(matches!(err, ProviderError::Credential(_)), "{err:?}");
+    }
 }
 
 // --- trait surface ------------------------------------------------------------
@@ -332,25 +295,11 @@ async fn count_tokens_refuses_rather_than_fabricating_a_number() {
             ..Default::default()
         };
         assert!(
-            provider.count_tokens(&bare_auth(), req).await.is_err(),
+            provider
+                .plan_count_tokens(&bare_auth(), &req)
+                .await
+                .is_err(),
             "{len} bytes produced a fabricated count"
         );
     }
-}
-
-
-/// 大小写与两侧空白都不该改变「这个头该不该转发」的判定。
-///
-/// 守护的 bug：改回 `to_ascii_lowercase()`（每头一次分配），或者改成
-/// 只认小写、把 `Authorization` 漏出去打到上游。
-#[test]
-fn hop_by_hop_header_names_match_without_regard_to_case() {
-    for name in ["Authorization", "AUTHORIZATION", " authorization ", "Host", "content-length"] {
-        assert!(
-            is_skipped_proxy_header(name),
-            "{name} must stay on the denylist"
-        );
-    }
-    assert!(!is_skipped_proxy_header("x-custom"));
-    assert!(!is_skipped_proxy_header("openai-organization"));
 }

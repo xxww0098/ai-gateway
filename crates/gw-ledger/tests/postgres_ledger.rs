@@ -8,7 +8,10 @@
 mod common;
 
 use common::{FAULT_PREFIX, Fixture, Rng};
-use gw_ledger::{LedgerError, shortfall_resolve_reference};
+use gw_ledger::{
+    Admission, BillingOperationId, LedgerError, NewOperation, OperationConflict, OperationState,
+    ReleaseOnce, SettleOnce, shortfall_resolve_reference,
+};
 
 const EPSILON: f64 = 1e-9;
 
@@ -569,6 +572,318 @@ async fn balance_integrity_ignores_audit_only_rows() {
         0,
         "hold/release rows must not move the recomputed balance"
     );
+
+    fx.cleanup().await;
+}
+
+// =================================================== billing_operations (SM)
+
+/// Builds a fresh operation for `user`, reserving `amount`.
+fn operation_for(user: i64, amount: f64, fingerprint: &str) -> NewOperation {
+    NewOperation {
+        operation_id: BillingOperationId::mint(),
+        user_id: user,
+        reserved_amount: amount,
+        admitted_liability: amount,
+        request_fingerprint: fingerprint.to_owned(),
+        client_trace_id: "trace-the-client-chose".to_owned(),
+    }
+}
+
+/// The headline invariant, against the real conditional `UPDATE`: settling one
+/// operation a hundred times moves the balance exactly once.
+///
+/// The in-memory twin of this lives in `src/operation/tests.rs`; both pin the
+/// same property so the SQL and the pure decision cannot drift apart.
+#[tokio::test]
+#[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
+async fn settling_one_operation_a_hundred_times_debits_the_balance_once() {
+    let mut fx = Fixture::postgres_only().await;
+    let user = fx.seed_user(100.0).await;
+    let op = operation_for(user, 10.0, "fingerprint");
+
+    assert_eq!(
+        fx.ledger.begin_operation(&op).await.expect("begin"),
+        Admission::Created
+    );
+
+    let mut debited = 0;
+    for _ in 0..100 {
+        match fx
+            .ledger
+            .settle_once(&op.operation_id, user, 4.0)
+            .await
+            .expect("settle_once")
+        {
+            SettleOnce::Debited(outcome) => {
+                debited += 1;
+                assert!(approx(outcome.debited, 4.0));
+            }
+            SettleOnce::AlreadyTerminal(state) => assert_eq!(state, OperationState::Settled),
+        }
+    }
+
+    assert_eq!(debited, 1, "more than one settle moved money");
+    assert!(
+        approx(fx.balance(user).await, 96.0),
+        "balance reflects exactly one 4.0 debit"
+    );
+
+    let record = fx
+        .ledger
+        .operation(&op.operation_id)
+        .await
+        .expect("read")
+        .expect("row exists");
+    assert_eq!(record.state, OperationState::Settled);
+
+    // One settle row, not a hundred.
+    let rows = fx.logs_for(user, op.operation_id.as_str()).await;
+    assert_eq!(rows.len(), 1, "one terminal settle wrote one journal row");
+
+    fx.cleanup().await;
+}
+
+/// Two settles racing on one operation: the row lock the conditional `UPDATE`
+/// takes is what makes exactly one of them the debiter.
+#[tokio::test]
+#[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
+async fn concurrent_settles_of_one_operation_debit_once() {
+    let mut fx = Fixture::postgres_only().await;
+    let user = fx.seed_user(100.0).await;
+    let op = operation_for(user, 10.0, "fingerprint");
+    fx.ledger.begin_operation(&op).await.expect("begin");
+
+    let gate = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let ledger = fx.ledger.clone();
+            let id = op.operation_id.clone();
+            let gate = std::sync::Arc::clone(&gate);
+            tokio::spawn(async move {
+                gate.wait().await;
+                matches!(
+                    ledger.settle_once(&id, user, 7.0).await.expect("settle"),
+                    SettleOnce::Debited(_)
+                )
+            })
+        })
+        .collect();
+
+    let mut winners = 0;
+    for handle in handles {
+        if handle.await.expect("task") {
+            winners += 1;
+        }
+    }
+    assert_eq!(winners, 1, "both racers debited the same operation");
+    assert!(approx(fx.balance(user).await, 93.0));
+
+    fx.cleanup().await;
+}
+
+/// Re-holding an operation id with different money — or for a different
+/// request — is a conflict, and leaves the stored row untouched.
+#[tokio::test]
+#[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
+async fn re_holding_an_operation_id_with_different_facts_conflicts() {
+    let mut fx = Fixture::postgres_only().await;
+    let user = fx.seed_user(100.0).await;
+    let op = operation_for(user, 10.0, "fingerprint-a");
+    fx.ledger.begin_operation(&op).await.expect("begin");
+
+    let cases = [
+        (
+            NewOperation {
+                reserved_amount: op.reserved_amount + 1.0,
+                admitted_liability: op.admitted_liability + 1.0,
+                ..op.clone()
+            },
+            OperationConflict::Amount,
+        ),
+        (
+            NewOperation {
+                request_fingerprint: "fingerprint-b".to_owned(),
+                ..op.clone()
+            },
+            OperationConflict::Fingerprint,
+        ),
+        (
+            NewOperation {
+                user_id: user + 1,
+                ..op.clone()
+            },
+            OperationConflict::Tenant,
+        ),
+    ];
+    for (candidate, expected) in cases {
+        assert_eq!(
+            fx.ledger.begin_operation(&candidate).await.expect("begin"),
+            Admission::Conflict(expected)
+        );
+    }
+
+    // Nothing was overwritten by any of the refused re-holds.
+    let record = fx
+        .ledger
+        .operation(&op.operation_id)
+        .await
+        .expect("read")
+        .expect("row exists");
+    assert_eq!(record.user_id, user);
+    assert!(approx(record.reserved_amount, 10.0));
+    assert_eq!(record.request_fingerprint, "fingerprint-a");
+    assert_eq!(record.state, OperationState::Held);
+
+    // The identical hold, by contrast, resumes.
+    assert_eq!(
+        fx.ledger.begin_operation(&op).await.expect("begin"),
+        Admission::Resumed
+    );
+
+    fx.cleanup().await;
+}
+
+/// Prepaid reservations record the admitted liability itself, not a smaller
+/// floor: what was checked against the balance is what is reserved.
+#[tokio::test]
+#[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
+async fn a_prepaid_reservation_records_the_admitted_liability() {
+    let mut fx = Fixture::postgres_only().await;
+    let user = fx.seed_user(100.0).await;
+    let mut rng = Rng::new(0x0B11_1146);
+
+    for _ in 0..20 {
+        let amount = rng.f64_range(0.01, 50.0);
+        let op = operation_for(user, amount, "fingerprint");
+        fx.ledger.begin_operation(&op).await.expect("begin");
+        let record = fx
+            .ledger
+            .operation(&op.operation_id)
+            .await
+            .expect("read")
+            .expect("row exists");
+        assert!(
+            approx(record.reserved_amount, record.admitted_liability),
+            "reserved {} != admitted {}",
+            record.reserved_amount,
+            record.admitted_liability
+        );
+    }
+
+    fx.cleanup().await;
+}
+
+/// Release is once, too, and it never touches the balance.
+#[tokio::test]
+#[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
+async fn releasing_one_operation_repeatedly_never_moves_money() {
+    let mut fx = Fixture::postgres_only().await;
+    let user = fx.seed_user(100.0).await;
+    let op = operation_for(user, 10.0, "fingerprint");
+    fx.ledger.begin_operation(&op).await.expect("begin");
+
+    assert_eq!(
+        fx.ledger
+            .release_once(&op.operation_id, user)
+            .await
+            .expect("release"),
+        ReleaseOnce::Released
+    );
+    for _ in 0..20 {
+        assert_eq!(
+            fx.ledger
+                .release_once(&op.operation_id, user)
+                .await
+                .expect("release"),
+            ReleaseOnce::AlreadyTerminal(OperationState::Released)
+        );
+    }
+    // And a settle afterwards must not resurrect the charge.
+    assert!(matches!(
+        fx.ledger
+            .settle_once(&op.operation_id, user, 9.0)
+            .await
+            .expect("settle"),
+        SettleOnce::AlreadyTerminal(OperationState::Released)
+    ));
+    assert!(approx(fx.balance(user).await, 100.0));
+
+    fx.cleanup().await;
+}
+
+/// Reconciliation reads Postgres. A terminal operation never shows up, however
+/// old it is, and a held one shows up once it is older than the cutoff.
+#[tokio::test]
+#[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
+async fn the_reconcile_scan_reports_only_non_terminal_operations() {
+    let mut fx = Fixture::postgres_only().await;
+    let user = fx.seed_user(100.0).await;
+
+    let held = operation_for(user, 3.0, "still-running");
+    let settled = operation_for(user, 4.0, "already-done");
+    fx.ledger.begin_operation(&held).await.expect("begin");
+    fx.ledger.begin_operation(&settled).await.expect("begin");
+    fx.ledger
+        .settle_once(&settled.operation_id, user, 2.0)
+        .await
+        .expect("settle");
+
+    // Age both rows past the cutoff so the only thing separating them is state.
+    sqlx::query(
+        "UPDATE billing_operations SET created_at = NOW() - interval '2 hours' WHERE user_id = $1",
+    )
+    .bind(user)
+    .execute(&fx.pool)
+    .await
+    .expect("age the rows");
+
+    let found = fx
+        .ledger
+        .scan_non_terminal_operations(std::time::Duration::from_secs(600), 100)
+        .await
+        .expect("scan");
+    let mine: Vec<_> = found.into_iter().filter(|op| op.user_id == user).collect();
+
+    assert_eq!(
+        mine.len(),
+        1,
+        "only the held operation is reconcilable: {mine:?}"
+    );
+    assert_eq!(mine[0].operation_id, held.operation_id);
+    assert!(approx(mine[0].reserved_amount, 3.0));
+    assert!(mine[0].age_seconds >= 3600);
+
+    // A fresh held operation is not yet reconcilable.
+    let fresh = operation_for(user, 1.0, "just-started");
+    fx.ledger.begin_operation(&fresh).await.expect("begin");
+    let found = fx
+        .ledger
+        .scan_non_terminal_operations(std::time::Duration::from_secs(600), 100)
+        .await
+        .expect("scan");
+    assert!(
+        !found.iter().any(|op| op.operation_id == fresh.operation_id),
+        "a live request was reported as orphaned"
+    );
+
+    fx.cleanup().await;
+}
+
+/// Settling an operation that was never held is an error, not a silent debit.
+#[tokio::test]
+#[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
+async fn settling_an_unknown_operation_is_refused() {
+    let mut fx = Fixture::postgres_only().await;
+    let user = fx.seed_user(100.0).await;
+
+    let err = fx
+        .ledger
+        .settle_once(&BillingOperationId::mint(), user, 5.0)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, LedgerError::HoldNotFound), "{err:?}");
+    assert!(approx(fx.balance(user).await, 100.0));
 
     fx.cleanup().await;
 }

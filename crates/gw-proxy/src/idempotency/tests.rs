@@ -9,6 +9,11 @@ use axum::response::IntoResponse;
 use http_body_util::BodyExt;
 
 use super::*;
+
+/// A scope from a literal, for the tests that key on a fixed name.
+fn scope(raw: &str) -> IdempotencyScope {
+    IdempotencyScope::new(raw)
+}
 use crate::testsupport::{FakeCrypto, FakeIdempotencyStore};
 
 fn manager() -> (IdempotencyManager, Arc<FakeIdempotencyStore>) {
@@ -22,8 +27,20 @@ fn manager() -> (IdempotencyManager, Arc<FakeIdempotencyStore>) {
 #[test]
 fn a_request_without_a_client_key_opts_out_entirely() {
     let (manager, _) = manager();
-    assert_eq!(manager.scoped_key(1, "POST", "/v1/messages", ""), "");
-    assert_eq!(manager.scoped_key(1, "POST", "/v1/messages", "   "), "");
+    assert_eq!(
+        manager
+            .scoped_key(1, "POST", "/v1/messages", "")
+            .as_str()
+            .to_owned(),
+        ""
+    );
+    assert_eq!(
+        manager
+            .scoped_key(1, "POST", "/v1/messages", "   ")
+            .as_str()
+            .to_owned(),
+        ""
+    );
 }
 
 #[test]
@@ -31,29 +48,66 @@ fn the_same_client_key_never_collides_across_tenants_methods_or_paths() {
     // Blocker B6: two tenants picking the same value must not replay each
     // other's responses.
     let (manager, _) = manager();
-    let base = manager.scoped_key(1, "POST", "/v1/messages", "k");
-    assert_ne!(base, manager.scoped_key(2, "POST", "/v1/messages", "k"));
-    assert_ne!(base, manager.scoped_key(1, "PUT", "/v1/messages", "k"));
-    assert_ne!(base, manager.scoped_key(1, "POST", "/v1/responses", "k"));
-    assert_eq!(base, manager.scoped_key(1, "POST", "/v1/messages", "k"));
+    let base = manager
+        .scoped_key(1, "POST", "/v1/messages", "k")
+        .as_str()
+        .to_owned();
+    assert_ne!(
+        base,
+        manager
+            .scoped_key(2, "POST", "/v1/messages", "k")
+            .as_str()
+            .to_owned()
+    );
+    assert_ne!(
+        base,
+        manager
+            .scoped_key(1, "PUT", "/v1/messages", "k")
+            .as_str()
+            .to_owned()
+    );
+    assert_ne!(
+        base,
+        manager
+            .scoped_key(1, "POST", "/v1/responses", "k")
+            .as_str()
+            .to_owned()
+    );
+    assert_eq!(
+        base,
+        manager
+            .scoped_key(1, "POST", "/v1/messages", "k")
+            .as_str()
+            .to_owned()
+    );
 }
 
 #[tokio::test]
 async fn an_unseen_key_has_nothing_to_replay() {
     let (manager, _) = manager();
-    assert!(manager.check("fresh").await.expect("check").is_none());
+    assert!(
+        manager
+            .check(&scope("fresh"))
+            .await
+            .expect("check")
+            .is_none()
+    );
 }
 
 #[tokio::test]
 async fn only_the_first_claimant_owns_the_key() {
     let (manager, _) = manager();
-    assert!(manager.claim("k").await.expect("claim"));
+    assert!(manager.claim(&scope("k")).await.expect("claim"));
     assert!(
-        !manager.claim("k").await.expect("claim"),
+        !manager.claim(&scope("k")).await.expect("claim"),
         "a concurrent duplicate must lose the race",
     );
 
-    let sentinel = manager.check("k").await.expect("check").expect("entry");
+    let sentinel = manager
+        .check(&scope("k"))
+        .await
+        .expect("check")
+        .expect("entry");
     assert!(
         sentinel.processing,
         "the loser must be able to tell in-flight from completed",
@@ -63,10 +117,10 @@ async fn only_the_first_claimant_owns_the_key() {
 #[tokio::test]
 async fn storing_the_response_supersedes_the_claim_and_makes_it_replayable() {
     let (manager, _) = manager();
-    manager.claim("k").await.expect("claim");
+    manager.claim(&scope("k")).await.expect("claim");
     manager
         .store(
-            "k",
+            &scope("k"),
             &CachedResponse {
                 status_code: 200,
                 body: br#"{"ok":true}"#.to_vec(),
@@ -77,7 +131,11 @@ async fn storing_the_response_supersedes_the_claim_and_makes_it_replayable() {
         .await
         .expect("store");
 
-    let cached = manager.check("k").await.expect("check").expect("entry");
+    let cached = manager
+        .check(&scope("k"))
+        .await
+        .expect("check")
+        .expect("entry");
     assert!(!cached.processing);
     assert_eq!(cached.request_id, "req-1");
 }
@@ -85,10 +143,10 @@ async fn storing_the_response_supersedes_the_claim_and_makes_it_replayable() {
 #[tokio::test]
 async fn releasing_a_claim_frees_the_key_for_a_retry() {
     let (manager, _) = manager();
-    manager.claim("k").await.expect("claim");
-    manager.release("k").await.expect("release");
+    manager.claim(&scope("k")).await.expect("claim");
+    manager.release(&scope("k")).await.expect("release");
     assert!(
-        manager.claim("k").await.expect("claim"),
+        manager.claim(&scope("k")).await.expect("claim"),
         "a failed request must not lock its key until the sentinel expires",
     );
 }
@@ -96,7 +154,7 @@ async fn releasing_a_claim_frees_the_key_for_a_retry() {
 #[tokio::test]
 async fn entries_are_namespaced_so_they_cannot_collide_with_other_redis_users() {
     let (manager, store) = manager();
-    manager.claim("k").await.expect("claim");
+    manager.claim(&scope("k")).await.expect("claim");
     let keys: Vec<String> = store.entries.lock().keys().cloned().collect();
     assert_eq!(keys.len(), 1);
     assert!(

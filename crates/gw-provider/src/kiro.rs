@@ -7,19 +7,14 @@
 //! payload is forwarded as-is with a Bearer token.
 
 use crate::common::{
-    DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_KIRO, ProviderConfig, attach_body, nested_string,
-    requested_model, resolve_timeout, shared_client, stream_response, string_from_map,
-    usage_stream,
+    PROVIDER_KIRO, ProviderConfig, nested_string, relay_timeouts, resolve_timeout, string_from_map,
 };
-use crate::openai::bearer;
-use crate::types::{
-    Provider, ProviderError, ProviderRequest, ProviderResponse, StreamResponse,
-    copy_outbound_headers,
-};
-use crate::usage::{parse_openai_stream_usage, parse_openai_usage};
+use crate::route::{RoutePlan, RoutePlanner};
+use crate::types::{ProviderError, ProviderRequest};
 use chrono::{SecondsFormat, Utc};
 use gw_authcore::{AuthRecord, AuthStatus};
-use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use gw_relay::{Credential, UpstreamDialect};
+use http::header::{ACCEPT, CONTENT_TYPE};
 use http::{HeaderMap, HeaderValue};
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -59,7 +54,6 @@ pub struct KiroProvider {
     base_url: String,
     access_token: String,
     timeout: Duration,
-    client: reqwest::Client,
 }
 
 impl KiroProvider {
@@ -81,7 +75,6 @@ impl KiroProvider {
             base_url,
             access_token: cfg.api_key.trim().to_owned(),
             timeout: resolve_timeout(timeout_seconds),
-            client: shared_client(),
         })
     }
 
@@ -119,35 +112,46 @@ impl KiroProvider {
         format!("https://oidc.{region}.amazonaws.com/token")
     }
 
-    fn build_request(
+    /// Plans an outbound CodeWhisperer request.
+    ///
+    /// There is no protocol translation here: the payload is forwarded as-is
+    /// under a Bearer token, and the endpoint is the account's base URL itself.
+    fn plan_request(
         &self,
         req: &ProviderRequest,
-        stream: bool,
         access_token: &str,
         base_url: &str,
-    ) -> Result<reqwest::RequestBuilder, ProviderError> {
+    ) -> Result<RoutePlan, ProviderError> {
         if access_token.is_empty() {
             return Err(ProviderError::Credential(
                 "kiro access token is required".to_owned(),
             ));
         }
-        let endpoint = base_url.trim_end_matches('/').to_owned();
+        let endpoint = url::Url::parse(base_url.trim_end_matches('/'))
+            .map_err(|err| ProviderError::Other(anyhow::anyhow!("invalid kiro base_url: {err}")))?;
+
         let mut headers = HeaderMap::new();
-        copy_outbound_headers(&mut headers, &req.headers);
-        if !headers.contains_key(CONTENT_TYPE) {
+        if !req.headers.contains_key(CONTENT_TYPE) {
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         }
-        if stream {
+        if req.stream {
             headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
-        } else if !headers.contains_key(ACCEPT) {
+        } else if !req.headers.contains_key(ACCEPT) {
             headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         }
-        headers.insert(AUTHORIZATION, bearer(access_token)?);
-        let mut builder = attach_body(self.client.post(endpoint).headers(headers), &req.payload, None);
-        if !stream {
-            builder = builder.timeout(self.timeout);
-        }
-        Ok(builder)
+
+        Ok(RoutePlan {
+            provider: PROVIDER_KIRO,
+            endpoint,
+            credential: Credential::Bearer(access_token.to_owned()),
+            headers,
+            body: None,
+            timeouts: relay_timeouts(self.timeout),
+            // Kiro has no cell in the 15-cell matrix; the payload is whatever
+            // the caller sent, so the nearest honest label is the OpenAI chat
+            // shape the `/v1` surfaces speak.
+            dialect: UpstreamDialect::OpenAiChat,
+        })
     }
 
     async fn refresh_oauth_token(
@@ -162,32 +166,18 @@ impl KiroProvider {
                 "kiro token_endpoint must be https"
             )));
         }
-        let response = self
-            .client
-            .post(endpoint)
-            .timeout(self.timeout)
-            .header(ACCEPT, HeaderValue::from_static("application/json"))
-            .json(&serde_json::json!({
+        let payload = crate::oauth::post_json(
+            endpoint,
+            self.timeout,
+            "kiro",
+            &serde_json::json!({
                 "clientId": client_id,
                 "clientSecret": client_secret,
                 "grantType": "refresh_token",
                 "refreshToken": refresh_token,
-            }))
-            .send()
-            .await
-            .map_err(|err| {
-                ProviderError::Other(anyhow::anyhow!("kiro token refresh request failed: {err}"))
-            })?;
-        let status = response.status().as_u16();
-        let payload = response.bytes().await.map_err(|err| {
-            ProviderError::Other(anyhow::anyhow!("reading kiro refresh response: {err}"))
-        })?;
-        if status >= 400 {
-            return Err(ProviderError::Upstream {
-                status,
-                body: String::from_utf8_lossy(&payload).into_owned(),
-            });
-        }
+            }),
+        )
+        .await?;
         serde_json::from_slice(&payload).map_err(|err| {
             ProviderError::Other(anyhow::anyhow!("parsing kiro refresh response: {err}"))
         })
@@ -195,69 +185,18 @@ impl KiroProvider {
 }
 
 #[async_trait::async_trait]
-impl Provider for KiroProvider {
+impl RoutePlanner for KiroProvider {
     fn name(&self) -> &'static str {
         PROVIDER_KIRO
     }
 
-    async fn execute(
+    async fn plan(
         &self,
         auth: &AuthRecord,
-        req: ProviderRequest,
-    ) -> Result<ProviderResponse, ProviderError> {
+        req: &ProviderRequest,
+    ) -> Result<RoutePlan, ProviderError> {
         let (access_token, base_url) = self.resolve_credentials(auth);
-        let model = requested_model(&req);
-        let response = self
-            .build_request(&req, false, &access_token, &base_url)?
-            .send()
-            .await?;
-        let status = response.status().as_u16();
-        let headers = response.headers().clone();
-        let body = response.bytes().await?;
-        if status >= 400 {
-            return Err(ProviderError::Upstream {
-                status,
-                body: String::from_utf8_lossy(&body).into_owned(),
-            });
-        }
-        let usage = parse_openai_usage(&body).map(|t| t.to_record(model, PROVIDER_KIRO));
-        Ok(ProviderResponse {
-            status,
-            headers,
-            body,
-            usage,
-        })
-    }
-
-    async fn execute_stream(
-        &self,
-        auth: &AuthRecord,
-        req: ProviderRequest,
-    ) -> Result<StreamResponse, ProviderError> {
-        let (access_token, base_url) = self.resolve_credentials(auth);
-        let model = requested_model(&req).to_owned();
-        let response = self
-            .build_request(&req, true, &access_token, &base_url)?
-            .send()
-            .await?;
-        let status = response.status().as_u16();
-        if status >= 400 {
-            let body = response.bytes().await.unwrap_or_default();
-            return Err(ProviderError::Upstream {
-                status,
-                body: String::from_utf8_lossy(&body).into_owned(),
-            });
-        }
-        Ok(stream_response(response, move |response, status| {
-            usage_stream(
-                response.bytes_stream(),
-                DEFAULT_STREAM_IDLE_TIMEOUT,
-                model,
-                PROVIDER_KIRO,
-                parse_openai_stream_usage,
-                status,
-            )
-        }))
+        self.plan_request(req, &access_token, &base_url)
     }
 
     async fn refresh(&self, auth: &AuthRecord) -> Result<AuthRecord, ProviderError> {
@@ -293,22 +232,34 @@ impl Provider for KiroProvider {
             _ => Map::new(),
         };
         if !token.access_token.is_empty() {
-            metadata.insert(META_ACCESS.to_owned(), Value::String(token.access_token.clone()));
-            token_data.insert(META_ACCESS.to_owned(), Value::String(token.access_token.clone()));
+            metadata.insert(
+                META_ACCESS.to_owned(),
+                Value::String(token.access_token.clone()),
+            );
+            token_data.insert(
+                META_ACCESS.to_owned(),
+                Value::String(token.access_token.clone()),
+            );
         }
         let refresh_token = if token.refresh_token.is_empty() {
             previous
         } else {
             token.refresh_token
         };
-        metadata.insert(META_REFRESH.to_owned(), Value::String(refresh_token.clone()));
+        metadata.insert(
+            META_REFRESH.to_owned(),
+            Value::String(refresh_token.clone()),
+        );
         token_data.insert(META_REFRESH.to_owned(), Value::String(refresh_token));
         if !token.id_token.is_empty() {
             metadata.insert("id_token".to_owned(), Value::String(token.id_token.clone()));
             token_data.insert("id_token".to_owned(), Value::String(token.id_token));
         }
         if let Some(expires_at) = &expires_at {
-            metadata.insert(META_EXPIRES_AT.to_owned(), Value::String(expires_at.clone()));
+            metadata.insert(
+                META_EXPIRES_AT.to_owned(),
+                Value::String(expires_at.clone()),
+            );
             metadata.insert(META_EXPIRED.to_owned(), Value::String(expires_at.clone()));
         }
         metadata.insert(META_LAST_REFRESH.to_owned(), Value::String(now_rfc3339));
@@ -318,16 +269,6 @@ impl Provider for KiroProvider {
         refreshed.updated_at = now;
         refreshed.last_refreshed_at = Some(now);
         Ok(refreshed)
-    }
-
-    async fn count_tokens(
-        &self,
-        _auth: &AuthRecord,
-        _req: ProviderRequest,
-    ) -> Result<i64, ProviderError> {
-        Err(ProviderError::Other(anyhow::anyhow!(
-            "{PROVIDER_KIRO} upstream exposes no token-counting endpoint"
-        )))
     }
 }
 

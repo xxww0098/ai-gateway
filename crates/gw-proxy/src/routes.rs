@@ -39,10 +39,13 @@ use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use gw_authcore::{AuthRecord, AuthStore};
-use gw_provider::types::{Provider, ProviderError, ProviderRequest};
-use gw_relay::Surface;
+use gw_ledger::UpstreamAttemptId;
+use gw_provider::route::{RoutePlan, RoutePlanner};
+use gw_provider::types::{ProviderError, ProviderRequest};
 use gw_relay::endpoint::spec::RequestSpec;
 use gw_relay::endpoint::upstream::ChannelResolver;
+use gw_relay::engine::{RelayEngine, RelayOptions};
+use gw_relay::{RelayBody, RelayRequest, RelayTransportError, Surface, UpstreamTarget};
 
 use crate::ProxyState;
 use crate::channel::ChannelPool;
@@ -59,7 +62,7 @@ mod stream;
 pub(crate) use routing::{dialect_error, partition_routable, rewrite_model, select_upstreams};
 #[cfg(test)]
 pub(crate) use stream::is_hop_by_hop;
-use stream::{schedule_release, stream_response, unary_response};
+use stream::{Relayed, is_retryable_status, relay_response, schedule_release, usage_probe};
 
 /// How many upstream accounts one client request may burn through.
 /// Bounded so a fully-broken pool fails fast instead of walking every account.
@@ -78,7 +81,13 @@ pub const AUTH_SNAPSHOT_TTL: Duration = Duration::from_secs(5);
 /// Collectively implements the auth manager + the conductor's retry
 /// loop.
 pub struct Dispatcher {
-    providers: Vec<Arc<dyn Provider>>,
+    planners: Vec<Arc<dyn RoutePlanner>>,
+    /// **The only inference HTTP exit in the workspace.**
+    ///
+    /// Behind the trait rather than the concrete engine so a test can inject
+    /// one whose transport is scripted — the engine itself (probe guard, frame
+    /// forwarding, idle watchdog) is then exercised for real.
+    relay: Arc<dyn gw_relay::Relay>,
     auth_store: Arc<dyn AuthStore>,
     /// 按 provider 预分组的可用凭证快照。见 [`AuthSnapshot`]。
     auths: ArcSwap<AuthSnapshot>,
@@ -136,13 +145,14 @@ impl Dispatcher {
     ///
     /// The manager plus the executor registration loop.
     pub fn new(
-        providers: Vec<Arc<dyn Provider>>,
+        planners: Vec<Arc<dyn RoutePlanner>>,
         auth_store: Arc<dyn AuthStore>,
         channels: Arc<ChannelPool>,
         settlement: Arc<Settlement>,
     ) -> Self {
         Self {
-            providers,
+            planners,
+            relay: Arc::new(RelayEngine::new(RelayOptions::default())),
             auth_store,
             auths: ArcSwap::from_pointee(AuthSnapshot::empty()),
             reloading: tokio::sync::Mutex::new(()),
@@ -152,6 +162,14 @@ impl Dispatcher {
             catalog: None,
             resolver: None,
         }
+    }
+
+    /// Swaps in a relay whose transport is scripted. Test-only wiring: the
+    /// production path always takes the default [`RelayEngine`].
+    #[must_use]
+    pub fn with_relay(mut self, relay: Arc<dyn gw_relay::Relay>) -> Self {
+        self.relay = relay;
+        self
     }
 
     /// Hands the same breaker to hold and dispatch.
@@ -198,8 +216,8 @@ impl Dispatcher {
         &self.channels
     }
 
-    fn provider(&self, name: &str) -> Option<&Arc<dyn Provider>> {
-        self.providers.iter().find(|p| p.name() == name)
+    fn planner(&self, name: &str) -> Option<&Arc<dyn RoutePlanner>> {
+        self.planners.iter().find(|p| p.name() == name)
     }
 
     /// Live credentials for one provider, newest state first.
@@ -277,6 +295,13 @@ impl Dispatcher {
 ///
 /// `billing` is `None` for the endpoints [`crate::hold::is_billable`] excludes
 /// (token counting, catalogue reads); those never reserve, never settle.
+///
+/// # One HTTP exit
+///
+/// The provider decides *where* (a [`RoutePlan`]) and `gw_relay::RelayEngine`
+/// does the sending. That is why an upstream 429 keeps its `retry-after` here
+/// and a mid-stream failure reaches the client as a reset rather than as a
+/// clean EOF: there is no second copy of the response path to lose them in.
 async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) -> Response {
     let stream = inbound.stream;
     let billing = inbound.billing.clone();
@@ -321,9 +346,14 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
     let preferred = dispatcher.channels.preferred(user_id, &model);
     let mut tried: Vec<String> = Vec::new();
     let mut last_error: Option<DispatchError> = None;
+    // The newest upstream answer that was *worth another account*. Kept rather
+    // than dropped: if the pool runs out, the client should still receive the
+    // upstream's own response — a 429 with its `retry-after`, a 503 with its
+    // `x-request-id` — instead of a status this gateway made up.
+    let mut fallback: Option<Attempt> = None;
 
     for provider_name in candidates {
-        let Some(provider) = dispatcher.provider(provider_name) else {
+        let Some(planner) = dispatcher.planner(provider_name) else {
             continue;
         };
         let auths = dispatcher.auths_for(provider_name).await;
@@ -343,6 +373,13 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
                 break; // this provider's accounts are exhausted for this request
             };
             let auth = auth.clone();
+            // Names this attempt under the operation it serves, so an upstream
+            // log line joins back to the billing row without a second lookup.
+            // Failover produces several of these per operation; billing settles
+            // once, per operation, never per attempt.
+            let attempt_id = billing
+                .as_ref()
+                .map(|b| UpstreamAttemptId::for_attempt(&b.ctx.operation, &auth.id, tried.len()));
             tried.push(auth.id.clone());
 
             let request = ProviderRequest {
@@ -351,81 +388,148 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
                 // （审计缺陷 #13/#14 —— 一个 900 KB 的请求此前要 memcpy 约 5.4 MB）。
                 payload: body.clone(),
                 stream,
-                metadata: request_metadata(surface, billing.as_ref()),
+                metadata: request_metadata(surface, billing.as_ref(), attempt_id.as_ref()),
                 headers: inbound.headers.clone(),
                 query: inbound.query.clone(),
             };
-            let started = Instant::now();
-
-            if stream {
-                match provider.execute_stream(&auth, request).await {
-                    Ok(upstream) => {
-                        // The connection stood up, so the account is working;
-                        // a mid-stream failure is reported through the usage
-                        // outcome instead.
-                        record_success(state, provider_name, &auth.id, user_id, &model).await;
-                        if let Some(ctx) = inbound.relay.as_mut() {
-                            ctx.advance(Phase::Relaying);
-                        }
-                        return stream_response(
-                            state,
-                            upstream,
-                            billing,
-                            auth.id,
-                            provider_name,
-                            started,
-                        );
-                    }
-                    Err(err) => {
-                        record_failure(state, provider_name, &auth.id).await;
-                        if !is_retryable(&err) {
-                            return finish_error(state, billing.as_ref(), map_error(err));
-                        }
-                        last_error = Some(map_error(err));
-                    }
+            let plan = match planner.plan(&auth, &request).await {
+                Ok(plan) => plan,
+                Err(err) => {
+                    // An unplannable account is a broken account: bench it and
+                    // try the next one rather than failing the request.
+                    record_failure(state, provider_name, &auth.id).await;
+                    last_error = Some(map_error(err));
+                    continue;
                 }
-            } else {
-                match provider.execute(&auth, request).await {
-                    // An error status the provider relayed rather than raised
-                    // is still that account failing: fail over to the next one
-                    // instead of handing the client a 503 another credential
-                    // would have served.
-                    Ok(response) if is_retryable_status(response.status) => {
-                        record_failure(state, provider_name, &auth.id).await;
-                        last_error = Some(DispatchError::Upstream {
-                            status: StatusCode::from_u16(response.status)
-                                .unwrap_or(StatusCode::BAD_GATEWAY),
-                            body: String::from_utf8_lossy(&response.body).into_owned(),
-                        });
-                    }
-                    Ok(response) => {
+            };
+
+            let started = Instant::now();
+            let (probe, handle) = usage_probe(plan.dialect);
+            match dispatcher.send(&plan, &request, probe).await {
+                Ok(response) if is_retryable_status(response.status) => {
+                    // An error status the upstream answered with is still that
+                    // account failing: try another credential. Keep the answer
+                    // itself as the fallback — dropping it is what used to lose
+                    // the `retry-after` on the last attempt.
+                    record_failure(state, provider_name, &auth.id).await;
+                    fallback = Some(Attempt {
+                        response,
+                        handle,
+                        auth_id: auth.id.clone(),
+                        provider: provider_name,
+                        started,
+                    });
+                }
+                Ok(response) => {
+                    if response.status.is_success() {
                         record_success(state, provider_name, &auth.id, user_id, &model).await;
-                        if let Some(ctx) = inbound.relay.as_mut() {
-                            ctx.advance(Phase::Relaying);
-                        }
-                        return unary_response(
-                            state,
-                            response,
-                            billing,
-                            auth.id,
-                            provider_name,
-                            started,
-                        );
-                    }
-                    Err(err) => {
+                    } else {
                         record_failure(state, provider_name, &auth.id).await;
-                        if !is_retryable(&err) {
-                            return finish_error(state, billing.as_ref(), map_error(err));
-                        }
-                        last_error = Some(map_error(err));
                     }
+                    if let Some(ctx) = inbound.relay.as_mut() {
+                        ctx.advance(Phase::Relaying);
+                    }
+                    return relay_response(
+                        state,
+                        Relayed {
+                            response,
+                            handle,
+                            billing,
+                            auth_id: auth.id,
+                            provider: provider_name,
+                            model,
+                            started,
+                        },
+                    );
+                }
+                Err(err) => {
+                    // No response head at all: DNS, TCP, TLS, connect timeout.
+                    // Always worth another account.
+                    record_failure(state, provider_name, &auth.id).await;
+                    last_error = Some(transport_error(err));
                 }
             }
         }
     }
 
+    // The pool is exhausted. If some account did answer — with a status worth
+    // another try, but an answer nonetheless — that answer is what the client
+    // gets, headers intact.
+    if let Some(attempt) = fallback {
+        if let Some(ctx) = inbound.relay.as_mut() {
+            ctx.advance(Phase::Relaying);
+        }
+        return relay_response(
+            state,
+            Relayed {
+                response: attempt.response,
+                handle: attempt.handle,
+                billing,
+                auth_id: attempt.auth_id,
+                provider: attempt.provider,
+                model,
+                started: attempt.started,
+            },
+        );
+    }
+
     let err = last_error.unwrap_or_else(|| DispatchError::NoUpstream(model));
     finish_error(state, billing.as_ref(), err)
+}
+
+/// One upstream answer held aside while the dispatcher tries another account.
+struct Attempt {
+    response: gw_relay::RelayResponse,
+    handle: gw_relay::probe::UsageHandle,
+    auth_id: String,
+    provider: &'static str,
+    started: Instant,
+}
+
+impl Dispatcher {
+    /// Turns a [`RoutePlan`] into the one HTTP request the relay sends.
+    ///
+    /// The inbound headers ride along verbatim — `gw-relay` owns the
+    /// hop-by-hop denylist and the credential swap, so filtering them a second
+    /// time here would give the workspace two denylists to keep in step.
+    /// The plan's own headers are layered on top of them.
+    async fn send(
+        &self,
+        plan: &RoutePlan,
+        req: &ProviderRequest,
+        probe: Box<dyn gw_relay::UsageProbe>,
+    ) -> Result<gw_relay::RelayResponse, RelayTransportError> {
+        let (origin, target) = plan
+            .split()
+            .map_err(|err| RelayTransportError::BadTarget(err.to_string()))?;
+
+        let mut headers = req.headers.clone();
+        for name in plan.headers.keys() {
+            headers.remove(name);
+            for value in plan.headers.get_all(name) {
+                headers.append(name.clone(), value.clone());
+            }
+        }
+
+        let body = plan.body.clone().unwrap_or_else(|| req.payload.clone());
+        self.relay
+            .relay(
+                RelayRequest {
+                    method: axum::http::Method::POST,
+                    target,
+                    headers,
+                    body: RelayBody::Buffered(body),
+                },
+                &UpstreamTarget {
+                    origin,
+                    credential: plan.credential.clone(),
+                    timeouts: plan.timeouts,
+                    dialect: plan.dialect,
+                },
+                Some(probe),
+            )
+            .await
+    }
 }
 
 /// 终止一个还没到上游就被网关拒掉的请求的计费：**释放，不结算**。
@@ -436,23 +540,7 @@ fn finish_billing_failed(state: &ProxyState, billing: Option<&BillingHandle>) {
     schedule_release(state, billing);
 }
 
-/// Whether a failure is worth trying on a different account.
-///
-/// A 4xx other than 429 is the caller's fault and will fail identically
-/// everywhere, so it is surfaced immediately instead of burning the pool.
-fn is_retryable(err: &ProviderError) -> bool {
-    match err {
-        ProviderError::Upstream { status, .. } => is_retryable_status(*status),
-        ProviderError::Credential(_) | ProviderError::Transport(_) => true,
-        ProviderError::Other(_) => false,
-    }
-}
-
-/// Statuses that say "this account, right now" rather than "this request".
-fn is_retryable_status(status: u16) -> bool {
-    status >= 500 || status == 429
-}
-
+/// A planning failure: a broken credential, an unassemblable endpoint.
 fn map_error(err: ProviderError) -> DispatchError {
     match err {
         ProviderError::Upstream { status, body } => DispatchError::Upstream {
@@ -460,6 +548,15 @@ fn map_error(err: ProviderError) -> DispatchError {
             body,
         },
         other => DispatchError::Internal(anyhow::Error::new(other)),
+    }
+}
+
+/// "Never got a response head" — DNS, TCP, TLS, connect timeout, a target that
+/// will not parse. Always a 502: the request itself was fine.
+fn transport_error(err: RelayTransportError) -> DispatchError {
+    DispatchError::Upstream {
+        status: StatusCode::BAD_GATEWAY,
+        body: err.to_string(),
     }
 }
 
@@ -480,15 +577,26 @@ fn map_error(err: ProviderError) -> DispatchError {
 fn request_metadata(
     surface: Surface,
     billing: Option<&BillingHandle>,
+    attempt: Option<&UpstreamAttemptId>,
 ) -> std::collections::HashMap<String, String> {
-    let mut meta = std::collections::HashMap::with_capacity(3);
+    let mut meta = std::collections::HashMap::with_capacity(5);
     meta.insert(
         gw_provider::common::SURFACE_PATH_METADATA_KEY.to_owned(),
         surface.path().to_owned(),
     );
     if let Some(b) = billing {
-        meta.insert("request_id".to_owned(), b.ctx.request_id.clone());
+        meta.insert("request_id".to_owned(), b.ctx.client_trace.to_string());
+        // The money key, so an upstream log line joins back to the billing row.
+        meta.insert(
+            "billing_operation_id".to_owned(),
+            b.ctx.operation.to_string(),
+        );
         meta.insert("user_id".to_owned(), b.ctx.user_id.to_string());
+    }
+    if let Some(attempt) = attempt {
+        // Failover produces several attempts per operation; billing settles
+        // once, per operation, never per attempt.
+        meta.insert("upstream_attempt_id".to_owned(), attempt.to_string());
     }
     meta
 }
@@ -653,6 +761,13 @@ endpoint!(
 /// 收 0，而收敛前网关按那个模型的 LLM 费率收钱。见 [`crate::hold::is_billable`]。
 ///
 /// 它也**不进 dispatch 的重试链**：只挑一个账号，不 failover。
+///
+/// # 上游怎么说，客户端就看到什么
+///
+/// 这是一条**恒等转发**：请求体原样送上去，响应原样送回来。网关不再解析
+/// `{"input_tokens": N}` 再重新拼一个 —— 解析一次就多一个会漏、会改口径的地方，
+/// 而这个信封本来就是 Anthropic 方言入口自己的形状。上游给不出数，客户端就看到
+/// 上游给的那个错误，而不是网关编的一个数字。
 pub async fn count_tokens(State(state): State<ProxyState>, req: Request) -> Response {
     let inbound = match inbound(req, Surface::AnthropicMessages).await {
         Ok(i) => i,
@@ -665,7 +780,7 @@ pub async fn count_tokens(State(state): State<ProxyState>, req: Request) -> Resp
     );
     for candidate in &selection.candidates {
         let name = candidate.as_str();
-        let Some(provider) = state.dispatch.provider(name) else {
+        let Some(planner) = state.dispatch.planner(name) else {
             continue;
         };
         let auths = state.dispatch.auths_for(name).await;
@@ -676,13 +791,29 @@ pub async fn count_tokens(State(state): State<ProxyState>, req: Request) -> Resp
             model: inbound.model.clone(),
             payload: inbound.body.clone(),
             stream: false,
-            metadata: std::collections::HashMap::new(),
+            metadata: request_metadata(Surface::AnthropicMessages, None, None),
             headers: inbound.headers.clone(),
             query: inbound.query.clone(),
         };
-        return match provider.count_tokens(auth, request).await {
-            Ok(count) => axum::Json(serde_json::json!({ "input_tokens": count })).into_response(),
-            Err(err) => map_error(err).into_response(),
+        let plan = match planner.plan_count_tokens(auth, &request).await {
+            Ok(plan) => plan,
+            Err(err) => return map_error(err).into_response(),
+        };
+        let (probe, handle) = usage_probe(plan.dialect);
+        return match state.dispatch.send(&plan, &request, probe).await {
+            Ok(response) => relay_response(
+                &state,
+                Relayed {
+                    response,
+                    handle,
+                    billing: None,
+                    auth_id: auth.id.clone(),
+                    provider: name,
+                    model: inbound.model.clone(),
+                    started: Instant::now(),
+                },
+            ),
+            Err(err) => transport_error(err).into_response(),
         };
     }
     DispatchError::NoUpstream(inbound.model).into_response()

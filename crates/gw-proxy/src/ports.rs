@@ -13,6 +13,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use gw_authcore::Claims;
+use gw_ledger::{BillingOperationId, NewOperation, OperationConflict};
 
 /// Primary-key type used across every entity.
 ///
@@ -44,6 +45,11 @@ pub enum BillingError {
     OutstandingDebt,
     #[error("hold not found")]
     HoldNotFound,
+    /// The server-minted operation id is taken by a *different* hold — a
+    /// different tenant, amount or request, or one that already terminated.
+    /// Never an overwrite: see [`gw_ledger::operation::admit`].
+    #[error("billing operation conflict: {0}")]
+    OperationConflict(#[from] OperationConflict),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -51,39 +57,60 @@ pub enum BillingError {
 // ---------------------------------------------------------------- billing
 
 /// Minimal ledger surface consumed by [`crate::hold`] and [`crate::usage`].
-/// A 1:1 narrowing of `gw_ledger::Ledger`.
+/// A 1:1 narrowing of the operation-level `gw_ledger::Ledger` API.
+///
+/// Every method keys on a [`BillingOperationId`] — the **server-minted** money
+/// key. There is deliberately no overload taking a `&str`: an inbound
+/// `X-Trace-ID` is a [`gw_ledger::ClientTraceId`], and the type system keeps it
+/// out of these arguments.
 #[async_trait]
 pub trait BillingLedger: Send + Sync {
-    /// Reserves `amount` against `user_id` for `request_id`, valid for `ttl`.
-    async fn hold(
+    /// Admits a billing operation: writes the durable `billing_operations`
+    /// row, then takes the reservation.
+    ///
+    /// `redis_ttl` is `Some` on the normal path and `None` when the
+    /// reservation already came from the process-local budget token — the
+    /// durable row is written either way, because it is the operation's
+    /// identity rather than its cache entry.
+    ///
+    /// A floor refusal is [`HoldAdmit::Insufficient`] and must not leave a
+    /// reservation or a `held` row behind; that is what keeps a 402
+    /// `insufficient_balance` from stranding money.
+    async fn admit_operation(
+        &self,
+        operation: &NewOperation,
+        redis_ttl: Option<Duration>,
+    ) -> Result<HoldAdmit, BillingError>;
+
+    /// Debits `min(balance, actual_amount)` for the operation and clears the
+    /// reservation — **exactly once**, however many callers race.
+    ///
+    /// Returns the un-debited shortfall on the call that performed the debit,
+    /// and [`SettleTerminal::AlreadyTerminal`] for every other one. A
+    /// non-positive `actual_amount` still terminates the operation; it just
+    /// debits nothing.
+    async fn settle_once(
         &self,
         user_id: Id,
-        amount: f64,
-        request_id: &str,
-        ttl: Duration,
+        operation: &BillingOperationId,
+        actual_amount: f64,
+    ) -> Result<SettleTerminal, BillingError>;
+
+    /// Terminates the operation without touching the persistent balance —
+    /// also exactly once. Used when the upstream request failed.
+    async fn release_once(
+        &self,
+        user_id: Id,
+        operation: &BillingOperationId,
     ) -> Result<(), BillingError>;
 
-    /// Clears the outstanding hold for `request_id` and debits
-    /// `min(balance, actual_amount)`, returning the un-debited shortfall.
-    /// A non-positive `actual_amount` only clears the hold.
-    async fn settle(
-        &self,
-        user_id: Id,
-        request_id: &str,
-        actual_amount: f64,
-    ) -> Result<f64, BillingError>;
-
-    /// Clears the hold without touching the persistent balance. Used when the
-    /// upstream request failed.
-    async fn release(&self, user_id: Id, request_id: &str) -> Result<(), BillingError>;
-
-    /// Amount currently held for `(user_id, request_id)` without mutating any
-    /// state. `Ok(None)` means "no hold exists"; `Err` means "unknown" and the
+    /// Amount currently reserved for the operation, without mutating any
+    /// state. `Ok(None)` means "no reservation"; `Err` means "unknown" and the
     /// caller must NOT treat it as zero (see [`crate::usage`] fallback path).
     async fn active_hold_amount(
         &self,
         user_id: Id,
-        request_id: &str,
+        operation: &BillingOperationId,
     ) -> Result<Option<f64>, BillingError>;
 
     /// Reports whether the user owns a settle `balance_logs` row with a
@@ -94,35 +121,18 @@ pub trait BillingLedger: Send + Sync {
     /// Available balance (persisted balance minus active holds), used for the
     /// structured 402 body.
     async fn available_balance(&self, user_id: Id) -> Result<f64, BillingError>;
-
-    /// Reserve `amount` only if available balance covers `min_available`.
-    ///
-    /// The reserved score is `amount` (never the floor) so this cannot
-    /// over-hold. A floor refusal is [`HoldAdmit::Insufficient`] and must
-    /// not create a reservation — that is what keeps a 402
-    /// `insufficient_balance` from leaving a Redis hold behind.
-    ///
-    /// Default implementation: one available-balance peek, then [`Self::hold`].
-    /// Production overrides this with a single Lua script so the peek and the
-    /// reservation share one Redis RTT.
-    async fn hold_gated(
-        &self,
-        user_id: Id,
-        amount: f64,
-        min_available: f64,
-        request_id: &str,
-        ttl: Duration,
-    ) -> Result<HoldAdmit, BillingError> {
-        let available = self.available_balance(user_id).await.unwrap_or(0.0);
-        if available < min_available {
-            return Ok(HoldAdmit::Insufficient { available });
-        }
-        self.hold(user_id, amount, request_id, ttl).await?;
-        Ok(HoldAdmit::Reserved)
-    }
 }
 
-/// Outcome of [`BillingLedger::hold_gated`].
+/// What a [`BillingLedger::settle_once`] call actually did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SettleTerminal {
+    /// This call performed the one debit. Carries the un-debited shortfall.
+    Debited { shortfall: f64 },
+    /// The operation had already settled or released. **Nothing was debited.**
+    AlreadyTerminal,
+}
+
+/// Outcome of [`BillingLedger::admit_operation`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HoldAdmit {
     /// The reservation is live (or this request id already had one).
@@ -270,7 +280,12 @@ pub struct UsageLogEntry {
     pub user_id: Id,
     pub api_key_id: Id,
     pub group_id: Option<Id>,
+    /// The client-facing trace id. **Observability**: it is what the tenant
+    /// sees in `X-Trace-ID` and what a support ticket quotes.
     pub request_id: String,
+    /// The server-minted [`BillingOperationId`] as text. **This is the money
+    /// key**, and it is never empty on a billed or settled row.
+    pub event_key: String,
     pub idempotency_key: String,
     pub model: String,
     pub provider: String,
@@ -302,10 +317,18 @@ pub struct BalanceEvent {
 }
 
 /// Everything that must commit atomically for one settled request.
+///
+/// Idempotency is **not** a caller option here. The implementation moves the
+/// operation to a terminal state inside the same transaction as the debit, so
+/// a second commit for the same [`BillingOperationId`] — a retry, a concurrent
+/// reconciler, a duplicated finalizer — reports
+/// [`SettleReceipt::AlreadyTerminal`] and moves no money. There is no flag to
+/// forget to set.
 #[derive(Debug, Clone)]
 pub struct SettlementCommit {
     pub user_id: Id,
-    pub request_id: String,
+    /// The money key. Also written to `usage_logs.event_key`.
+    pub operation: BillingOperationId,
     pub actual_cost: f64,
     /// The row to insert. Its `raw_metadata` already carries any
     /// `billing_fallback` tag; the implementation MUST fold the partial-debit
@@ -315,10 +338,6 @@ pub struct SettlementCommit {
     /// Accumulate the three usage counters on this subscription when the cost
     /// is positive and the row is still active.
     pub subscription_id: Option<Id>,
-    /// Re-check `usage_logs.request_id` INSIDE the transaction and abort with
-    /// [`SettleReceipt::AlreadySettled`] if a row exists. Used by
-    /// [`crate::reconcile`] so an orphaned hold can never be double-charged.
-    pub skip_if_already_logged: bool,
 }
 
 /// Outcome of [`UsageStore::commit_settlement`].
@@ -330,8 +349,8 @@ pub enum SettleReceipt {
         balance_before: f64,
         balance_after: f64,
     },
-    /// `skip_if_already_logged` was set and a `usage_logs` row already existed.
-    AlreadySettled,
+    /// The operation was already settled or released. No debit, no usage row.
+    AlreadyTerminal,
 }
 
 /// Transactional writes owned by the settlement pipeline.
@@ -353,7 +372,7 @@ pub trait UsageStore: Send + Sync {
     async fn insert_balance_event(&self, event: &BalanceEvent) -> anyhow::Result<()>;
 
     /// Releases the Redis reservation after the settle transaction commits.
-    async fn clear_hold(&self, user_id: Id, request_id: &str) -> anyhow::Result<()>;
+    async fn clear_hold(&self, user_id: Id, operation: &BillingOperationId) -> anyhow::Result<()>;
 
     /// 当地今日零点以来、按模型折叠的 token 消耗。供 `GET /v1/usage`。
     async fn model_usage_since(

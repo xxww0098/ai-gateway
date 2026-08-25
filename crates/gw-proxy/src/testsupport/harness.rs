@@ -20,8 +20,8 @@ use crate::ports::{ApiKeyRow, AuthCrypto as _, Id, ModelEntry};
 use crate::routes::Dispatcher;
 use crate::testsupport::{
     FakeAuthStore, FakeCalculator, FakeCatalog, FakeCircuitBreaker, FakeCrypto, FakeDirectory,
-    FakeIdempotencyStore, FakeLedger, FakePolicyStore, FakeProvider, FakeQuotaStore,
-    FakeRateLimiter, FakeUsageStore, RecordingMetrics, auth_record,
+    FakeIdempotencyStore, FakeLedger, FakePlanner, FakePolicyStore, FakeQuotaStore,
+    FakeRateLimiter, FakeTransport, FakeUsageStore, RecordingMetrics, auth_record,
 };
 use crate::usage::Settlement;
 use crate::{AccessProvider, ProxyState};
@@ -40,14 +40,18 @@ pub(crate) struct Harness {
     pub(crate) rate_limiter: Arc<FakeRateLimiter>,
     pub(crate) breaker: Arc<FakeCircuitBreaker>,
     pub(crate) idempotency: Arc<FakeIdempotencyStore>,
-    pub(crate) provider: Arc<FakeProvider>,
+    pub(crate) provider: Arc<FakePlanner>,
+    /// The scripted upstream. It sits under the **real** relay engine, so a
+    /// test that queues a response exercises frame forwarding and the
+    /// side-band usage probe rather than a stand-in for them.
+    pub(crate) transport: Arc<FakeTransport>,
     /// 上游凭证表，用来量化它被加载了多少次（热点 #5）。
     pub(crate) auth_store: Arc<FakeAuthStore>,
     /// The Gemini upstream. Separate from
     /// [`Self::provider`] so a test can tell which dialect actually dispatched.
-    pub(crate) gemini: Arc<FakeProvider>,
+    pub(crate) gemini: Arc<FakePlanner>,
     /// The Anthropic upstream, for the `/v1/messages` dialect.
-    pub(crate) claude: Arc<FakeProvider>,
+    pub(crate) claude: Arc<FakePlanner>,
     pub(crate) catalog: Arc<FakeCatalog>,
     pub(crate) settlement: Arc<Settlement>,
     pub(crate) health: Arc<ChannelHealth>,
@@ -88,9 +92,10 @@ impl Harness {
         let rate_limiter = FakeRateLimiter::allowing();
         let breaker = FakeCircuitBreaker::closed();
         let idempotency = FakeIdempotencyStore::shared();
-        let provider = FakeProvider::new("openai");
-        let claude = FakeProvider::new("claude");
-        let gemini = FakeProvider::new("gemini");
+        let provider = FakePlanner::new("openai");
+        let claude = FakePlanner::new("claude");
+        let gemini = FakePlanner::new("gemini");
+        let transport = FakeTransport::shared();
         let catalog = Arc::new(FakeCatalog::default());
         catalog.models.lock().push(ModelEntry {
             id: "gpt-4o".to_owned(),
@@ -145,7 +150,11 @@ impl Harness {
             settlement.clone(),
         )
         .with_circuit_breaker(breaker.clone())
-        .with_catalog(catalog.clone());
+        .with_catalog(catalog.clone())
+        .with_relay(Arc::new(gw_relay::engine::RelayEngine::with_transport(
+            transport.wired(),
+            gw_relay::engine::RelayOptions::default(),
+        )));
         let dispatch = Arc::new(match resolver {
             Some(resolver) => dispatch.with_channel_resolver(resolver),
             None => dispatch,
@@ -172,6 +181,7 @@ impl Harness {
             breaker,
             idempotency,
             provider,
+            transport,
             auth_store,
             gemini,
             claude,

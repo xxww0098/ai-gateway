@@ -13,13 +13,20 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use gw_ledger::{BillingOperationId, ClientTraceId};
+
 use crate::ports::Id;
 
 /// Immutable billing facts resolved before the upstream call.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SettleCtx {
-    /// Matches the key used by Hold / Settle / Release.
-    pub request_id: String,
+    /// The server-minted money key: Hold / Settle / Release / reconcile /
+    /// `usage_logs.event_key` all use this and nothing else.
+    pub operation: BillingOperationId,
+    /// The inbound `X-Trace-ID` (or a process-local id). **Observability
+    /// only** — it reaches logs, the response header and
+    /// `usage_logs.request_id`, and never a ledger call.
+    pub client_trace: ClientTraceId,
     pub user_id: Id,
     /// Zero when the request authenticated via JWT without an API key.
     pub api_key_id: Id,
@@ -35,6 +42,29 @@ pub struct SettleCtx {
     pub ip_address: String,
     /// Raw client `Idempotency-Key`, recorded on the usage log.
     pub idempotency_key: String,
+}
+
+/// A context with a freshly-minted operation and every other field empty.
+///
+/// Hand-written rather than derived because [`BillingOperationId`] has no
+/// `Default` — an operation id that is not minted is not an operation id, and
+/// a defaulted empty one would be a money key shared by every such value.
+impl Default for SettleCtx {
+    fn default() -> Self {
+        Self {
+            operation: BillingOperationId::mint(),
+            client_trace: ClientTraceId::default(),
+            user_id: 0,
+            api_key_id: 0,
+            group_id: None,
+            rate_mult: 0.0,
+            subscription_id: None,
+            model: String::new(),
+            stream: false,
+            ip_address: String::new(),
+            idempotency_key: String::new(),
+        }
+    }
 }
 
 /// [`SettleCtx`] plus the mutable bookkeeping the finalizer needs.

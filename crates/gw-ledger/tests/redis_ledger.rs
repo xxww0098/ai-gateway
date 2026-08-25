@@ -438,40 +438,6 @@ async fn a_failed_settle_keeps_the_reservation() {
     fx.cleanup().await;
 }
 
-/// Only reservations past the cutoff are reported, with their age and amount
-/// intact, and live ones are left alone.
-#[tokio::test]
-#[ignore = "requires a local Redis and Postgres (set GW_TEST_REDIS_URL, GW_TEST_DATABASE_URL)"]
-async fn a_scan_reports_only_reservations_past_the_cutoff() {
-    let mut fx = Fixture::with_redis(FIVE_MINUTES).await;
-    let user = fx.seed_user(100.0).await;
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_secs() as i64;
-    fx.plant_hold(user, "req-fresh", 5.0, now).await;
-    fx.plant_hold(user, "req-stale", 7.0, now - 3600).await;
-
-    let stale: Vec<_> = fx
-        .ledger
-        .scan_stale_holds(Duration::from_secs(600))
-        .await
-        .expect("scan")
-        .into_iter()
-        // A shared Redis may hold other users' reservations; this test only
-        // makes a claim about its own.
-        .filter(|h| h.user_id == user)
-        .collect();
-
-    assert_eq!(stale.len(), 1, "the fresh hold must be excluded: {stale:?}");
-    assert_eq!(stale[0].request_id, "req-stale");
-    assert!(approx(stale[0].amount, 7.0));
-    assert!(stale[0].age_seconds >= 3500, "{:?}", stale[0]);
-
-    fx.cleanup().await;
-}
-
 /// A settle that debits the balance also releases the reservation, so the
 /// freed headroom is immediately visible to the next request.
 #[tokio::test]

@@ -33,24 +33,30 @@
 // flips the workspace-level deny once the last one is clear.
 #![deny(clippy::todo, clippy::unimplemented)]
 
+mod ids;
 mod integrity;
 mod keys;
 mod ledger;
 pub mod log_type;
-mod reconcile;
+pub mod operation;
+mod operation_store;
 mod scripts;
 mod settlement;
 
 #[cfg(test)]
 mod testsupport;
 
+pub use ids::{BillingOperationId, ClientTraceId, IdempotencyScope, UpstreamAttemptId};
 pub use integrity::usd_to_micro;
 pub use keys::{
     BALANCE_KEY_PREFIX, HOLDS_KEY_PREFIX, HOLDS_TS_KEY_PREFIX, balance_key, holds_key,
     holds_ts_key, shortfall_resolve_reference,
 };
 pub use ledger::{DEFAULT_BALANCE_TTL, DEFAULT_HOLD_TTL, HoldOutcome, Ledger, SettleOutcome};
-pub use reconcile::StaleHold;
+pub use operation::{
+    Admission, HoldError, NewOperation, NonTerminalOperation, OperationConflict, OperationRecord,
+    OperationState, ReleaseOnce, SettleOnce,
+};
 pub use settlement::Settlement;
 
 /// Everything the ledger can fail with.

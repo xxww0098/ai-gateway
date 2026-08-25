@@ -281,16 +281,17 @@ impl Settlement {
         let active_hold = if needs_hold_lookup {
             match self
                 .ledger
-                .active_hold_amount(ctx.user_id, &ctx.request_id)
+                .active_hold_amount(ctx.user_id, &ctx.operation)
                 .await
             {
-                // No hold row is a definite zero, not an unknown.
+                // No reservation is a definite zero, not an unknown.
                 Ok(amount) => Some(amount.unwrap_or(0.0)),
                 Err(err) => {
                     tracing::warn!(
                         event = EVENT_HOLD_LOOKUP_FAILED,
                         user_id = ctx.user_id,
-                        request_id = %ctx.request_id,
+                        operation = %ctx.operation,
+                        trace_id = %ctx.client_trace,
                         %err,
                     );
                     None
@@ -311,8 +312,8 @@ impl Settlement {
 
         match plan {
             SettlementPlan::Release { reason } => {
-                if let Err(err) = self.ledger.release(ctx.user_id, &ctx.request_id).await {
-                    tracing::warn!(user_id = ctx.user_id, request_id = %ctx.request_id, %err,
+                if let Err(err) = self.ledger.release_once(ctx.user_id, &ctx.operation).await {
+                    tracing::warn!(user_id = ctx.user_id, operation = %ctx.operation, %err,
                         "ledger release failed");
                 }
                 let mut entry =
@@ -373,11 +374,10 @@ impl Settlement {
         entry.raw_metadata = settle_annotations(fallback, 0.0);
         let commit = SettlementCommit {
             user_id: ctx.user_id,
-            request_id: ctx.request_id.clone(),
+            operation: ctx.operation.clone(),
             actual_cost: cost,
             entry,
             subscription_id: ctx.subscription_id,
-            skip_if_already_logged: false,
         };
 
         let receipt = match self.store.commit_settlement(&commit).await {
@@ -389,7 +389,7 @@ impl Settlement {
                 // the dead transaction; accumulate no quota.
                 tracing::warn!(
                     user_id = ctx.user_id,
-                    request_id = %ctx.request_id,
+                    operation = %ctx.operation,
                     cost,
                     %err,
                     "settle transaction failed",
@@ -411,21 +411,24 @@ impl Settlement {
             balance_after,
         } = receipt
         else {
-            return; // AlreadySettled: nothing further to do (reconcile path)
+            // AlreadyTerminal: some other caller settled or released this
+            // operation. It moved no money here, so there is nothing to clear,
+            // deduct or announce.
+            return;
         };
         if shortfall > 0.0 {
             tracing::warn!(
                 user_id = ctx.user_id,
-                request_id = %ctx.request_id,
+                operation = %ctx.operation,
                 shortfall_usd = shortfall,
                 "partial debit; shortfall recorded",
             );
         }
 
         // Post-commit, non-transactional side effects.
-        if let Err(err) = self.store.clear_hold(ctx.user_id, &ctx.request_id).await {
-            tracing::warn!(user_id = ctx.user_id, request_id = %ctx.request_id, %err,
-                "clear hold failed; reservation will TTL-expire");
+        if let Err(err) = self.store.clear_hold(ctx.user_id, &ctx.operation).await {
+            tracing::warn!(user_id = ctx.user_id, operation = %ctx.operation, %err,
+                "clear reservation failed; it will TTL-expire");
         }
         if let Some(bts) = &self.budget_tokens {
             bts.deduct_settle(ctx.user_id, cost);
@@ -457,7 +460,9 @@ impl Settlement {
             user_id: ctx.user_id,
             api_key_id: ctx.api_key_id,
             group_id: ctx.group_id,
-            request_id: ctx.request_id.clone(),
+            request_id: ctx.client_trace.as_str().to_owned(),
+            // The money key on the row. Never the empty string it used to be.
+            event_key: ctx.operation.to_string(),
             idempotency_key: ctx.idempotency_key.clone(),
             model: model.to_owned(),
             provider,
@@ -493,7 +498,7 @@ impl Settlement {
                 user_id: ctx.user_id,
                 amount: 0.0,
                 event_type: event.to_owned(),
-                reference: ctx.request_id.clone(),
+                reference: ctx.operation.to_string(),
                 metadata: json!({
                     "user_id": ctx.user_id,
                     "current_balance": after,

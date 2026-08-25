@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use gw_authcore::Claims;
 use gw_ledger::{BillingOperationId, NewOperation, OperationConflict};
+use gw_pricing::PricingQuote;
 
 /// Primary-key type used across every entity.
 ///
@@ -21,16 +22,6 @@ use gw_ledger::{BillingOperationId, NewOperation, OperationConflict};
 /// trait surface does not move when the entity layer does; the two must stay
 /// the same width (`gw_model::Id`).
 pub type Id = i64;
-
-/// Per-column token counts fed into [`PricingCalculator::compute`].
-/// Matches `gw_pricing::TokenUsage`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct TokenUsage {
-    pub input: i64,
-    pub output: i64,
-    pub cached: i64,
-    pub reasoning: i64,
-}
 
 /// Why a ledger operation refused.
 ///
@@ -113,6 +104,19 @@ pub trait BillingLedger: Send + Sync {
         operation: &BillingOperationId,
     ) -> Result<Option<f64>, BillingError>;
 
+    /// 把预留的租约到期时刻往后推一片，返回**没有变化**的预留金额。
+    ///
+    /// 刻意不收金额参数：续租不是第二次准入，「换个金额续租」这种操作
+    /// 不存在。调用方是流式回写包装（[`crate::routes`]），中继引擎不碰它。
+    ///
+    /// 一个没有活预留的操作是 [`BillingError::HoldNotFound`] ——
+    /// 续租绝不凭空造出一笔预留。
+    async fn renew_lease(
+        &self,
+        user_id: Id,
+        operation: &BillingOperationId,
+    ) -> Result<f64, BillingError>;
+
     /// Reports whether the user owns a settle `balance_logs` row with a
     /// positive `metadata.shortfall_usd` that has not been paired with a
     /// `shortfall_resolve:<reference>:<id>` credit.
@@ -144,37 +148,17 @@ pub enum HoldAdmit {
     },
 }
 
-/// Pricing surface consumed by the hold pre-flight and the settlement pipeline.
+/// 计价面：**只有一个方法**，因为计价在一次请求里只发生一次。
 ///
-/// The calculator and the token estimator are merged into one trait because
-/// every production calculator implements both.
+/// Hold 处报一次价，把四列单价与倍率冻进 [`PricingQuote`]，此后估算（预扣）
+/// 与精算（结算）都在那个报价上做。所以这里没有 `estimate` / `compute` ——
+/// 它们在 [`PricingQuote`] 上，而且拿不到价目表缓存，也就无从二次查价。
+///
+/// 这正是「在途请求不会因为管理员改价、或上游回一个别的模型名就换一个价钱
+/// 结算」的类型层面保证。
 pub trait PricingCalculator: Send + Sync {
-    /// Over-approximate USD cost used by Hold.
-    fn estimate(&self, model: &str, stream: bool, rate_mult: f64) -> f64;
-
-    /// Tighter USD upper bound when the client supplied an output cap. A
-    /// non-positive `max_output_tokens` MUST fall back to [`Self::estimate`].
-    fn estimate_with_max_tokens(
-        &self,
-        model: &str,
-        max_output_tokens: i64,
-        stream: bool,
-        rate_mult: f64,
-    ) -> f64;
-
-    /// Reservation priced from the real (approximated) input-token count so a
-    /// large prompt reserves proportional funds.
-    fn estimate_with_tokens(
-        &self,
-        model: &str,
-        input_tokens: i64,
-        max_output_tokens: i64,
-        stream: bool,
-        rate_mult: f64,
-    ) -> f64;
-
-    /// Exact USD cost from per-column token counts, used by Settle.
-    fn compute(&self, model: &str, tokens: TokenUsage, rate_mult: f64) -> f64;
+    /// 冻结 `model`（**请求**里那个模型名）在此刻的四列单价与倍率。
+    fn quote(&self, model: &str, rate_mult: f64) -> PricingQuote;
 }
 
 // ---------------------------------------------------------------- identity
@@ -252,22 +236,48 @@ pub trait TenantDirectory: Send + Sync {
     async fn touch_api_key(&self, api_key_id: Id);
 }
 
-/// Row-locking quota store used by the hold pre-flight.
+/// 订阅配额的**在途预留**，键是 [`BillingOperationId`]。
 ///
-/// The implementation performs a `SELECT ... FOR UPDATE` lock and persists
-/// rotated counters; the *decision* of what to rotate and
-/// whether the quota is exceeded stays in [`crate::hold`] via
-/// [`crate::hold::rotate_counters`] and [`crate::hold::evaluate_quota`].
+/// 与余额预扣同一个精神：**比较必须发生在锁里**。实现方在一个事务里
+/// 锁订阅行 → 应用 [`crate::hold::rotate_counters`] → 用
+/// [`crate::hold::evaluate_quota`] 把「已用 + 在途预留 + 这一笔」和限额比
+/// → 落预留行；超限就整个回滚，一行都不留下。
+///
+/// *决定*（轮转什么、超没超）留在 [`crate::hold`] 的纯函数里，实现方只提供
+/// 那把锁和那份持久化 —— 拿 SQL 再写一遍边界算术是第二份实现。
 #[async_trait]
 pub trait SubscriptionQuotaStore: Send + Sync {
-    /// Locks the subscription row, applies [`crate::hold::rotate_counters`],
-    /// persists it when dirty, and returns the post-rotation snapshot.
-    /// `Ok(None)` for a missing row, treated as permissive.
-    async fn lock_and_rotate(
+    /// 在**一个事务**里锁行、轮转、比限额、落预留。
+    ///
+    /// `amount` 是准入时拿去和余额比的那个上限（预付模式下 = 预留住的数），
+    /// 于是配额看见的在途负债和账本看见的是同一个数。
+    ///
+    /// 同一个 `operation` 重复预留是**恢复**，不是第二笔：金额已经在
+    /// 「在途合计」里了，再比一次会把自己算两遍。
+    async fn reserve(
         &self,
         subscription_id: Id,
+        operation: &BillingOperationId,
+        amount: f64,
         now: DateTime<Utc>,
-    ) -> anyhow::Result<Option<SubscriptionQuota>>;
+    ) -> anyhow::Result<QuotaAdmission>;
+
+    /// 丢掉预留，**不**累加任何计数器。请求被拒、上游失败、准入失败都走它。
+    ///
+    /// 删一行不存在的预留是成功：调用方已经在错误路径上，没有东西要还。
+    async fn release_reservation(&self, operation: &BillingOperationId) -> anyhow::Result<()>;
+}
+
+/// [`SubscriptionQuotaStore::reserve`] 的三种结局。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaAdmission {
+    /// 预留已落（或这个操作本来就有一笔同样的预留）。
+    Reserved,
+    /// 订阅行不存在。配额是**可选**的，这样的用户纯按余额计费 ——
+    /// 这不是「拒绝」。
+    NoSubscription,
+    /// 某个周期会被这一笔顶穿。没有留下任何预留行。
+    Exceeded { reason: &'static str },
 }
 
 // ---------------------------------------------------------------- settlement

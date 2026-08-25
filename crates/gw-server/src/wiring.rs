@@ -228,12 +228,16 @@ pub async fn wire(
     let shared_ledger = Arc::new(SharedLedger::new(Arc::clone(&ledger)));
     let shared_calc = Arc::new(SharedCalculator::new(Arc::clone(&calc)));
 
+    // 配额存储是**同一个实例**：预扣在它的锁里落预留，Release 在它这里还回去。
+    // （结算那一支的「预留 → 实际」在 `SqlUsageStore` 的扣款事务里做，不经过它。）
+    let quota_store = Arc::new(SqlSubscriptionQuotaStore::new(pg.clone()));
+
     let settlement = Arc::new(
         Settlement::new(
             Arc::clone(&shared_ledger) as Arc<_>,
-            Arc::clone(&shared_calc) as Arc<_>,
             Arc::new(SqlUsageStore::new(pg.clone(), Arc::clone(&ledger))),
         )
+        .with_quota_store(Arc::clone(&quota_store) as Arc<_>)
         .with_low_balance_threshold(config.billing.low_balance_threshold_usd),
     );
     settlement.set_strict_usage_metadata(config.billing.strict_usage_metadata_mode);
@@ -261,7 +265,7 @@ pub async fn wire(
             Arc::clone(&settlement),
             config.billing.hold_ttl(),
         )
-        .with_quota_store(Arc::new(SqlSubscriptionQuotaStore::new(pg.clone())))
+        .with_quota_store(Arc::clone(&quota_store) as Arc<_>)
         .with_rate_limiter(Arc::new(SharedRateLimiter::new(Arc::clone(&rate_limiter))))
         .with_circuit_breaker(Arc::clone(&shared_breaker) as Arc<_>)
         .with_idempotency(Arc::clone(&idempotency)),

@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use gw_panel::billing::prices::{UpsertModelPriceRequest, upsert_price};
-use gw_pricing::{Calculator, ModelPriceCache, TokenUsage};
+use gw_pricing::{Calculator, ModelPriceCache, ObservedUsage, UsageDialect};
 use sqlx::PgPool;
 
 use crate::common::fresh_db;
@@ -76,11 +76,13 @@ async fn an_upsert_reaches_the_cache_the_calculator_reads() {
     let cache = seeded_cache(&pool, MODEL, OLD).await;
     // Calculator 拿的是同一个 Arc —— 这正是既有实现那条注释要求的接法。
     let calculator = Calculator::new(Some(Arc::clone(&cache)), 0.0);
-    let one_million_input = TokenUsage {
-        input: 1_000_000,
-        ..TokenUsage::default()
-    };
-    let before = calculator.compute(MODEL, one_million_input, 1.0).total_cost;
+    let one_million_input = ObservedUsage::new(1_000_000, 0, 0, 0)
+        .expect("a non-negative envelope")
+        .normalize(UsageDialect::OpenAi)
+        .expect("a consistent envelope");
+    // 改价前冻下来的那份报价。它之后不该再变 —— 在途请求按准入时的价结算。
+    let frozen = calculator.quote(MODEL, 1.0);
+    let before = frozen.compute(one_million_input).total_cost;
 
     upsert_price(&pool, MODEL, &request(MODEL, NEW))
         .await
@@ -90,10 +92,18 @@ async fn an_upsert_reaches_the_cache_the_calculator_reads() {
     assert_prices(cached(&cache, MODEL).expect("失效后应仍命中"), NEW);
 
     // 真正要证的是「钱变了」，不是「map 里的数变了」。
-    let after = calculator.compute(MODEL, one_million_input, 1.0).total_cost;
+    let after = calculator
+        .quote(MODEL, 1.0)
+        .compute(one_million_input)
+        .total_cost;
     assert!(
         after > before,
-        "涨价后算出来的钱没变：{before} -> {after}；Calculator 读的不是这个 cache"
+        "涨价后**新报的价**没变：{before} -> {after}；Calculator 读的不是这个 cache"
+    );
+    assert_eq!(
+        frozen.compute(one_million_input).total_cost,
+        before,
+        "已经冻结的报价被改价追上了：在途请求会按新价结算",
     );
 }
 

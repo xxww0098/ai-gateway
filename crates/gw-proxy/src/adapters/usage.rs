@@ -1,11 +1,15 @@
 //! [`UsageStore`] over Postgres — the atomic settle.
 //!
-//! The settle transaction plus hold clearing. One transaction carries three
+//! The settle transaction plus hold clearing. One transaction carries four
 //! writes that must land together:
 //!
 //! 1. the balance debit (`Ledger::settle_tx`, which also records any shortfall),
 //! 2. the `usage_logs` row,
-//! 3. the subscription counter accumulation.
+//! 3. **删掉这次操作的配额预留**，
+//! 4. 把 `actual_cost` 加进那个订阅的三个周期计数器。
+//!
+//! 3 和 4 必须同一个事务：只删不加 = 白用一次额度；只加不删 = 在途与实际
+//! 同时占着额度，一次请求被算两遍。
 //!
 //! The Redis reservation is cleared **only after that transaction commits**.
 //! Clearing it earlier — which a nested standalone settle would do — reopens
@@ -94,13 +98,29 @@ impl UsageStore for SqlUsageStore {
         entry.raw_metadata = merge_shortfall(entry.raw_metadata, outcome.shortfall);
         insert_usage_log(&mut tx, &entry).await?;
 
+        // 在途预留 → 实际用量，就在这个事务里。
+        //
+        // 订阅 id 取自**预留行自己**，不是 `commit.subscription_id`：对账
+        // 结算一笔崩溃遗留的操作时并不知道它属于哪个订阅，而那一行知道。
+        // 删掉它同时也是「这一格额度已经不在途了」的唯一标记。
+        let reserved_for: Option<(Id,)> = sqlx::query_as(
+            "DELETE FROM quota_reservations WHERE billing_operation_id = $1 \
+             RETURNING subscription_id",
+        )
+        .bind(commit.operation.as_str())
+        .fetch_optional(&mut *tx)
+        .await?;
+
         // Accumulate quota only for a real charge against a live subscription.
         // A lapsed or cancelled one is filtered in the predicate rather than
         // read first, so the check and the update cannot race.
-        if let Some(subscription_id) = commit.subscription_id
-            && subscription_id != 0
-            && commit.actual_cost > 0.0
-        {
+        //
+        // 没有预留行（没订阅、或这个部署没开配额）时退回原来的纯累加口径。
+        let subscription_id = reserved_for
+            .map(|(id,)| id)
+            .or(commit.subscription_id)
+            .unwrap_or_default();
+        if subscription_id != 0 && commit.actual_cost > 0.0 {
             sqlx::query(
                 // The cast is explicit so the addition happens in `numeric`.
                 // Without it Postgres resolves `numeric + float8` by widening

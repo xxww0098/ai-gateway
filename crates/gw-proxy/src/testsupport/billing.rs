@@ -10,11 +10,12 @@ use parking_lot::Mutex;
 
 use gw_ledger::operation::{OperationState, Transition, terminate};
 use gw_ledger::{BillingOperationId, NewOperation};
+use gw_pricing::PricingQuote;
 
 use crate::ports::{
     BalanceEvent, BillingError, BillingLedger, HoldAdmit, Id, ModelTokenUsage, PricingCalculator,
-    SettleReceipt, SettleTerminal, SettlementCommit, SubscriptionQuota, SubscriptionQuotaStore,
-    TokenUsage, UsageLogEntry, UsageStore, fold_model_usage,
+    QuotaAdmission, SettleReceipt, SettleTerminal, SettlementCommit, SubscriptionQuota,
+    SubscriptionQuotaStore, UsageLogEntry, UsageStore, fold_model_usage,
 };
 use crate::reconcile::{NonTerminalOperationScanner, OrphanedOperation};
 
@@ -39,6 +40,8 @@ pub(crate) struct FakeLedger {
     pub(crate) shortfall_errors: Mutex<bool>,
     pub(crate) hold_lookup_errors: Mutex<bool>,
     pub(crate) hold_fails_with: Mutex<Option<BillingError>>,
+    /// 每一次成功的续租留下的操作 id，供测试断言「续了几次」。
+    pub(crate) renewals: Mutex<Vec<String>>,
 }
 
 impl FakeLedger {
@@ -199,6 +202,23 @@ impl BillingLedger for FakeLedger {
         Ok(self.holds.lock().get(operation.as_str()).copied())
     }
 
+    /// 续租只推时间：这里唯一能观察到的「时间」就是它**没动**分数。
+    /// 缺失的预留不许被续租凭空造出来。
+    async fn renew_lease(
+        &self,
+        _user_id: Id,
+        operation: &BillingOperationId,
+    ) -> Result<f64, BillingError> {
+        let amount = self
+            .holds
+            .lock()
+            .get(operation.as_str())
+            .copied()
+            .ok_or(BillingError::HoldNotFound)?;
+        self.renewals.lock().push(operation.to_string());
+        Ok(amount)
+    }
+
     async fn has_unresolved_shortfall(&self, _user_id: Id) -> Result<bool, BillingError> {
         if *self.shortfall_errors.lock() {
             return Err(BillingError::Other(anyhow::anyhow!("db down")));
@@ -213,19 +233,18 @@ impl BillingLedger for FakeLedger {
     }
 }
 
-/// Linear calculator: cost is a fixed rate per token, and the estimates are
-/// monotone in the inputs. Deliberately NOT the production price table — the
-/// tests assert relationships (ordering, monotonicity), not magic numbers.
+/// 一个「四列同价」的计价器：每 1M token 一个固定价，倍率线性。
+///
+/// 刻意**不是**生产价目表 —— 测试断言的是关系（次序、单调性），不是魔法数字。
+/// 它返回真的 [`PricingQuote`]，所以估算与精算走的是生产那一份算术。
 pub(crate) struct FakeCalculator {
-    pub(crate) per_token: f64,
-    pub(crate) nominal_output: i64,
+    pub(crate) per_1m: Mutex<f64>,
 }
 
 impl Default for FakeCalculator {
     fn default() -> Self {
         Self {
-            per_token: 0.001,
-            nominal_output: 1000,
+            per_1m: Mutex::new(1_000.0),
         }
     }
 }
@@ -234,86 +253,143 @@ impl FakeCalculator {
     pub(crate) fn shared() -> Arc<Self> {
         Arc::new(Self::default())
     }
+
+    /// 改价。模拟「管理员在请求在途时改了价目表」：**已经铸造出去的报价
+    /// 不该受影响**，只有下一次 `quote` 才看得见新价。
+    pub(crate) fn set_price(&self, per_1m: f64) {
+        *self.per_1m.lock() = per_1m;
+    }
 }
 
 impl PricingCalculator for FakeCalculator {
-    fn estimate(&self, _model: &str, stream: bool, rate_mult: f64) -> f64 {
-        let output = if stream {
-            self.nominal_output * 2
-        } else {
-            self.nominal_output
-        };
-        output as f64 * self.per_token * rate_mult
-    }
-
-    fn estimate_with_max_tokens(
-        &self,
-        model: &str,
-        max_output_tokens: i64,
-        stream: bool,
-        rate_mult: f64,
-    ) -> f64 {
-        if max_output_tokens <= 0 {
-            return self.estimate(model, stream, rate_mult);
-        }
-        max_output_tokens as f64 * self.per_token * rate_mult
-    }
-
-    fn estimate_with_tokens(
-        &self,
-        _model: &str,
-        input_tokens: i64,
-        max_output_tokens: i64,
-        stream: bool,
-        rate_mult: f64,
-    ) -> f64 {
-        let output = if max_output_tokens > 0 {
-            max_output_tokens
-        } else if stream {
-            self.nominal_output * 2
-        } else {
-            self.nominal_output
-        };
-        (input_tokens + output) as f64 * self.per_token * rate_mult
-    }
-
-    fn compute(&self, _model: &str, tokens: TokenUsage, rate_mult: f64) -> f64 {
-        (tokens.input + tokens.output + tokens.cached + tokens.reasoning) as f64
-            * self.per_token
-            * rate_mult
+    fn quote(&self, model: &str, rate_mult: f64) -> PricingQuote {
+        PricingQuote::flat(model, *self.per_1m.lock(), rate_mult, 0)
     }
 }
 
-/// Applies [`crate::hold::rotate_counters`] to an in-memory snapshot, the way a
-/// real store applies it inside `SELECT ... FOR UPDATE`.
+/// 在内存快照上跑与生产**同一条**准入链：锁 → 轮转 → 比「已用 + 在途 + 这一笔」
+/// → 落预留。
+///
+/// 锁是 [`tokio::sync::Mutex`] 而不是 `parking_lot`，而且临界区里有一个真的
+/// `yield_now().await` —— 那正是生产实现里的 SQL 往返。没有这一下，
+/// 「两个并发请求抢最后一格」的测试会因为临界区不可能被打断而**永远通过**，
+/// 也就测不出「比较搬进锁里」这件事。
 #[derive(Default)]
 pub(crate) struct FakeQuotaStore {
-    pub(crate) quotas: Mutex<HashMap<Id, SubscriptionQuota>>,
+    state: tokio::sync::Mutex<QuotaState>,
     pub(crate) errors: Mutex<bool>,
+}
+
+#[derive(Default)]
+pub(crate) struct QuotaState {
+    quotas: HashMap<Id, SubscriptionQuota>,
+    /// operation id → (subscription id, 预留金额)。
+    reservations: HashMap<String, (Id, f64)>,
 }
 
 impl FakeQuotaStore {
     pub(crate) fn shared() -> Arc<Self> {
         Arc::new(Self::default())
     }
+
+    /// 种一个订阅。
+    pub(crate) async fn seed(&self, quota: SubscriptionQuota) {
+        self.state.lock().await.quotas.insert(quota.id, quota);
+    }
+
+    /// 一个订阅当前的快照（已轮转的那份）。
+    pub(crate) async fn quota(&self, subscription_id: Id) -> Option<SubscriptionQuota> {
+        self.state
+            .lock()
+            .await
+            .quotas
+            .get(&subscription_id)
+            .cloned()
+    }
+
+    /// 一个订阅上全部在途预留的合计。
+    pub(crate) async fn reserved_total(&self, subscription_id: Id) -> f64 {
+        self.state
+            .lock()
+            .await
+            .reservations
+            .values()
+            .filter(|(id, _)| *id == subscription_id)
+            .map(|(_, amount)| amount)
+            .sum()
+    }
+
+    /// 预留 → 实际：删掉那一行，把 `actual` 加进三个计数器。
+    ///
+    /// 生产实现把这两步放在**扣款那个事务里**（`SqlUsageStore`），
+    /// 这里由 [`FakeUsageStore`] 在它的「事务」里调，语义对齐。
+    pub(crate) async fn settle_reservation(&self, operation: &BillingOperationId, actual: f64) {
+        let mut state = self.state.lock().await;
+        let Some((subscription_id, _)) = state.reservations.remove(operation.as_str()) else {
+            return;
+        };
+        if actual <= 0.0 {
+            return;
+        }
+        if let Some(quota) = state.quotas.get_mut(&subscription_id) {
+            quota.daily_usage_usd += actual;
+            quota.weekly_usage_usd += actual;
+            quota.monthly_usage_usd += actual;
+        }
+    }
 }
 
 #[async_trait]
 impl SubscriptionQuotaStore for FakeQuotaStore {
-    async fn lock_and_rotate(
+    async fn reserve(
         &self,
         subscription_id: Id,
+        operation: &BillingOperationId,
+        amount: f64,
         now: DateTime<Utc>,
-    ) -> anyhow::Result<Option<SubscriptionQuota>> {
+    ) -> anyhow::Result<QuotaAdmission> {
         if *self.errors.lock() {
-            anyhow::bail!("lock failed");
+            anyhow::bail!("quota reserve failed");
         }
-        let mut quotas = self.quotas.lock();
-        let Some(quota) = quotas.get_mut(&subscription_id) else {
-            return Ok(None);
-        };
+        let mut state = self.state.lock().await;
+        if !state.quotas.contains_key(&subscription_id) {
+            return Ok(QuotaAdmission::NoSubscription);
+        }
+        // 生产实现在这里要打好几趟 SQL；让出执行权把那段窗口如实建模出来。
+        tokio::task::yield_now().await;
+
+        // 同一个操作重复预留是恢复，不是第二笔。
+        if state.reservations.contains_key(operation.as_str()) {
+            return Ok(QuotaAdmission::Reserved);
+        }
+
+        let reserved: f64 = state
+            .reservations
+            .values()
+            .filter(|(id, _)| *id == subscription_id)
+            .map(|(_, amount)| amount)
+            .sum();
+        let quota = state
+            .quotas
+            .get_mut(&subscription_id)
+            .expect("presence checked above");
         crate::hold::rotate_counters(quota, now);
-        Ok(Some(quota.clone()))
+        if let Some(reason) = crate::hold::evaluate_quota(quota, reserved, amount) {
+            return Ok(QuotaAdmission::Exceeded { reason });
+        }
+        state
+            .reservations
+            .insert(operation.as_str().to_owned(), (subscription_id, amount));
+        Ok(QuotaAdmission::Reserved)
+    }
+
+    async fn release_reservation(&self, operation: &BillingOperationId) -> anyhow::Result<()> {
+        self.state
+            .lock()
+            .await
+            .reservations
+            .remove(operation.as_str());
+        Ok(())
     }
 }
 
@@ -334,6 +410,9 @@ pub(crate) struct FakeUsageStore {
     /// When set, the next `commit_settlement` waits until the sender fires.
     /// Tests use this to prove a unary HTTP response is not blocked on ledger I/O.
     pub(crate) commit_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// 挂上之后，结算会在它的「事务」里把配额预留转成实际用量 ——
+    /// 与 `SqlUsageStore` 同一个事务边界。
+    quota: Mutex<Option<Arc<FakeQuotaStore>>>,
 }
 
 impl FakeUsageStore {
@@ -343,6 +422,11 @@ impl FakeUsageStore {
 
     pub(crate) fn settled_costs(&self) -> Vec<f64> {
         self.commits.lock().iter().map(|c| c.actual_cost).collect()
+    }
+
+    /// 把配额存储接进结算事务。
+    pub(crate) fn with_quota(&self, quota: Arc<FakeQuotaStore>) {
+        *self.quota.lock() = Some(quota);
     }
 
     /// Park the next settlement commit until the returned sender is fired.
@@ -375,6 +459,13 @@ impl UsageStore for FakeUsageStore {
                 Transition::AlreadyTerminal(_) => return Ok(SettleReceipt::AlreadyTerminal),
                 Transition::Apply(next) => terminated.insert(key, next),
             };
+        }
+        // 与生产同一个事务边界：删预留 + 加实际，要么都发生，要么都不发生。
+        let quota = self.quota.lock().clone();
+        if let Some(quota) = quota {
+            quota
+                .settle_reservation(&commit.operation, commit.actual_cost)
+                .await;
         }
         self.commits.lock().push(commit.clone());
         let mut entry = commit.entry.clone();

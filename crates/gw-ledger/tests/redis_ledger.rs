@@ -10,7 +10,7 @@ mod common;
 use std::time::Duration;
 
 use common::{FAULT_PREFIX, Fixture, Rng};
-use gw_ledger::LedgerError;
+use gw_ledger::{BillingOperationId, LedgerError, NewOperation};
 
 const FIVE_MINUTES: Duration = Duration::from_secs(300);
 const EPSILON: f64 = 1e-9;
@@ -490,6 +490,181 @@ async fn a_cold_cache_is_filled_and_the_hold_retried() {
     assert!(approx(
         fx.ledger.get_balance(user).await.expect("balance"),
         40.0
+    ));
+
+    fx.cleanup().await;
+}
+
+// ---------------------------------------------------------------- 租约续期
+
+/// 续租要有持久那一行才成立（首次预扣的时刻从它来），所以这里走
+/// `admit_operation` 而不是裸 `hold`。
+async fn admit(fx: &Fixture, user: i64, operation: &BillingOperationId, amount: f64) {
+    fx.ledger
+        .admit_operation(
+            &NewOperation {
+                operation_id: operation.clone(),
+                user_id: user,
+                reserved_amount: amount,
+                admitted_liability: amount,
+                request_fingerprint: "fingerprint".to_owned(),
+                client_trace_id: "trace-the-client-saw".to_owned(),
+            },
+            Some(FIVE_MINUTES),
+        )
+        .await
+        .expect("admit");
+}
+
+/// **续租只推时间，不动钱。**
+///
+/// 一条健康的长流每隔半片租约续一次；如果续租顺手改了 zset 的分数，
+/// 那租户的在途负债就会随着流的长度漂移 —— 余额闸门看到的将是一个
+/// 与准入时不同的数。
+#[tokio::test]
+#[ignore = "requires a local Redis and Postgres (set GW_TEST_REDIS_URL, GW_TEST_DATABASE_URL)"]
+async fn renewing_a_lease_moves_the_deadline_and_leaves_the_amount_alone() {
+    let mut fx = Fixture::with_redis(FIVE_MINUTES).await;
+    let user = fx.seed_user(100.0).await;
+    fx.ledger
+        .refresh_balance_cache(user)
+        .await
+        .expect("prime cache");
+    let operation = BillingOperationId::mint();
+    admit(&fx, user, &operation, 7.5).await;
+
+    let reserved = fx
+        .ledger
+        .active_hold_amount(user, operation.as_str())
+        .await
+        .expect("read hold")
+        .expect("the hold must be live");
+
+    // 把时间戳倒推到「快过期了」，续租之后它必须回到现在。
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock is after the epoch")
+        .as_secs() as i64;
+    let stale = now - FIVE_MINUTES.as_secs() as i64 + 5;
+    fx.plant_hold(user, operation.as_str(), reserved, stale)
+        .await;
+    assert_eq!(
+        fx.hold_timestamp(user, operation.as_str()).await.as_deref(),
+        Some(stale.to_string().as_str()),
+        "precondition",
+    );
+
+    for round in 0..2 {
+        let renewal = fx
+            .ledger
+            .renew_lease(user, &operation)
+            .await
+            .expect("a live hold renews");
+        assert!(
+            approx(renewal.reserved_amount, reserved),
+            "第 {round} 次续租改了金额：{} != {reserved}",
+            renewal.reserved_amount,
+        );
+        assert!(
+            approx(
+                fx.ledger
+                    .active_hold_amount(user, operation.as_str())
+                    .await
+                    .expect("read hold")
+                    .expect("still live"),
+                reserved,
+            ),
+            "第 {round} 次续租之后 zset 的分数变了",
+        );
+        let moved: i64 = fx
+            .hold_timestamp(user, operation.as_str())
+            .await
+            .expect("timestamp survives")
+            .parse()
+            .expect("a numeric timestamp");
+        assert!(
+            moved > stale,
+            "第 {round} 次续租没把到期时刻往后推：{moved} 不晚于 {stale}",
+        );
+    }
+
+    // 续租不是第二次准入：可用余额还是「余额 - 那一笔预留」。
+    assert!(approx(
+        fx.ledger.get_balance(user).await.expect("balance"),
+        100.0 - reserved,
+    ));
+
+    fx.cleanup().await;
+}
+
+/// 续租**绝不凭空造出一笔预留**。一个不存在（或已终结）的操作续租失败，
+/// 而不是悄悄 `ZADD` 一个新成员 —— 那会是一笔谁也不认识的在途负债。
+#[tokio::test]
+#[ignore = "requires a local Redis and Postgres (set GW_TEST_REDIS_URL, GW_TEST_DATABASE_URL)"]
+async fn renewing_an_unknown_operation_does_not_conjure_a_hold() {
+    let mut fx = Fixture::with_redis(FIVE_MINUTES).await;
+    let user = fx.seed_user(100.0).await;
+    fx.ledger
+        .refresh_balance_cache(user)
+        .await
+        .expect("prime cache");
+
+    let stranger = BillingOperationId::mint();
+    assert!(matches!(
+        fx.ledger.renew_lease(user, &stranger).await,
+        Err(LedgerError::HoldNotFound),
+    ));
+    assert!(fx.hold_members(user).await.is_empty(), "凭空多了一个成员");
+
+    // 已经终结的操作同理：它的钱已经结清，续租没有任何意义。
+    let settled = BillingOperationId::mint();
+    admit(&fx, user, &settled, 3.0).await;
+    fx.ledger
+        .release_once(&settled, user)
+        .await
+        .expect("release");
+    assert!(matches!(
+        fx.ledger.renew_lease(user, &settled).await,
+        Err(LedgerError::HoldNotFound),
+    ));
+
+    fx.cleanup().await;
+}
+
+/// 硬顶到了就不再续：一条永不结束的流不许永久冻结余额。
+///
+/// 被拒之后金额**仍然是原来那个**——预留照旧活到它剩下的 TTL，
+/// 那一行留给对账，而不是当场被撕掉。
+#[tokio::test]
+#[ignore = "requires a local Redis and Postgres (set GW_TEST_REDIS_URL, GW_TEST_DATABASE_URL)"]
+async fn a_lease_past_its_maximum_duration_is_refused_but_keeps_its_amount() {
+    let mut fx = Fixture::with_redis(FIVE_MINUTES).await;
+    let user = fx.seed_user(100.0).await;
+    fx.ledger
+        .refresh_balance_cache(user)
+        .await
+        .expect("prime cache");
+    let operation = BillingOperationId::mint();
+    admit(&fx, user, &operation, 4.25).await;
+
+    // 一个短得离谱的硬顶，等价于「这笔预留已经活了很久」。
+    let capped = fx
+        .ledger
+        .clone()
+        .with_max_hold_duration(Duration::from_millis(20));
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    assert!(matches!(
+        capped.renew_lease(user, &operation).await,
+        Err(LedgerError::LeaseExpired),
+    ));
+    assert!(approx(
+        fx.ledger
+            .active_hold_amount(user, operation.as_str())
+            .await
+            .expect("read hold")
+            .expect("被拒的续租不该顺手撕掉预留"),
+        4.25,
     ));
 
     fx.cleanup().await;

@@ -3,10 +3,11 @@
 
 use std::sync::Arc;
 
+use gw_pricing::PricingQuote;
 use gw_provider::types::UsageRecord;
 
 use super::*;
-use crate::testsupport::{FakeCalculator, FakeLedger, FakeUsageStore, LedgerCall};
+use crate::testsupport::{FakeLedger, FakeUsageStore, LedgerCall};
 
 // ---------------------------------------------------------------- the plan
 
@@ -174,7 +175,7 @@ fn fixture() -> Fixture {
     let ledger = FakeLedger::with_balance(100.0);
     let store = FakeUsageStore::shared();
     Fixture {
-        settlement: Settlement::new(ledger.clone(), FakeCalculator::shared(), store.clone()),
+        settlement: Settlement::new(ledger.clone(), store.clone()),
         ledger,
         store,
     }
@@ -182,10 +183,16 @@ fn fixture() -> Fixture {
 
 /// A context with a freshly-minted operation. Tests that need the reservation
 /// to line up bind it once and pass `&ctx` — the operation id *is* the key.
+///
+/// 报价在这里就冻好了，和生产一样：结算路径拿不到别的价钱来源。
 fn ctx() -> SettleCtx {
+    ctx_priced(PricingQuote::flat("gpt-4o", 1_000.0, 1.0, 0))
+}
+
+fn ctx_priced(quote: PricingQuote) -> SettleCtx {
     SettleCtx {
         user_id: 7,
-        rate_mult: 1.0,
+        quote,
         model: "gpt-4o".to_owned(),
         client_trace: gw_ledger::ClientTraceId::new("trace-the-client-saw"),
         ..SettleCtx::default()
@@ -466,40 +473,25 @@ fn strict_mode_can_be_toggled_at_runtime() {
     assert!(!fixture.settlement.strict_usage_metadata());
 }
 
-// ------------------------------------------------- Google 的思考 token 计费
+// ------------------------------------------------- 上游语义与冻结报价
 
-/// 一个只给 `output` 列定价、`reasoning` 列定价为 **0** 的计价器。
-///
-/// 这不是随手编的：`model_prices.reasoning_price_per1_m` 的**建表默认值就是 0**
-/// （`migrations/0001_init.sql`），绝大多数部署从没填过这一列。
-struct OutputOnlyCalculator;
-
-impl PricingCalculator for OutputOnlyCalculator {
-    fn estimate(&self, _model: &str, _stream: bool, _rate_mult: f64) -> f64 {
-        0.0
+/// 上游 provider 名 → 信封语义。三家分完，其余按 OpenAI 线形读。
+#[test]
+fn each_upstream_family_maps_onto_its_envelope_semantics() {
+    assert_eq!(usage_dialect("claude"), gw_pricing::UsageDialect::Anthropic);
+    for google in ["gemini", "vertex"] {
+        assert_eq!(
+            usage_dialect(google),
+            gw_pricing::UsageDialect::Google,
+            "{google} 的 candidatesTokenCount 不含思考",
+        );
     }
-    fn estimate_with_max_tokens(
-        &self,
-        _model: &str,
-        _max_output_tokens: i64,
-        _stream: bool,
-        _rate_mult: f64,
-    ) -> f64 {
-        0.0
-    }
-    fn estimate_with_tokens(
-        &self,
-        _model: &str,
-        _input_tokens: i64,
-        _max_output_tokens: i64,
-        _stream: bool,
-        _rate_mult: f64,
-    ) -> f64 {
-        0.0
-    }
-    fn compute(&self, _model: &str, tokens: TokenUsage, rate_mult: f64) -> f64 {
-        // reasoning 列不计价 —— 这正是建表默认值下的真实行为。
-        (tokens.input + tokens.output + tokens.cached) as f64 * rate_mult
+    for openai_shaped in ["openai", "codex", "xai", "some-new-compatible-upstream"] {
+        assert_eq!(
+            usage_dialect(openai_shaped),
+            gw_pricing::UsageDialect::OpenAi,
+            "{openai_shaped} 的 completion_tokens 含思考，按并列读会收两遍",
+        );
     }
 }
 
@@ -514,14 +506,24 @@ fn google_usage(candidates: i64, thoughts: i64) -> UsageRecord {
     }
 }
 
+/// Google 的 `candidatesTokenCount` **不含** `thoughtsTokenCount`，
+/// 而 `model_prices.reasoning_price_per1_m` 的建表默认值是 **0**。
+/// 两件事叠起来，思考型模型的每一个思考 token 都会是免费的 ——
+/// 而思考 token 在推理模型上经常是可见输出的数倍。
 #[tokio::test]
 async fn google_thinking_tokens_are_not_free() {
-    // Google 的 `candidatesTokenCount` **不含** `thoughtsTokenCount`
-    // （OpenAI 的 `completion_tokens` 是含的），而 reasoning 列默认不计价。
-    // 两件事叠起来，思考型模型的每一个思考 token 都是免费的 ——
-    // 而思考 token 在推理模型上经常是输出的数倍。
-    let quiet = settle_google(google_usage(100, 0)).await;
-    let thinking = settle_google(google_usage(100, 400)).await;
+    // 只给 output 列定价，reasoning 列为 0 —— 就是建表默认值下的真实部署。
+    let quote = PricingQuote::new(
+        "a-thinking-model".to_owned(),
+        gw_pricing::UnitPrice::ZERO,
+        gw_pricing::UnitPrice::new(10.0).expect("output price"),
+        gw_pricing::UnitPrice::ZERO,
+        gw_pricing::UnitPrice::ZERO,
+        gw_pricing::RateMultiplier::ONE,
+        0,
+    );
+    let quiet = settle_google(&quote, google_usage(100, 0)).await;
+    let thinking = settle_google(&quote, google_usage(100, 400)).await;
 
     assert!(
         thinking > quiet,
@@ -529,41 +531,14 @@ async fn google_thinking_tokens_are_not_free() {
     );
 }
 
-#[test]
-fn only_googles_output_field_needs_the_fold() {
-    let raw = TokenUsage {
-        input: 10,
-        output: 100,
-        cached: 0,
-        reasoning: 400,
-    };
-    for google in ["gemini", "vertex"] {
-        let folded = billable_tokens(google, raw);
-        assert_eq!(
-            folded.output,
-            raw.output + raw.reasoning,
-            "{google} 的输出字段不含思考 token，必须折进来",
-        );
-        assert_eq!(folded.reasoning, 0, "折进来之后不能再按 reasoning 计一次");
-        assert_eq!(folded.input, raw.input);
-    }
-    for other in ["openai", "codex", "claude"] {
-        assert_eq!(
-            billable_tokens(other, raw),
-            raw,
-            "{other} 的输出字段本来就含思考 token，再折一次就是重复计费",
-        );
-    }
-}
-
 /// 跑一次完整结算，返回落账的金额。
-async fn settle_google(usage: UsageRecord) -> f64 {
+async fn settle_google(quote: &PricingQuote, usage: UsageRecord) -> f64 {
     let ledger = FakeLedger::with_balance(1_000.0);
     let store = FakeUsageStore::shared();
-    let settlement = Settlement::new(ledger, Arc::new(OutputOnlyCalculator), store.clone());
+    let settlement = Settlement::new(ledger, store.clone());
     settlement
         .settle(
-            &ctx(),
+            &ctx_priced(quote.clone()),
             UsageOutcome {
                 provider: "gemini".to_owned(),
                 ..UsageOutcome::precise(usage)
@@ -573,4 +548,143 @@ async fn settle_google(usage: UsageRecord) -> f64 {
     let costs = store.settled_costs();
     assert_eq!(costs.len(), 1, "一次请求恰好结算一次");
     costs[0]
+}
+
+/// **结算按 Hold 处冻下来的那份报价算，不按上游回的模型名重新查价。**
+///
+/// 这一条同时挡住两个洞：管理员在途改价（报价里的单价已经定了），
+/// 以及上游回一个别的模型名（价格键在报价里，改不了）。
+#[tokio::test]
+async fn settlement_uses_the_frozen_quote_not_the_upstream_model_name() {
+    let fixture = fixture();
+    // 请求的是 gpt-4o，冻的是 gpt-4o 的价。
+    let ctx = ctx_priced(PricingQuote::flat("gpt-4o", 1_000.0, 1.0, 0));
+    let expensive = PricingQuote::flat("something-else", 999_000.0, 1.0, 1);
+
+    fixture
+        .settlement
+        .settle(
+            &ctx,
+            UsageOutcome::precise(UsageRecord {
+                // 上游回了一个完全不同的模型名。它只能上日志。
+                model: "something-else".to_owned(),
+                provider: "openai".to_owned(),
+                input_tokens: Some(1_000),
+                output_tokens: Some(1_000),
+                cached_tokens: None,
+                reasoning_tokens: None,
+            }),
+        )
+        .await;
+
+    let charged = fixture.store.settled_costs();
+    assert_eq!(charged.len(), 1);
+    let billable = gw_pricing::ObservedUsage::new(1_000, 1_000, 0, 0)
+        .expect("envelope")
+        .normalize(gw_pricing::UsageDialect::OpenAi)
+        .expect("consistent");
+    assert!(
+        (charged[0] - ctx.quote.compute(billable).total_cost).abs() < 1e-12,
+        "扣的不是冻结报价算出来的数：{}",
+        charged[0],
+    );
+    assert!(
+        charged[0] < expensive.compute(billable).total_cost,
+        "上游回的模型名换掉了价格键 —— 上游因此能决定按什么价收租户的钱",
+    );
+    assert_eq!(
+        fixture.store.logs.lock()[0].model,
+        "something-else",
+        "上游那个名字仍然要上日志，审计才对得上",
+    );
+}
+
+/// 负数信封既不是零消耗，也不是一笔退款：它按「上游没报 usage」处理，
+/// 走既有的 fallback，**绝不产生一笔负数扣款**。
+#[tokio::test]
+async fn a_negative_usage_column_never_becomes_a_credit() {
+    let fixture = fixture();
+    let ctx = ctx();
+    fixture.ledger.plant_hold(7, &ctx.operation, 2.5).await;
+
+    fixture
+        .settlement
+        .settle(
+            &ctx,
+            UsageOutcome::precise(UsageRecord {
+                model: "gpt-4o".to_owned(),
+                provider: "openai".to_owned(),
+                input_tokens: Some(100),
+                output_tokens: Some(-5_000),
+                cached_tokens: None,
+                reasoning_tokens: None,
+            }),
+        )
+        .await;
+
+    let commits = fixture.store.commits.lock();
+    assert_eq!(commits.len(), 1);
+    assert!(
+        commits[0].actual_cost >= 2.5,
+        "无效信封必须落到 fallback（不低于预留），得到 {}",
+        commits[0].actual_cost,
+    );
+    assert_eq!(
+        commits[0].entry.raw_metadata.as_ref().expect("annotated")["billing_fallback"]["reason"]
+            .as_str(),
+        Some(REASON_MISSING_USAGE),
+        "它和「上游根本没报 usage」是同一条路",
+    );
+    assert_eq!(
+        commits[0].entry.output_tokens, -5_000,
+        "日志写的仍然是上游原话，否则审计对不上上游账单",
+    );
+}
+
+/// OpenAI 的思考 token 走完整条结算链之后也不能被收两遍。
+///
+/// `gw-pricing` 那边已经按性质卡住了归一化；这一条卡的是**结算真的用了它**。
+#[tokio::test]
+async fn openai_reasoning_is_not_double_charged_end_to_end() {
+    // output 与 reasoning 两列都有价且不同，否则「按哪一列收」观察不到。
+    let quote = PricingQuote::new(
+        "o3".to_owned(),
+        gw_pricing::UnitPrice::ZERO,
+        gw_pricing::UnitPrice::new(40.0).expect("output price"),
+        gw_pricing::UnitPrice::ZERO,
+        gw_pricing::UnitPrice::new(7.0).expect("reasoning price"),
+        gw_pricing::RateMultiplier::ONE,
+        0,
+    );
+    let fixture = fixture();
+    fixture
+        .settlement
+        .settle(
+            &ctx_priced(quote.clone()),
+            UsageOutcome {
+                provider: "openai".to_owned(),
+                ..UsageOutcome::precise(UsageRecord {
+                    model: "o3".to_owned(),
+                    provider: "openai".to_owned(),
+                    input_tokens: Some(0),
+                    output_tokens: Some(50),
+                    cached_tokens: None,
+                    reasoning_tokens: Some(20),
+                })
+            },
+        )
+        .await;
+
+    let charged = fixture.store.settled_costs();
+    assert_eq!(charged.len(), 1);
+    let per_unit = |tokens: i64, price: f64| price * tokens as f64 / gw_pricing::TOKENS_PER_UNIT;
+    let want =
+        per_unit(30, quote.output_price().get()) + per_unit(20, quote.reasoning_price().get());
+    let double_counted =
+        per_unit(50, quote.output_price().get()) + per_unit(20, quote.reasoning_price().get());
+    assert!(
+        (charged[0] - want).abs() < 1e-12,
+        "{} != {want}（重复计价会是 {double_counted}）",
+        charged[0],
+    );
 }

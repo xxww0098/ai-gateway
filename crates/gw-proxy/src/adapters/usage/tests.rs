@@ -366,3 +366,69 @@ async fn model_usage_since_sums_today_and_ignores_other_users_and_older_rows() {
     );
     assert_eq!(rows[0].requests, 2);
 }
+
+/// **结算把在途预留转成实际用量，两件事在同一个事务里。**
+///
+/// 只删不加 = 白用一次额度；只加不删 = 在途与实际同时占着额度，
+/// 一次请求被算两遍。这条同时钉住两半。
+///
+/// 订阅 id 取自**预留行自己**（`commit.subscription_id` 这里刻意留空），
+/// 因为对账在结算一笔崩溃遗留的操作时并不知道它属于哪个订阅 —— 而那一行知道。
+#[tokio::test]
+#[ignore = "needs a local Postgres: see testsupport::PG_HOWTO"]
+async fn a_settlement_converts_the_quota_reservation_into_actual_usage() {
+    let pool = fresh_db("settle_quota_reservation").await;
+    seed_user(&pool, 7, 10.0).await;
+    sqlx::query(
+        "INSERT INTO subscriptions (id, user_id, package_id, group_id, group_name, status, \
+                starts_at, expires_at, daily_usage_usd, daily_reset_at, weekly_usage_usd, \
+                weekly_reset_at, monthly_usage_usd, monthly_reset_at, funding_source, \
+                funding_reference, price_paid_usd, notes, created_at, updated_at) \
+         VALUES (1, 7, 1, 1, '', 'active', NOW(), NOW() + INTERVAL '1 day', 0, \
+                 NOW() + INTERVAL '1 day', 0, NOW() + INTERVAL '7 days', 0, \
+                 NOW() + INTERVAL '30 days', '', '', 0, '', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .expect("seeding a subscription");
+
+    let operation = hold_operation(&pool, 7, 5.0).await;
+    sqlx::query(
+        "INSERT INTO quota_reservations \
+            (billing_operation_id, subscription_id, reserved_amount, created_at) \
+         VALUES ($1, 1, CAST(5 AS numeric), NOW())",
+    )
+    .bind(operation.as_str())
+    .execute(&pool)
+    .await
+    .expect("seeding a reservation");
+
+    // `subscription_id` 留空：转账要靠预留行自己认领订阅。
+    store(&pool)
+        .commit_settlement(&commit(7, &operation, 1.25))
+        .await
+        .expect("commits");
+
+    let left: (i64,) = sqlx::query_as("SELECT COUNT(*)::bigint FROM quota_reservations")
+        .fetch_one(&pool)
+        .await
+        .expect("counting reservations");
+    assert_eq!(left.0, 0, "结算之后预留必须消失，否则额度被算两遍");
+
+    let used: (
+        gw_model::compat::Money,
+        gw_model::compat::Money,
+        gw_model::compat::Money,
+    ) = sqlx::query_as(
+        "SELECT daily_usage_usd, weekly_usage_usd, monthly_usage_usd \
+         FROM subscriptions WHERE id = 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("reading counters");
+    assert_eq!(
+        (used.0.0, used.1.0, used.2.0),
+        (1.25, 1.25, 1.25),
+        "三个周期计数器都要加上**实际**扣款，不是预留的那个上限",
+    );
+}

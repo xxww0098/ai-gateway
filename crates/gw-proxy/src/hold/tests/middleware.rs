@@ -125,21 +125,9 @@ async fn covering_the_hold_but_not_the_upper_bound_is_refused_without_reserving(
     let harness = Harness::build();
     let body = chat_body("gpt-4o");
     let peek = billing_peek(body.to_string().as_bytes());
-    let hold_amount = harness.calc.estimate_with_tokens(
-        &peek.price_key,
-        peek.input_tokens,
-        peek.max_tokens,
-        peek.stream,
-        1.0,
-    );
-    let upper_bound = preflight_upper_bound(
-        harness.calc.as_ref(),
-        &peek.price_key,
-        peek.max_tokens,
-        peek.stream,
-        1.0,
-        hold_amount,
-    );
+    let quote = harness.calc.quote(&peek.price_key, 1.0);
+    let hold_amount = quote.estimate_with_tokens(peek.input_tokens, peek.max_tokens, peek.stream);
+    let upper_bound = preflight_upper_bound(&quote, peek.max_tokens, peek.stream, hold_amount);
     assert!(
         hold_amount < upper_bound,
         "this fixture needs a gap between the reservation and the gate",
@@ -288,7 +276,7 @@ async fn an_exhausted_quota_refuses_before_reserving() {
         daily_limit_usd: Some(0.000_001),
         ..SubscriptionQuota::default()
     };
-    harness.quota.quotas.lock().insert(55, quota.clone());
+    harness.quota.seed(quota.clone()).await;
     harness
         .directory
         .subscriptions
@@ -696,6 +684,13 @@ async fn a_balance_store_outage_refuses_the_request_rather_than_letting_it_spend
         ) -> Result<Option<f64>, crate::ports::BillingError> {
             self.0.active_hold_amount(user_id, operation).await
         }
+        async fn renew_lease(
+            &self,
+            user_id: crate::ports::Id,
+            operation: &gw_ledger::BillingOperationId,
+        ) -> Result<f64, crate::ports::BillingError> {
+            self.0.renew_lease(user_id, operation).await
+        }
         async fn has_unresolved_shortfall(
             &self,
             user_id: crate::ports::Id,
@@ -892,7 +887,8 @@ async fn the_reservation_is_the_admitted_liability_not_a_smaller_floor() {
     // request settle into debt.
     let harness = Harness::build();
     let peek = billing_peek(chat_body("gpt-4o").to_string().as_bytes());
-    let (hold_amount, upper_bound) = compute_reservation(&peek, 1.0, harness.calc.as_ref());
+    let (hold_amount, upper_bound) =
+        compute_reservation(&peek, &harness.calc.quote(&peek.price_key, 1.0));
     assert!(
         upper_bound >= hold_amount,
         "the upper bound is by construction at least the hold estimate",

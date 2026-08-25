@@ -11,16 +11,23 @@
 //! 5. idempotency check — replay a completed duplicate, reject an in-flight one
 //! 6. circuit breaker (503 when the provider is broken)
 //! 7. **outstanding-debt pre-flight** -> 402 `outstanding_debt`
-//! 8. subscription quota (lock, rotate stale counters, compare against estimate)
-//! 9. **upper-bound pre-flight**: `max(hold, EstimateWithMaxTokens, Estimate(stream))`
-//!    vs available balance -> 402 `insufficient_balance`, no hold created
-//! 10. **mint the server [`BillingOperationId`]**, then budget token ->
-//!     else `ledger.admit_operation`
-//! 11. idempotency claim (only now that funds are reserved)
-//! 12. run downstream, then settle-or-release exactly once
+//! 8. **冻结报价**：`calc.quote(price_key, rate_mult)`，此后估算与结算都在它上面做
+//! 9. **mint the server [`BillingOperationId`]**
+//! 10. 订阅配额：在**一个事务**里锁行、轮转、比「已用 + 在途预留 + 这一笔」、落预留
+//! 11. **upper-bound pre-flight**: `max(hold, EstimateWithMaxTokens, Estimate(stream))`
+//!     vs available balance -> 402 `insufficient_balance`, no hold created；
+//!     预算代币 -> 否则 `ledger.admit_operation`。准入失败要把配额预留还回去。
+//! 12. idempotency claim (only now that funds are reserved)
+//! 13. run downstream, then settle-or-release exactly once
 //!
-//! Step 10 is where the money key comes from, and it comes from the *server*.
+//! Step 9 is where the money key comes from, and it comes from the *server*.
 //! The inbound `X-Trace-ID` never reaches it — see [`client_trace_from`].
+//!
+//! # 为什么 mint 提到了配额之前
+//!
+//! 因为配额预留是**按操作 id 键住的**：一次操作一笔预留，释放和转实际都靠它。
+//! 收敛前 mint 在配额之后，配额也就没有任何可以键住的东西 —— 那正是它只能
+//! 「提交完再比一次」的原因。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,7 +49,7 @@ use crate::idempotency::{CachedResponse, IdempotencyManager};
 use crate::kernel::{self, Phase, RelayCtx};
 use crate::ports::{
     AccessMetadata, BillingError, BillingLedger, CircuitBreaker, HoldAdmit, Id, PricingCalculator,
-    RateLimiter, SubscriptionQuotaStore,
+    QuotaAdmission, RateLimiter, SubscriptionQuotaStore,
 };
 use crate::settlectx::{BillingHandle, RequestBilling, SettleCtx};
 use crate::usage::Settlement;
@@ -388,38 +395,40 @@ impl HoldMiddleware {
             }
         }
 
+        // --- 冻结报价 ---
+        //
+        // 价目表在这里读**最后一次**。预扣的三个估算、结算的精算，之后全都
+        // 在这份报价上做，所以在途的改价追不上这个请求，上游回一个别的模型名
+        // 也换不掉价格键。
+        let quote = self.calc.quote(&peek.price_key, rate_mult);
+
         // The reservation scales with the real prompt size so a large request
         // reserves proportional funds instead of under-holding on a flat
         // nominal input assumption.
-        let (hold_amount, upper_bound) = compute_reservation(&peek, rate_mult, self.calc.as_ref());
-
-        // --- subscription quota ---
-        if let (Some(sub), Some(store)) = (&meta.subscription, &self.quota_store) {
-            match store.lock_and_rotate(sub.id, Utc::now()).await {
-                // A missing subscription row is permissive: the quota system is
-                // opt-in and such a user is billed purely from their balance.
-                Ok(None) => {}
-                Ok(Some(rotated)) => {
-                    if let Some(reason) = evaluate_quota(&rotated, hold_amount) {
-                        return HoldRejection::QuotaExceeded(reason.to_owned()).into_response();
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(%err, subscription_id = sub.id, "quota check failed");
-                    return HoldRejection::QuotaExceeded(
-                        "subscription quota check failed".to_owned(),
-                    )
-                    .into_response();
-                }
-            }
-        }
+        //
+        // 之后只用 `upper_bound`：预付模式下「拿去和余额比的那个上界」就是
+        // 预留住的数、也是压给配额的数。`hold_amount` 是它的一个下界
+        // （`preflight_upper_bound` 取三者最大），预留得比认可的责任少
+        // 正是大请求结算成欠款的来路。
+        let (hold_amount, upper_bound) = compute_reservation(&peek, &quote);
+        debug_assert!(upper_bound >= hold_amount);
 
         // --- mint the money key ---
         //
         // **The server mints it.** Not the inbound `X-Trace-ID`, not the
         // client `Idempotency-Key`, not a hash of either. A caller can replay
         // or collide a header it controls; it cannot reach this.
+        //
+        // 它在配额之前铸造，因为配额预留就是按它键住的。
         let operation_id = BillingOperationId::mint();
+
+        // --- subscription quota：锁里比，锁里留 ---
+        //
+        // 留的是 `upper_bound`，也就是马上要拿去和余额比、并且真的会预留住的
+        // 那个数 —— 配额看见的在途负债与账本看见的必须是同一个数。
+        if let Err(response) = self.reserve_quota(&meta, &operation_id, upper_bound).await {
+            return response;
+        }
 
         // --- upper-bound pre-flight ---
         //
@@ -449,6 +458,9 @@ impl HoldMiddleware {
         match self.ledger.admit_operation(&operation, redis_ttl).await {
             Ok(HoldAdmit::Reserved) => {}
             Ok(HoldAdmit::Insufficient { available }) => {
+                // 余额闸门拒了，那这次操作对计费而言从未存在过 —— 配额上的
+                // 那一笔在途预留也必须跟着消失，否则一次 402 就永久吃掉一格额度。
+                self.release_quota(&operation_id).await;
                 tracing::warn!(
                     event = "preflight_insufficient_balance",
                     user_id = meta.user_id,
@@ -463,6 +475,7 @@ impl HoldMiddleware {
                 .into_response();
             }
             Err(err) => {
+                self.release_quota(&operation_id).await;
                 return self.reject_hold_error(err, meta.user_id, upper_bound).await;
             }
         }
@@ -476,7 +489,7 @@ impl HoldMiddleware {
                 user_id: meta.user_id,
                 api_key_id: meta.api_key_id,
                 group_id: meta.group_id,
-                rate_mult,
+                quote,
                 subscription_id: meta.subscription.as_ref().map(|s| s.id),
                 model: peek.model.clone(),
                 stream: peek.stream,
@@ -509,6 +522,7 @@ impl HoldMiddleware {
                     // replay the winner's response or report the conflict.
                     let _ =
                         with_timeout(self.ledger.release_once(meta.user_id, &operation_id)).await;
+                    self.release_quota(&operation_id).await;
                     if let Ok(Some(other)) = im.check(&idem_store_key).await
                         && !other.processing
                         && !other.truncated
@@ -577,6 +591,53 @@ impl HoldMiddleware {
                 .release_once(billing.ctx.user_id, &billing.ctx.operation),
         )
         .await;
+        // 配额那一格同样要还：一个 4xx 不该永久占着订阅的额度。
+        self.release_quota(&billing.ctx.operation).await;
+    }
+
+    /// 在配额存储的**锁里**预留 `amount`。
+    ///
+    /// `Err` 已经是要回给客户端的 402。查询失败 fail-closed：查不出限额时
+    /// 放行等于把限额当不存在。
+    async fn reserve_quota(
+        &self,
+        meta: &AccessMetadata,
+        operation: &BillingOperationId,
+        amount: f64,
+    ) -> Result<(), Response> {
+        let (Some(sub), Some(store)) = (&meta.subscription, &self.quota_store) else {
+            return Ok(());
+        };
+        match store.reserve(sub.id, operation, amount, Utc::now()).await {
+            // A missing subscription row is permissive: the quota system is
+            // opt-in and such a user is billed purely from their balance.
+            Ok(QuotaAdmission::Reserved | QuotaAdmission::NoSubscription) => Ok(()),
+            Ok(QuotaAdmission::Exceeded { reason }) => {
+                Err(HoldRejection::QuotaExceeded(reason.to_owned()).into_response())
+            }
+            Err(err) => {
+                tracing::warn!(%err, subscription_id = sub.id, "quota reserve failed");
+                Err(
+                    HoldRejection::QuotaExceeded("subscription quota check failed".to_owned())
+                        .into_response(),
+                )
+            }
+        }
+    }
+
+    /// 还掉这次操作的配额预留。
+    ///
+    /// 无条件调用：删一行不存在的预留是成功（见
+    /// [`SubscriptionQuotaStore::release_reservation`]），所以调用方不必记住
+    /// 「刚才到底留没留」—— 一个需要记得设的标志就是一个会被忘记的标志。
+    /// 没有配额存储时连一次往返都不发生。
+    async fn release_quota(&self, operation: &BillingOperationId) {
+        let Some(store) = &self.quota_store else {
+            return;
+        };
+        if let Some(Err(err)) = with_timeout(store.release_reservation(operation)).await {
+            tracing::warn!(%err, operation = %operation, "quota reservation release failed");
+        }
     }
 
     /// Stores a replayable 2xx response, or drops the claim so a retry can

@@ -114,11 +114,12 @@ impl Harness {
             },
         );
 
-        let settlement = Arc::new(Settlement::new(
-            ledger.clone(),
-            calc.clone(),
-            usage_store.clone(),
-        ));
+        // 结算侧看得见配额存储（Release 要把在途预留还回去），
+        // 用量存储也接着它（结算把预留转成实际用量，同一个「事务」里）。
+        usage_store.with_quota(quota.clone());
+        let settlement = Arc::new(
+            Settlement::new(ledger.clone(), usage_store.clone()).with_quota_store(quota.clone()),
+        );
         let health = Arc::new(ChannelHealth::new(0, Duration::from_secs(30)));
         let policies = Arc::new(ChannelPolicyCache::new(
             Arc::new(FakePolicyStore::default()),

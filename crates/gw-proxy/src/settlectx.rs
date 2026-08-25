@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gw_ledger::{BillingOperationId, ClientTraceId};
+use gw_pricing::PricingQuote;
 
 use crate::ports::Id;
 
@@ -31,11 +32,16 @@ pub struct SettleCtx {
     /// Zero when the request authenticated via JWT without an API key.
     pub api_key_id: Id,
     pub group_id: Option<Id>,
-    /// Group-configured rate multiplier (1.0 by default).
-    pub rate_mult: f64,
+    /// 这次请求**冻结**下来的价格：四列单价 + 分组倍率 + 价目表代次。
+    ///
+    /// Hold 处铸造一次，结算只读它。这是「在途请求不会被改价追上、
+    /// 也不会被上游回的模型名换掉价格键」的落地位置 —— 结算侧因此
+    /// 根本没有第二次查价目表的入口。
+    pub quote: PricingQuote,
     /// Active subscription whose quota counters accumulate on Settle.
     pub subscription_id: Option<Id>,
-    /// Model identifier extracted from the request body.
+    /// 请求里那个模型名（保留 peek 时的大小写），**只供日志与目录**。
+    /// 计价用的键在 [`SettleCtx::quote`] 里。
     pub model: String,
     /// Client asked for SSE (or any streaming transport).
     pub stream: bool,
@@ -49,6 +55,8 @@ pub struct SettleCtx {
 /// Hand-written rather than derived because [`BillingOperationId`] has no
 /// `Default` — an operation id that is not minted is not an operation id, and
 /// a defaulted empty one would be a money key shared by every such value.
+/// 报价同理没有 `Default`：默认价必须是**零价**，因为一个没被铸造过的报价
+/// 唯一安全的取值就是「什么也不收」。
 impl Default for SettleCtx {
     fn default() -> Self {
         Self {
@@ -57,13 +65,22 @@ impl Default for SettleCtx {
             user_id: 0,
             api_key_id: 0,
             group_id: None,
-            rate_mult: 0.0,
+            quote: PricingQuote::flat("", 0.0, 1.0, 0),
             subscription_id: None,
             model: String::new(),
             stream: false,
             ip_address: String::new(),
             idempotency_key: String::new(),
         }
+    }
+}
+
+impl SettleCtx {
+    /// 写进 `usage_logs.rate_multiplier` 的那个数。它就是报价里冻住的倍率
+    /// —— 不是第二个字段，否则日志和实际收费可能各说各话。
+    #[must_use]
+    pub fn rate_mult(&self) -> f64 {
+        self.quote.multiplier().get()
     }
 }
 

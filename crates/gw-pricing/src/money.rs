@@ -38,6 +38,12 @@ pub enum ValueError {
     /// An `f64` that cannot be represented as the target integer.
     #[error("{kind} is not representable as an integer count")]
     NotRepresentable { kind: &'static str },
+    /// 一个自相矛盾的 usage 信封：某个**子集**列大过了它所属的总量
+    /// （缓存输入大过输入，或思考 ⊂ 输出的方言下思考大过输出）。
+    ///
+    /// 拒绝而不是截断 —— 见 [`crate::normalize`]。
+    #[error("{kind} exceeds the total it is part of")]
+    Inconsistent { kind: &'static str },
 }
 
 /// Shared gate: finite and `>= 0`.

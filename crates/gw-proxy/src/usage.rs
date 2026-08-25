@@ -23,9 +23,11 @@ use chrono::Utc;
 use gw_provider::types::UsageRecord;
 use serde_json::json;
 
+use gw_pricing::{ObservedUsage, UsageDialect};
+
 use crate::budget_token::BudgetTokenStore;
 use crate::ports::{
-    BalanceEvent, BillingLedger, PricingCalculator, SettleReceipt, SettlementCommit, TokenUsage,
+    BalanceEvent, BillingLedger, SettleReceipt, SettlementCommit, SubscriptionQuotaStore,
     UsageLogEntry, UsageStore,
 };
 use crate::settlectx::SettleCtx;
@@ -109,51 +111,29 @@ pub struct SettlementInputs {
     pub strict_mode: bool,
     /// `ActiveHoldAmount`: `None` means the lookup itself failed.
     pub active_hold: Option<f64>,
-    /// `Estimate(model, stream = true, rate_mult)`.
+    /// 冻结报价上的 `estimate(stream = true)`。
     pub streaming_estimate: f64,
 }
 
-/// 上游按 Google GenerateContent 语义报 usage 的 executor。
+/// 上游 provider 名 → usage 信封的语义族。
+///
+/// 这张表在 `gw-proxy`，不在 `gw-relay`：中继层是**计费盲**的，它连
+/// `gw-pricing` 都不依赖。
 ///
 /// `gemini` 与 `vertex` 是两套鉴权与端点前缀，但 wire 协议是**同一个**
 /// GenerateContent，`usageMetadata` 的字段语义因此完全一致。
-const GOOGLE_SHAPED_PROVIDERS: [&str; 2] = ["gemini", "vertex"];
-
-/// 把上游原话的 token 计数归一成**可计价**的视图。
 ///
-/// # Google 的 usage 会让网关每次都少收钱
+/// # 未知上游按 OpenAI 线形读
 ///
-/// | 上游 | 「输出」字段 | 含不含思考 token |
-/// | --- | --- | --- |
-/// | OpenAI / Codex | `usage.completion_tokens` | **含**（`completion_tokens_details.reasoning_tokens` 是它的一个明细） |
-/// | Anthropic | `usage.output_tokens` | **含** |
-/// | Google（gemini / vertex） | `usageMetadata.candidatesTokenCount` | **不含**（思考在 `thoughtsTokenCount` 里，是并列项） |
-///
-/// 而 `model_prices.reasoning_price_per1_m` 的建表默认值是 **0**
-/// （`migrations/0001_init.sql`）。两件事叠起来的后果是确定的：
-/// 一个 Gemini 思考型模型的**每一个思考 token 都是免费的** ——
-/// `candidatesTokenCount` 不含它，`reasoning_price` 又是 0。
-/// 思考 token 在推理型模型上经常是输出的数倍，所以这不是舍入误差，
-/// 是**每次调用都少收一大块**。
-///
-/// 修法是把 Google 的思考 token 折进 `output`，按**输出费率**计价 ——
-/// 这正是 Google 自己的计费口径（thinking token 按 output 价收）。
-/// 折进去之后 `reasoning` 清零，避免配了 `reasoning_price` 的部署被重复计价。
-///
-/// OpenAI / Anthropic **不折**：它们的输出字段本来就含思考，
-/// 折进去就是实打实的重复计费。这条不对称是上游语义的不对称，不是本函数的选择。
-///
-/// 归一只作用于**计价**。写进 `usage_logs` 的仍然是上游原话
-/// （`input/output/cached/reasoning` 四列各归各位），否则审计就对不上上游账单了。
+/// 不是随手挑的：`openai` / `codex` / `xai` 以及任何「OpenAI 兼容」上游
+/// 都报 `completion_tokens`，而那个字段**含**思考 token。把未知上游按
+/// Google 读（思考与输出并列）会把它的思考 token 收两遍。
 #[must_use]
-pub fn billable_tokens(provider: &str, tokens: TokenUsage) -> TokenUsage {
-    if !GOOGLE_SHAPED_PROVIDERS.contains(&provider) {
-        return tokens;
-    }
-    TokenUsage {
-        output: tokens.output.saturating_add(tokens.reasoning),
-        reasoning: 0,
-        ..tokens
+pub fn usage_dialect(provider: &str) -> UsageDialect {
+    match provider {
+        "claude" => UsageDialect::Anthropic,
+        "gemini" | "vertex" => UsageDialect::Google,
+        _ => UsageDialect::OpenAi,
     }
 }
 
@@ -189,26 +169,26 @@ pub fn plan_settlement(inputs: &SettlementInputs) -> SettlementPlan {
 }
 
 /// The settlement engine.
+///
+/// 注意这里**没有计价器**。价格在 Hold 处就冻进了 [`SettleCtx::quote`]，
+/// 结算只在那份报价上做算术 —— 拿不到价目表，也就无从二次查价。
 pub struct Settlement {
     ledger: Arc<dyn BillingLedger>,
-    calc: Arc<dyn PricingCalculator>,
     store: Arc<dyn UsageStore>,
+    /// Release 时要把配额那一格还回去。`None` = 这个部署没开配额。
+    quota: Option<Arc<dyn SubscriptionQuotaStore>>,
     budget_tokens: Option<Arc<BudgetTokenStore>>,
     low_balance_threshold: f64,
     strict_usage_metadata: AtomicBool,
 }
 
 impl Settlement {
-    /// Builds the engine over ledger, calculator and store.
-    pub fn new(
-        ledger: Arc<dyn BillingLedger>,
-        calc: Arc<dyn PricingCalculator>,
-        store: Arc<dyn UsageStore>,
-    ) -> Self {
+    /// Builds the engine over ledger and store.
+    pub fn new(ledger: Arc<dyn BillingLedger>, store: Arc<dyn UsageStore>) -> Self {
         Self {
             ledger,
-            calc,
             store,
+            quota: None,
             budget_tokens: None,
             low_balance_threshold: DEFAULT_LOW_BALANCE_THRESHOLD,
             strict_usage_metadata: AtomicBool::new(false),
@@ -220,6 +200,21 @@ impl Settlement {
     pub fn with_budget_tokens(mut self, store: Arc<BudgetTokenStore>) -> Self {
         self.budget_tokens = Some(store);
         self
+    }
+
+    /// 挂上配额存储，让 Release 能把在途预留还回去。
+    ///
+    /// 结算那一支不需要它：转实际发生在 [`UsageStore::commit_settlement`]
+    /// 的**同一个事务**里，否则「删预留」和「加 actual」会分家。
+    #[must_use]
+    pub fn with_quota_store(mut self, store: Arc<dyn SubscriptionQuotaStore>) -> Self {
+        self.quota = Some(store);
+        self
+    }
+
+    /// 只读账本。流式回写包装用它续租约。
+    pub fn ledger(&self) -> &Arc<dyn BillingLedger> {
+        &self.ledger
     }
 
     /// Set the low-balance threshold; non-positive keeps the $1 default.
@@ -255,29 +250,45 @@ impl Settlement {
     /// logged and swallowed.
     pub async fn settle(&self, ctx: &SettleCtx, outcome: UsageOutcome) {
         let usage = outcome.usage.clone().unwrap_or_default();
-        let tokens = TokenUsage {
+        // 上游原话，一个字节不动 —— `usage_logs` 写的是它，审计要能和上游
+        // 账单对上。字段可以是负数、可以自相矛盾，那都是上游的事实。
+        let observed = ObservedUsage {
             input: usage.input_tokens.unwrap_or(0),
             output: usage.output_tokens.unwrap_or(0),
             cached: usage.cached_tokens.unwrap_or(0),
             reasoning: usage.reasoning_tokens.unwrap_or(0),
         };
+        // 上游回话里的模型名**只上日志**。它不许改价格键：那等于让上游
+        // 决定按什么价收租户的钱（一个不在价目表里的别名会落到兜底价）。
         let model = if usage.model.is_empty() {
             ctx.model.clone()
         } else {
             usage.model.clone()
         };
-        // 计价用的是**归一化后**的 token 视图，日志写的是上游原话。
-        // 两者不同的唯一一种情况见 [`billable_tokens`]。
-        let computed_cost = self.calc.compute(
-            &model,
-            billable_tokens(&outcome.provider, tokens),
-            ctx.rate_mult,
-        );
+
+        // 计价看的是归一化后的**互斥**四列。负数或自相矛盾的信封在这里被
+        // 拒绝，于是它和「上游根本没报 usage」走同一条路（fallback / strict），
+        // 而不是变成一笔负数扣款或一次凭空少收。
+        let billable = outcome.usage.as_ref().and_then(|_| {
+            observed
+                .normalize(usage_dialect(&outcome.provider))
+                .inspect_err(|err| {
+                    tracing::warn!(
+                        user_id = ctx.user_id,
+                        operation = %ctx.operation,
+                        provider = %outcome.provider,
+                        %err,
+                        "upstream usage envelope refused; settling as if it were absent",
+                    );
+                })
+                .ok()
+        });
+        let computed_cost = billable.map_or(0.0, |usage| ctx.quote.compute(usage).total_cost);
 
         // The active-hold lookup is only consulted on the fallback path, so it
         // is resolved lazily to keep the precise path at one round-trip.
         let needs_hold_lookup =
-            !outcome.failed && outcome.usage.is_none() && !self.strict_usage_metadata();
+            !outcome.failed && billable.is_none() && !self.strict_usage_metadata();
         let active_hold = if needs_hold_lookup {
             match self
                 .ledger
@@ -303,11 +314,12 @@ impl Settlement {
 
         let plan = plan_settlement(&SettlementInputs {
             computed_cost,
-            usage_present: outcome.usage.is_some(),
+            usage_present: billable.is_some(),
             upstream_failed: outcome.failed,
             strict_mode: self.strict_usage_metadata(),
             active_hold,
-            streaming_estimate: self.calc.estimate(&model, true, ctx.rate_mult),
+            // 兜底估算也来自**冻结的报价**，不是上游那个模型名的现价。
+            streaming_estimate: ctx.quote.estimate(true),
         });
 
         match plan {
@@ -316,8 +328,10 @@ impl Settlement {
                     tracing::warn!(user_id = ctx.user_id, operation = %ctx.operation, %err,
                         "ledger release failed");
                 }
+                // 配额那一格跟着还：一次失败的上游调用不该吃掉订阅的额度。
+                self.release_quota(ctx).await;
                 let mut entry =
-                    self.build_entry(ctx, &outcome, &model, tokens, computed_cost, true);
+                    self.build_entry(ctx, &outcome, &model, observed, computed_cost, true);
                 entry.raw_metadata = Some(json!({
                     "reason": reason,
                     "timestamp": Utc::now().to_rfc3339(),
@@ -328,7 +342,7 @@ impl Settlement {
                 // No Settle, no Release: the Redis hold expires on its natural
                 // TTL so out-of-band reconciliation can match this row against
                 // the abandoned reservation.
-                let mut entry = self.build_entry(ctx, &outcome, &model, tokens, 0.0, true);
+                let mut entry = self.build_entry(ctx, &outcome, &model, observed, 0.0, true);
                 entry.raw_metadata = Some(json!({
                     "reason": REASON_MISSING_USAGE_STRICT,
                     "timestamp": Utc::now().to_rfc3339(),
@@ -338,7 +352,7 @@ impl Settlement {
             SettlementPlan::HoldLookupFailed => {
                 // We cannot bound the cost, and a zero-cost Settle would make
                 // the request free. Leave the hold to its TTL, like strict mode.
-                let mut entry = self.build_entry(ctx, &outcome, &model, tokens, 0.0, true);
+                let mut entry = self.build_entry(ctx, &outcome, &model, observed, 0.0, true);
                 entry.raw_metadata = Some(json!({
                     "event": EVENT_HOLD_LOOKUP_FAILED,
                     "reason": "active hold lookup failed",
@@ -347,7 +361,7 @@ impl Settlement {
                 self.write_log(&entry).await;
             }
             SettlementPlan::Settle { cost, fallback } => {
-                self.commit(ctx, &outcome, &model, tokens, cost, fallback)
+                self.commit(ctx, &outcome, &model, observed, cost, fallback)
                     .await;
             }
         }
@@ -363,11 +377,11 @@ impl Settlement {
         ctx: &SettleCtx,
         outcome: &UsageOutcome,
         model: &str,
-        tokens: TokenUsage,
+        observed: ObservedUsage,
         cost: f64,
         fallback: Option<&'static str>,
     ) {
-        let mut entry = self.build_entry(ctx, outcome, model, tokens, cost, false);
+        let mut entry = self.build_entry(ctx, outcome, model, observed, cost, false);
         // The fallback tag is known now; `shortfall_usd` is not, because the
         // debit happens inside the transaction. The store merges it in there
         // via [`merge_shortfall`], which is why that helper is public.
@@ -443,7 +457,7 @@ impl Settlement {
         ctx: &SettleCtx,
         outcome: &UsageOutcome,
         model: &str,
-        tokens: TokenUsage,
+        observed: ObservedUsage,
         cost: f64,
         failed: bool,
     ) -> UsageLogEntry {
@@ -467,14 +481,16 @@ impl Settlement {
             model: model.to_owned(),
             provider,
             auth_id: outcome.auth_id.clone(),
-            input_tokens: tokens.input,
-            output_tokens: tokens.output,
-            cached_tokens: tokens.cached,
-            reasoning_tokens: tokens.reasoning,
+            // 上游原话的四个数。归一化只作用于**计价**，日志不折不减 ——
+            // 否则审计就和上游账单对不上了。
+            input_tokens: observed.input,
+            output_tokens: observed.output,
+            cached_tokens: observed.cached,
+            reasoning_tokens: observed.reasoning,
             total_cost: cost,
             actual_cost: cost,
             cost,
-            rate_multiplier: ctx.rate_mult,
+            rate_multiplier: ctx.rate_mult(),
             stream: ctx.stream,
             duration_ms: outcome.duration_ms,
             ip_address: ctx.ip_address.clone(),
@@ -510,6 +526,18 @@ impl Settlement {
                 tracing::warn!(user_id = ctx.user_id, event = %event, %err,
                     "write balance event failed");
             }
+        }
+    }
+
+    /// 还掉这次操作的配额预留。删一行不存在的预留是成功，所以这里不需要
+    /// 记住「刚才到底留没留」。
+    async fn release_quota(&self, ctx: &SettleCtx) {
+        let Some(store) = &self.quota else {
+            return;
+        };
+        if let Err(err) = store.release_reservation(&ctx.operation).await {
+            tracing::warn!(user_id = ctx.user_id, operation = %ctx.operation, %err,
+                "quota reservation release failed");
         }
     }
 

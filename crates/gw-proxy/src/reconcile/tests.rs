@@ -7,9 +7,7 @@ use std::sync::Arc;
 use gw_ledger::BillingOperationId;
 
 use super::*;
-use crate::testsupport::{
-    FakeCalculator, FakeLedger, FakeScanner, FakeUsageStore, RecordingMetrics,
-};
+use crate::testsupport::{FakeLedger, FakeScanner, FakeUsageStore, RecordingMetrics};
 
 struct Fixture {
     settlement: Settlement,
@@ -19,11 +17,7 @@ struct Fixture {
 fn fixture() -> Fixture {
     let store = FakeUsageStore::shared();
     Fixture {
-        settlement: Settlement::new(
-            FakeLedger::with_balance(100.0),
-            FakeCalculator::shared(),
-            store.clone(),
-        ),
+        settlement: Settlement::new(FakeLedger::with_balance(100.0), store.clone()),
         store,
     }
 }

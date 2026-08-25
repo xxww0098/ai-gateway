@@ -73,6 +73,7 @@ fn billing_peek(body: &[u8]) -> BillingPeek {
 /// A real cache-backed calculator so trim/case variants can miss the table
 /// when they fail to share a key. The default rate is far from the row so a
 /// miss cannot accidentally equal a hit.
+#[allow(dead_code)]
 fn priced_calculator(model_id: &str, input: f64, output: f64) -> crate::adapters::SharedCalculator {
     let row = gw_model::ModelPrice {
         id: 1,
@@ -171,14 +172,15 @@ fn the_token_approximation_is_monotone_and_never_undercounts_by_more_than_a_toke
 #[test]
 fn the_upper_bound_dominates_every_estimate_it_is_built_from() {
     let calc = crate::testsupport::FakeCalculator::default();
+    let quote = calc.quote("gpt-4o", 1.0);
     for max_tokens in [0, 1, 512, 100_000] {
         for stream in [false, true] {
             for hold in [0.0, 0.01, 5.0] {
-                let bound = preflight_upper_bound(&calc, "gpt-4o", max_tokens, stream, 1.0, hold);
+                let bound = preflight_upper_bound(&quote, max_tokens, stream, hold);
                 assert!(bound >= hold);
-                assert!(bound >= calc.estimate_with_max_tokens("gpt-4o", max_tokens, stream, 1.0));
+                assert!(bound >= quote.estimate_with_max_tokens(max_tokens, stream));
                 assert!(
-                    bound >= calc.estimate("gpt-4o", true, 1.0),
+                    bound >= quote.estimate(true),
                     "the streaming estimate is the guard against an absent or absurd cap",
                 );
             }
@@ -200,23 +202,49 @@ fn quota_with(daily: Option<f64>, used: f64) -> SubscriptionQuota {
 #[test]
 fn a_quota_only_rejects_once_the_estimate_would_cross_it() {
     let quota = quota_with(Some(10.0), 9.0);
-    assert_eq!(evaluate_quota(&quota, 0.5), None);
+    assert_eq!(evaluate_quota(&quota, 0.0, 0.5), None);
     assert_eq!(
-        evaluate_quota(&quota, 1.0),
+        evaluate_quota(&quota, 0.0, 1.0),
         None,
         "landing exactly on the limit is allowed"
     );
-    assert!(evaluate_quota(&quota, 1.5).is_some());
+    assert!(evaluate_quota(&quota, 0.0, 1.5).is_some());
+}
+
+/// **在途预留和已结算的用量一样占额度。**
+///
+/// 收敛前这个比较只看已结算的那一列，于是一千个在途请求对限额完全隐形，
+/// 限额只在它们陆续落账之后才追上来 —— 那时超的已经超了。
+#[test]
+fn outstanding_reservations_consume_the_limit_just_like_settled_usage() {
+    let quota = quota_with(Some(10.0), 5.0);
+    assert_eq!(evaluate_quota(&quota, 0.0, 4.0), None, "无在途时放行");
+    assert!(
+        evaluate_quota(&quota, 4.0, 4.0).is_some(),
+        "已用 5 + 在途 4 + 这一笔 4 = 13 > 10，必须拒",
+    );
+    // 「已用 x + 在途 y」和「已用 x+y + 无在途」必须是同一个判定：
+    // 在途负债不是一个折价的负债。
+    for (used, reserved) in [(5.0, 4.0), (7.0, 2.0), (9.0, 0.0)] {
+        assert_eq!(
+            evaluate_quota(&quota_with(Some(10.0), used), reserved, 1.0).is_some(),
+            evaluate_quota(&quota_with(Some(10.0), used + reserved), 0.0, 1.0).is_some(),
+            "used={used} reserved={reserved}",
+        );
+    }
 }
 
 #[test]
 fn an_unset_limit_never_rejects() {
-    assert_eq!(evaluate_quota(&quota_with(None, 1_000.0), 500.0), None);
+    assert_eq!(
+        evaluate_quota(&quota_with(None, 1_000.0), 1_000.0, 500.0),
+        None
+    );
 }
 
 #[test]
 fn each_period_reports_its_own_reason() {
-    let daily = evaluate_quota(&quota_with(Some(1.0), 1.0), 1.0).expect("daily rejects");
+    let daily = evaluate_quota(&quota_with(Some(1.0), 1.0), 0.0, 1.0).expect("daily rejects");
     assert!(daily.contains("daily"));
 
     let weekly = evaluate_quota(
@@ -225,6 +253,7 @@ fn each_period_reports_its_own_reason() {
             weekly_usage_usd: 1.0,
             ..SubscriptionQuota::default()
         },
+        0.0,
         1.0,
     )
     .expect("weekly rejects");
@@ -236,6 +265,7 @@ fn each_period_reports_its_own_reason() {
             monthly_usage_usd: 1.0,
             ..SubscriptionQuota::default()
         },
+        0.0,
         1.0,
     )
     .expect("monthly rejects");
@@ -391,7 +421,8 @@ fn the_breaker_key_is_derived_from_the_model_family() {
 fn compute_reservation_pairs_hold_with_a_dominating_floor() {
     let calc = crate::testsupport::FakeCalculator::default();
     let peek = billing_peek(chat_body("gpt-4o").to_string().as_bytes());
-    let (hold, floor) = compute_reservation(&peek, 1.0, &calc);
+    let quote = calc.quote(&peek.price_key, 1.0);
+    let (hold, floor) = compute_reservation(&peek, &quote);
     assert!(hold > 0.0);
     assert!(
         floor >= hold,
@@ -399,14 +430,7 @@ fn compute_reservation_pairs_hold_with_a_dominating_floor() {
     );
     assert_eq!(
         floor,
-        preflight_upper_bound(
-            &calc,
-            &peek.price_key,
-            peek.max_tokens,
-            peek.stream,
-            1.0,
-            hold,
-        ),
+        preflight_upper_bound(&quote, peek.max_tokens, peek.stream, hold),
     );
 }
 
@@ -416,27 +440,25 @@ fn compute_reservation_pairs_hold_with_a_dominating_floor() {
 #[test]
 fn compute_reservation_is_invariant_to_model_trim_and_case() {
     let calc = priced_calculator("Mix-Id", 3.0, 7.0);
-    let variants = ["Mix-Id", "mix-id", "MIX-ID", "  mix-id  "];
-    let pairs: Vec<(f64, f64)> = variants
-        .iter()
-        .map(|model| {
-            let body = format!(r#"{{"model":"{model}","max_tokens":128}}"#);
-            compute_reservation(&billing_peek(body.as_bytes()), 1.5, &calc)
-        })
-        .collect();
-    let first = pairs[0];
-    for pair in &pairs[1..] {
+    let reservation_for = |model: &str| {
+        let body = format!(r#"{{"model":"{model}","max_tokens":128}}"#);
+        let peek = billing_peek(body.as_bytes());
+        let quote = calc.quote(&peek.price_key, 1.5);
+        compute_reservation(&peek, &quote)
+    };
+    let first = reservation_for("Mix-Id");
+    for variant in ["mix-id", "MIX-ID", "  mix-id  "] {
         assert_eq!(
-            *pair, first,
+            reservation_for(variant),
+            first,
             "trim/case variants must share one (hold, floor)",
         );
     }
-    let miss = compute_reservation(
-        &billing_peek(br#"{"model":"other-id","max_tokens":128}"#),
-        1.5,
-        &calc,
+    assert_ne!(
+        reservation_for("other-id"),
+        first,
+        "a different model must not collide",
     );
-    assert_ne!(miss, first, "a different model must not collide");
 }
 
 // ------------------------------------------------------------ admit_operation
@@ -509,7 +531,7 @@ async fn a_budget_token_reservation_still_writes_the_durable_operation() {
 async fn an_insufficient_balance_402_quotes_the_peeked_available() {
     let harness = Harness::build();
     let peek = billing_peek(chat_body("gpt-4o").to_string().as_bytes());
-    let (_hold, floor) = compute_reservation(&peek, 1.0, harness.calc.as_ref());
+    let (_hold, floor) = compute_reservation(&peek, &harness.calc.quote(&peek.price_key, 1.0));
     let quoted_available = floor - 0.01;
     assert!(
         quoted_available > 0.0,
@@ -539,7 +561,7 @@ async fn an_insufficient_balance_402_quotes_the_peeked_available() {
 async fn concurrent_requests_cannot_pass_the_floor_twice_on_one_balance() {
     let harness = Harness::build();
     let peek = billing_peek(chat_body("gpt-4o").to_string().as_bytes());
-    let (_hold, floor) = compute_reservation(&peek, 1.0, harness.calc.as_ref());
+    let (_hold, floor) = compute_reservation(&peek, &harness.calc.quote(&peek.price_key, 1.0));
     *harness.ledger.balance.lock() = floor;
 
     let router = harness.stub_router(StatusCode::OK);
@@ -580,3 +602,4 @@ async fn concurrent_requests_cannot_pass_the_floor_twice_on_one_balance() {
 }
 
 mod middleware;
+mod reservation;

@@ -320,11 +320,7 @@ impl ChannelPool {
             .map(|v| v.clone())
     }
 
-    fn pick_from<'a>(
-        &self,
-        auths: &'a [AuthRecord],
-        exclude: &[String],
-    ) -> Option<&'a AuthRecord> {
+    fn pick_from<'a>(&self, auths: &'a [AuthRecord], exclude: &[String]) -> Option<&'a AuthRecord> {
         let policy_snapshot = self
             .policies
             .as_ref()

@@ -100,3 +100,31 @@ exec(compile(code, str(BOOTSTRAP), "exec"), {
     "__file__": str(BOOTSTRAP),
     "__name__": "__main__",
 })
+
+
+def replace_generated(path: str, old: str, new: str) -> None:
+    target = Path(path)
+    generated = target.read_text(encoding="utf-8")
+    if generated.count(old) != 1:
+        raise RuntimeError(
+            f"{path}: expected one generated occurrence of {old!r}, "
+            f"got {generated.count(old)}"
+        )
+    target.write_text(generated.replace(old, new, 1), encoding="utf-8")
+
+
+# Clippy is a release gate. `finish()` returns an Option, not a guard; binding
+# it to `_` communicates intentional discard without invoking drop_non_drop.
+replace_generated(
+    "crates/gw-relay/src/probe/tests.rs",
+    "    drop(probe.finish());\n",
+    "    let _ = probe.finish();\n",
+)
+
+# The enum variant is visible to the whole routes module, so its payload type
+# must be visible at the same boundary. This stays crate-internal.
+replace_generated(
+    "crates/gw-proxy/src/routes/translation.rs",
+    "struct SharedUsage(Arc<Mutex<Option<Option<RelayUsage>>>>);",
+    "pub(super) struct SharedUsage(Arc<Mutex<Option<Option<RelayUsage>>>>);",
+)

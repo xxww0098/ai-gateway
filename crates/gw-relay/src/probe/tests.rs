@@ -5,7 +5,7 @@
 
 use bytes::Bytes;
 
-use super::{SseUsageProbe, UsageShape};
+use super::{MAX_JSON, SseUsageProbe, UsageShape};
 use crate::contract::{RelayUsage, UsageProbe};
 
 /// 把 `text` 按 `chunk` 字节切成帧喂进去 —— 切法故意与行边界无关。
@@ -25,9 +25,6 @@ fn feed(shape: UsageShape, text: &str, chunk: usize) -> Option<RelayUsage> {
 }
 
 /// 同一段字节，无论按几字节切帧，解析结果都必须相同。
-///
-/// 这是增量行解析取代「每 chunk 全量 memcpy」（缺陷 #16）之后必须守住的性质：
-/// 帧边界与行边界无关。
 fn stable_across_framings(shape: UsageShape, text: &str) -> RelayUsage {
     let baseline = feed(shape, text, text.len()).expect("整块喂必须能解析出 usage");
     for chunk in 1..=17 {
@@ -49,10 +46,21 @@ const OPENAI_STREAM: &str = concat!(
     "data: [DONE]\n\n",
 );
 
+const RESPONSES_STREAM: &str = concat!(
+    "event: response.output_text.delta\n",
+    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+    "event: response.completed\n",
+    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",",
+    "\"usage\":{\"input_tokens\":19,\"output_tokens\":7,",
+    "\"input_tokens_details\":{\"cached_tokens\":6},",
+    "\"output_tokens_details\":{\"reasoning_tokens\":2}}}}\n\n",
+);
+
 const ANTHROPIC_STREAM: &str = concat!(
     "event: message_start\n",
     "data: {\"type\":\"message_start\",\"message\":{\"usage\":",
-    "{\"input_tokens\":25,\"cache_read_input_tokens\":10}}}\n\n",
+    "{\"input_tokens\":25,\"cache_creation_input_tokens\":4,",
+    "\"cache_read_input_tokens\":10}}}\n\n",
     "event: content_block_delta\n",
     "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hi\"}}\n\n",
     "event: message_delta\n",
@@ -69,7 +77,6 @@ const GOOGLE_STREAM: &str = concat!(
     "\"thoughtsTokenCount\":7,\"cachedContentTokenCount\":3}}\n\n",
 );
 
-/// OpenAI：usage 在末帧。注释行、`[DONE]`、中间的 delta 帧一律不干扰。
 #[test]
 fn the_openai_terminal_usage_frame_is_parsed() {
     let usage = stable_across_framings(UsageShape::OpenAi, OPENAI_STREAM);
@@ -84,15 +91,31 @@ fn the_openai_terminal_usage_frame_is_parsed() {
     );
 }
 
-/// Anthropic：`input_tokens` 在**首帧**，`output_tokens` 在**末帧**，
-/// 两者必须都活到最后。
+/// Responses API 的流式终局不是顶层 `usage`，而是
+/// `response.completed.response.usage`。
 #[test]
-fn the_anthropic_head_and_tail_frames_are_merged() {
+fn the_responses_terminal_event_usage_is_parsed() {
+    let usage = stable_across_framings(UsageShape::OpenAi, RESPONSES_STREAM);
+    assert_eq!(
+        usage,
+        RelayUsage {
+            input_tokens: Some(19),
+            output_tokens: Some(7),
+            cached_tokens: Some(6),
+            reasoning_tokens: Some(2),
+        }
+    );
+}
+
+/// Anthropic 的 `input_tokens` 是未缓存输入；网关内部的 input 列必须恢复成
+/// 全输入，且只有 cache read 是 cached 子集。cache creation 留在普通输入里。
+#[test]
+fn the_anthropic_head_and_tail_frames_are_merged_without_double_subtracting_cache() {
     let usage = stable_across_framings(UsageShape::Anthropic, ANTHROPIC_STREAM);
     assert_eq!(
         usage,
         RelayUsage {
-            input_tokens: Some(25),
+            input_tokens: Some(39),
             output_tokens: Some(42),
             cached_tokens: Some(10),
             reasoning_tokens: None,
@@ -100,7 +123,6 @@ fn the_anthropic_head_and_tail_frames_are_merged() {
     );
 }
 
-/// Google：`usageMetadata` 是累计值，最后一帧才是权威值。
 #[test]
 fn the_google_cumulative_usage_takes_the_last_frame() {
     let usage = stable_across_framings(UsageShape::Google, GOOGLE_STREAM);
@@ -116,9 +138,6 @@ fn the_google_cumulative_usage_takes_the_last_frame() {
 }
 
 /// **「缺失」与「零」必须能分开** —— 计费的 fallback / strict 分支全挂在这上面。
-///
-/// 把 `!found.is_empty()` 换成 gw-provider 那个「任一列非零」的 `has_values()`
-/// 这条就红：上游明确报的全零会被当成「没给」，于是按估算重复计费。
 #[test]
 fn an_explicit_zero_is_not_the_same_as_a_missing_usage() {
     let absent = feed(
@@ -140,7 +159,6 @@ fn an_explicit_zero_is_not_the_same_as_a_missing_usage() {
     assert!(!zeros.is_empty());
 }
 
-/// 非流式：同一套解析器吃完整 body（中继把整块交给 `observe`）。
 #[test]
 fn a_complete_non_streaming_body_is_parsed_by_the_same_probe() {
     let body = concat!(
@@ -164,8 +182,6 @@ fn a_complete_non_streaming_body_is_parsed_by_the_same_probe() {
     );
 }
 
-/// `/v1/responses` 的 usage 键名与 chat/completions 不同名。
-/// 缺陷 #1 修好之后这条路才真的通，所以它必须被认出来。
 #[test]
 fn the_responses_api_usage_shape_is_recognised() {
     let body = concat!(
@@ -188,9 +204,37 @@ fn the_responses_api_usage_shape_is_recognised() {
     );
 }
 
-/// 缺陷 #16 的守护测试：跨帧缓冲只在**单行**量级，不随流量增长。
-///
-/// 把它改回「每 chunk `extend_from_slice` 进一个 tail 缓冲」这条就红。
+/// 反向代理可能先吐一个空白数据帧。判型必须等到第一个非空白帧，不能因此把
+/// 后续 JSON 当 SSE。
+#[test]
+fn a_whitespace_only_first_frame_does_not_hide_non_streaming_usage() {
+    let (probe, handle) = SseUsageProbe::new(UsageShape::OpenAi);
+    let mut probe = Box::new(probe);
+    probe.observe(&Bytes::from_static(b"\r\n\t"));
+    probe.observe(&Bytes::from_static(
+        b"{\"usage\":{\"prompt_tokens\":13,\"completion_tokens\":5}}",
+    ));
+    drop(probe.finish());
+
+    let usage = handle.get().expect("已结束").expect("有 usage");
+    assert_eq!(usage.input_tokens, Some(13));
+    assert_eq!(usage.output_tokens, Some(5));
+}
+
+/// 非流式旁路累积的上限也必须覆盖**第一帧**。此前第一帧可以一次性复制任意
+/// 大小，恶意上游只需单个巨帧就能绕过 8 MiB 闸门。
+#[test]
+fn an_oversized_first_json_frame_is_discarded_without_allocating_unbounded_state() {
+    let (probe, handle) = SseUsageProbe::new(UsageShape::OpenAi);
+    let mut probe = Box::new(probe);
+    let mut huge = vec![b'x'; MAX_JSON + 1];
+    huge[0] = b'{';
+    probe.observe(&Bytes::from(huge));
+    assert_eq!(probe.buffered_len(), 0);
+    assert_eq!(probe.finish(), None);
+    assert_eq!(handle.get(), Some(None));
+}
+
 #[test]
 fn the_cross_frame_buffer_stays_at_line_scale() {
     let (mut probe, _) = SseUsageProbe::new(UsageShape::OpenAi);
@@ -201,7 +245,6 @@ fn the_cross_frame_buffer_stays_at_line_scale() {
     let (head, tail) = (line.slice(..37), line.slice(37..));
 
     for _ in 0..2000 {
-        // 故意把每一行切成两帧，逼出跨帧路径。
         probe.observe(&head);
         assert!(probe.buffered_len() <= line.len());
         probe.observe(&tail);
@@ -209,8 +252,6 @@ fn the_cross_frame_buffer_stays_at_line_scale() {
     }
 }
 
-/// 上游是信任边界外的输入：一个永远不发 `\n` 的流不能把缓冲撑到 OOM，
-/// 而且越过那一行之后解析必须能恢复。
 #[test]
 fn an_endless_line_cannot_grow_the_buffer_without_bound() {
     let (probe, _) = SseUsageProbe::new(UsageShape::OpenAi);
@@ -238,7 +279,6 @@ fn an_endless_line_cannot_grow_the_buffer_without_bound() {
     );
 }
 
-/// 只有 Anthropic 需要首帧；其余形状不必为头窗口付钱。
 #[test]
 fn only_the_anthropic_shape_asks_for_the_head_window() {
     for shape in [UsageShape::OpenAi, UsageShape::Google] {
@@ -247,7 +287,6 @@ fn only_the_anthropic_shape_asks_for_the_head_window() {
     assert!(SseUsageProbe::new(UsageShape::Anthropic).0.needs_head());
 }
 
-/// 句柄三态：没结束 / 结束了但上游没给 / 结束了且给了。
 #[test]
 fn the_handle_separates_pending_from_absent() {
     let (probe, handle) = SseUsageProbe::new(UsageShape::OpenAi);
@@ -256,8 +295,6 @@ fn the_handle_separates_pending_from_absent() {
     assert_eq!(handle.get(), Some(None), "结束了，但上游没给");
 }
 
-/// SSE 的非 `data:` 行（`event:` / `id:` / `retry:` / 注释 / 空行）只被读，
-/// 不影响结果 —— 中继层不解析 SSE，probe 也只挑自己要的那一种行。
 #[test]
 fn non_data_sse_lines_are_ignored() {
     let noisy = concat!(
@@ -276,17 +313,10 @@ fn non_data_sse_lines_are_ignored() {
     );
 }
 
-/// 非流式 JSON 被切成多帧后，usage 照样解析得出来。
-///
-/// 守护的 bug：`observe` 只在**首帧**以 `{` 开头时解析一次整块。中继改成逐帧
-/// 转发（上游读与客户端写并行，见 `docs/relay-perf-acceptance.md` §4.1）之后，
-/// 1 MiB 的响应会被 reqwest 切成几十帧 —— 首帧是半截 JSON，解析必然失败。
-/// 那样每一次非流式请求都会静默落 fallback 计费，而没有任何断言会红。
 #[test]
 fn a_non_streaming_json_body_survives_being_split_across_frames() {
     let whole = br#"{"id":"x","usage":{"prompt_tokens":11,"completion_tokens":22}}"#;
 
-    // 逐个切点都试一遍：任何一处被切开都不该丢 usage。
     for cut in 1..whole.len() {
         let (mut probe, handle) = SseUsageProbe::new(UsageShape::OpenAi);
         probe.observe(&Bytes::copy_from_slice(&whole[..cut]));

@@ -28,7 +28,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Apply Google stream framing hardening
-        run: python tools/one_shot_google_stream_framing.py
+        shell: bash
+        run: |
+          python tools/one_shot_google_stream_framing.py
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("crates/gw-proxy/src/routes/tests/stream.rs")
+          text = path.read_text(encoding="utf-8")
+          old = "use super::*;\n"
+          new = "use axum::body::Bytes;\n\nuse super::*;\n"
+          if new not in text:
+              if text.count(old) != 1:
+                  raise RuntimeError("stream test import anchor not found")
+              path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
 
       - name: Format changed Rust files
         run: |

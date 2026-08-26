@@ -34,6 +34,7 @@ jobs:
       - name: Format changed Rust files
         run: |
           rustfmt --edition 2024 \
+            crates/gw-relay/src/probe/tests.rs \
             crates/gw-relay/src/translate/anthropic.rs \
             crates/gw-relay/src/translate/anthropic/to_anthropic.rs \
             crates/gw-relay/src/translate/anthropic/to_openai.rs \
@@ -82,6 +83,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add \
+            crates/gw-relay/src/probe/tests.rs \
             crates/gw-relay/src/translate/anthropic.rs \
             crates/gw-relay/src/translate/anthropic/to_anthropic.rs \
             crates/gw-relay/src/translate/anthropic/to_openai.rs \

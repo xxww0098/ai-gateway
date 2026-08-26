@@ -47,7 +47,7 @@ if code.count(old) != 1:
     raise RuntimeError(f"expected one embedded Claude patch block, got {code.count(old)}")
 code = code.replace(old, new, 1)
 
-marker = 'print("core hardening patch applied")\n'
+marker = 'print("core hardening patch applied")'
 extra = r'''
 # Keep the non-billable count-tokens route on the same exact-query and usage
 # handle contracts as the inference routes.

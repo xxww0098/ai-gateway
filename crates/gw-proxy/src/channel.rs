@@ -12,9 +12,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use gw_authcore::AuthRecord;
-use parking_lot::{Mutex, RwLock};
 
 use crate::ports::{ChannelPolicy, ChannelPolicyStore};
 
@@ -25,16 +25,20 @@ pub const DEFAULT_FAILURE_THRESHOLD: u32 = 3;
 pub const DEFAULT_COOLDOWN: Duration = Duration::from_secs(30);
 
 /// Upper clamp on a configured weight, so a misconfigured row cannot blow up
-/// the candidate list.
+/// the selector's arithmetic.
 pub const MAX_WEIGHT: i64 = 100;
+
+/// Process-local affinity is an optimisation, not durable routing state. Bound
+/// it so untrusted `(tenant, model)` cardinality cannot grow memory forever.
+pub const MAX_AFFINITY_ENTRIES: usize = 16 * 1024;
 
 /// Per-account health, so a failing upstream is taken out of rotation and
 /// returned automatically after a cooldown.
 ///
-/// A pure, concurrency-safe tracker with no billing side effects and an
-/// injectable clock for deterministic tests.
+/// A sharded map is used instead of one global mutex: unrelated upstream
+/// accounts must not serialize every health read and result report.
 pub struct ChannelHealth {
-    state: Mutex<HashMap<String, ChannelState>>,
+    state: DashMap<String, ChannelState>,
     failure_threshold: u32,
     cooldown: Duration,
     clock: Box<dyn Fn() -> Instant + Send + Sync>,
@@ -59,7 +63,7 @@ impl ChannelHealth {
     /// Non-positive arguments take the defaults.
     pub fn new(failure_threshold: u32, cooldown: Duration) -> Self {
         Self {
-            state: Mutex::new(HashMap::new()),
+            state: DashMap::new(),
             failure_threshold: if failure_threshold == 0 {
                 DEFAULT_FAILURE_THRESHOLD
             } else {
@@ -88,13 +92,13 @@ impl ChannelHealth {
         if auth_id.is_empty() {
             return;
         }
-        let mut state = self.state.lock();
         if success {
-            state.remove(auth_id);
+            self.state.remove(auth_id);
             return;
         }
-        let entry = state.entry(auth_id.to_owned()).or_default();
-        entry.consecutive_failures += 1;
+
+        let mut entry = self.state.entry(auth_id.to_owned()).or_default();
+        entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
         if entry.consecutive_failures >= self.failure_threshold {
             let cool = retry_after
                 .filter(|r| *r > self.cooldown)
@@ -104,21 +108,20 @@ impl ChannelHealth {
     }
 
     /// Whether the account may currently be selected. An unknown account, or
-    /// one whose cooldown elapsed, is healthy; an elapsed cooldown is cleared
-    /// so the next attempt is a clean half-open probe.
+    /// one whose cooldown elapsed, is healthy. Expiry resets the streak in
+    /// place, avoiding a remove-versus-new-failure race on the same key.
     pub fn is_healthy(&self, auth_id: &str) -> bool {
         if auth_id.is_empty() {
             return true;
         }
-        let mut state = self.state.lock();
-        let Some(entry) = state.get(auth_id) else {
+        let Some(mut entry) = self.state.get_mut(auth_id) else {
             return true;
         };
         let Some(until) = entry.cooldown_until else {
             return true;
         };
         if (self.clock)() >= until {
-            state.remove(auth_id); // cooldown elapsed -> half-open probe
+            *entry = ChannelState::default();
             return true;
         }
         false
@@ -129,8 +132,7 @@ impl ChannelHealth {
     pub fn benched_count(&self) -> i64 {
         let now = (self.clock)();
         self.state
-            .lock()
-            .values()
+            .iter()
             .filter(|s| s.cooldown_until.is_some_and(|until| now < until))
             .count() as i64
     }
@@ -139,7 +141,8 @@ impl ChannelHealth {
 /// In-memory snapshot of `channel_policies`, refreshed off the hot path.
 pub struct ChannelPolicyCache {
     store: Arc<dyn ChannelPolicyStore>,
-    snapshot: RwLock<HashMap<String, ChannelPolicy>>,
+    /// Readers take an atomic snapshot; a refresh never blocks inference.
+    snapshot: ArcSwap<HashMap<String, ChannelPolicy>>,
 }
 
 impl ChannelPolicyCache {
@@ -147,25 +150,25 @@ impl ChannelPolicyCache {
     pub fn new(store: Arc<dyn ChannelPolicyStore>) -> Self {
         Self {
             store,
-            snapshot: RwLock::new(HashMap::new()),
+            snapshot: ArcSwap::from_pointee(HashMap::new()),
         }
     }
 
-    /// Reloads every policy row.
+    /// Reloads every policy row and publishes it atomically.
     pub async fn refresh(&self) -> anyhow::Result<()> {
         let rows = self.store.list_channel_policies().await?;
         let next = rows
             .into_iter()
             .map(|p| (p.auth_id.clone(), p))
             .collect::<HashMap<_, _>>();
-        *self.snapshot.write() = next;
+        self.snapshot.store(Arc::new(next));
         Ok(())
     }
 
     /// Policy for `auth_id`, defaulting to weight 1 / priority 0 / enabled.
     pub fn lookup(&self, auth_id: &str) -> ChannelPolicy {
         self.snapshot
-            .read()
+            .load()
             .get(auth_id)
             .cloned()
             .unwrap_or_else(|| ChannelPolicy {
@@ -193,8 +196,9 @@ impl ChannelPolicyCache {
 
 /// Health- and policy-aware upstream account selection.
 ///
-/// The inner round-robin is inlined because there is no SDK selector left to
-/// delegate to.
+/// Selection allocates only one candidate vector and never expands it by
+/// weight. Weight is applied by walking cumulative ranges, so the cost remains
+/// O(number of accounts), independent of configured weight.
 pub struct ChannelPool {
     health: Arc<ChannelHealth>,
     policies: Option<Arc<ChannelPolicyCache>>,
@@ -202,6 +206,14 @@ pub struct ChannelPool {
     /// NewAPI 风格的渠道亲和：同一租户打同一模型时粘在上次成功的账号上。
     /// 进程内、无持久化；账号不健康或已被排除时回落到加权轮询。
     affinity: DashMap<(i64, String), String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Candidate<'a> {
+    auth: &'a AuthRecord,
+    weight: usize,
+    priority: i64,
+    healthy: bool,
 }
 
 impl ChannelPool {
@@ -227,8 +239,7 @@ impl ChannelPool {
         &self.health
     }
 
-    /// Normalised policy for one account, with the weight clamped to
-    /// `[1, MAX_WEIGHT]`.
+    /// Normalised policy for one account.
     fn policy(&self, auth_id: &str) -> ChannelPolicy {
         let mut policy = match &self.policies {
             Some(cache) => cache.lookup(auth_id),
@@ -245,26 +256,22 @@ impl ChannelPool {
 
     /// Picks one account for `(provider, model)`.
     ///
-    /// Drops unhealthy and disabled accounts, keeps only the highest-priority
-    /// tier that still has a survivor, expands by weight, and round-robins. If
-    /// nothing is healthy and enabled it **fails open** over the full set:
-    /// trying a benched account beats telling the client "no auth available".
+    /// Drops operator-disabled, unusable and policy-disabled accounts, keeps
+    /// only the highest-priority tier, and weighted-round-robins it. If every
+    /// otherwise eligible account is merely in health cooldown, selection
+    /// fails open across those eligible accounts. Kill switches are never
+    /// bypassed by fail-open.
     pub fn pick<'a>(&self, auths: &'a [AuthRecord]) -> Option<&'a AuthRecord> {
-        self.pick_from(auths.iter())
+        self.pick_from(auths, &[])
     }
 
-    /// 加权轮询，跳过本请求已经试过的账号。**不克隆 `AuthRecord`**
-    /// （凭证解密结果在热路径上再 memcpy 一遍没有意义）。
+    /// 加权轮询，跳过本请求已经试过的账号。**不克隆 `AuthRecord`**。
     pub fn pick_excluding<'a>(
         &self,
         auths: &'a [AuthRecord],
         exclude: &[String],
     ) -> Option<&'a AuthRecord> {
-        self.pick_from(
-            auths
-                .iter()
-                .filter(|a| exclude.iter().all(|id| id != &a.id)),
-        )
+        self.pick_from(auths, exclude)
     }
 
     /// 先粘上次成功的账号（仍健康、未被排除），否则回落 [`Self::pick_excluding`]。
@@ -293,8 +300,13 @@ impl ChannelPool {
         if user_id == 0 || model.is_empty() || auth_id.is_empty() {
             return;
         }
-        self.affinity
-            .insert((user_id, model.to_owned()), auth_id.to_owned());
+        let key = (user_id, model.to_owned());
+        if self.affinity.len() >= MAX_AFFINITY_ENTRIES && !self.affinity.contains_key(&key) {
+            // Affinity is only a latency hint. Dropping old hints is preferable
+            // to letting attacker-controlled model cardinality become a leak.
+            self.affinity.clear();
+        }
+        self.affinity.insert(key, auth_id.to_owned());
     }
 
     /// 上次成功打这个 (user, model) 的账号。
@@ -308,46 +320,68 @@ impl ChannelPool {
             .map(|v| v.clone())
     }
 
-    fn pick_from<'a, I>(&self, auths: I) -> Option<&'a AuthRecord>
-    where
-        I: IntoIterator<Item = &'a AuthRecord>,
-    {
-        let all: Vec<&AuthRecord> = auths.into_iter().collect();
-        if all.is_empty() {
-            return None;
-        }
-        let usable: Vec<(&AuthRecord, ChannelPolicy)> = all
-            .iter()
-            .copied()
-            .filter(|a| a.is_usable())
-            .filter(|a| self.health.is_healthy(&a.id))
-            .map(|a| (a, self.policy(&a.id)))
-            .filter(|(_, p)| p.enabled)
-            .collect();
+    fn pick_from<'a>(
+        &self,
+        auths: &'a [AuthRecord],
+        exclude: &[String],
+    ) -> Option<&'a AuthRecord> {
+        let policy_snapshot = self
+            .policies
+            .as_ref()
+            .map(|cache| cache.snapshot.load_full());
+        let mut candidates = Vec::with_capacity(auths.len());
 
-        if usable.is_empty() {
-            return self.round_robin(&all).copied();
-        }
-
-        let max_priority = usable.iter().map(|(_, p)| p.priority).max().unwrap_or(0);
-        let mut expanded: Vec<&AuthRecord> = Vec::new();
-        for (auth, policy) in &usable {
-            if policy.priority != max_priority {
+        for auth in auths {
+            if !auth.is_usable() || exclude.iter().any(|id| id == &auth.id) {
                 continue;
             }
-            for _ in 0..policy.weight {
-                expanded.push(*auth);
+            let stored = policy_snapshot
+                .as_deref()
+                .and_then(|snapshot| snapshot.get(&auth.id));
+            if stored.is_some_and(|policy| !policy.enabled) {
+                continue;
             }
+            let weight = stored
+                .map_or(1, |policy| policy.weight)
+                .clamp(1, MAX_WEIGHT) as usize;
+            let priority = stored.map_or(0, |policy| policy.priority);
+            candidates.push(Candidate {
+                auth,
+                weight,
+                priority,
+                healthy: self.health.is_healthy(&auth.id),
+            });
         }
-        self.round_robin(&expanded).copied()
-    }
 
-    fn round_robin<'a, T>(&self, items: &'a [T]) -> Option<&'a T> {
-        if items.is_empty() {
+        let use_health = candidates.iter().any(|candidate| candidate.healthy);
+        let max_priority = candidates
+            .iter()
+            .filter(|candidate| !use_health || candidate.healthy)
+            .map(|candidate| candidate.priority)
+            .max()?;
+        let total_weight = candidates
+            .iter()
+            .filter(|candidate| {
+                (!use_health || candidate.healthy) && candidate.priority == max_priority
+            })
+            .fold(0_usize, |sum, candidate| {
+                sum.saturating_add(candidate.weight)
+            });
+        if total_weight == 0 {
             return None;
         }
-        let n = self.cursor.fetch_add(1, Ordering::Relaxed);
-        items.get(n % items.len())
+
+        let mut ticket = self.cursor.fetch_add(1, Ordering::Relaxed) % total_weight;
+        for candidate in candidates {
+            if (use_health && !candidate.healthy) || candidate.priority != max_priority {
+                continue;
+            }
+            if ticket < candidate.weight {
+                return Some(candidate.auth);
+            }
+            ticket -= candidate.weight;
+        }
+        None
     }
 }
 

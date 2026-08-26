@@ -50,6 +50,7 @@ jobs:
             crates/gw-provider/src/vertex.rs \
             crates/gw-provider/src/vertex/tests.rs \
             crates/gw-proxy/src/routes.rs \
+            crates/gw-proxy/src/routes/catalogue.rs \
             crates/gw-proxy/src/routes/routing.rs \
             crates/gw-proxy/src/routes/translation.rs \
             crates/gw-proxy/src/routes/stream.rs \
@@ -97,6 +98,7 @@ jobs:
             crates/gw-provider/src/vertex.rs \
             crates/gw-provider/src/vertex/tests.rs \
             crates/gw-proxy/src/routes.rs \
+            crates/gw-proxy/src/routes/catalogue.rs \
             crates/gw-proxy/src/routes/routing.rs \
             crates/gw-proxy/src/routes/translation.rs \
             crates/gw-proxy/src/routes/stream.rs \

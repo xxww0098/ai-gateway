@@ -17,8 +17,8 @@ use crate::claude::shared::{
     self, append_query, default_content_negotiation, path_escape, set_query, trim_base_url,
 };
 use crate::common::{
-    PROVIDER_GEMINI, ProviderConfig, Redacted, nested_string, relay_timeouts, requested_model,
-    resolve_timeout, string_from_map,
+    PROVIDER_GEMINI, ProviderConfig, Redacted, nested_string, override_raw_query, relay_timeouts,
+    request_query, requested_model, resolve_timeout, string_from_map,
 };
 use crate::route::{RoutePlan, RoutePlanner};
 use crate::types::{ProviderError, ProviderRequest};
@@ -105,6 +105,7 @@ impl GeminiProvider {
     /// `alt=sse` is `set` after the caller's parameters are appended, so a
     /// caller cannot downgrade the framing the usage relay is built to parse.
     fn generate_content_endpoint(
+        raw_query: Option<&str>,
         query: &[(String, String)],
         base_url: &str,
         model: &str,
@@ -129,11 +130,20 @@ impl GeminiProvider {
             ProviderError::Other(anyhow::anyhow!("invalid gemini base_url: {err}"))
         })?;
 
-        let mut params = query.to_vec();
-        if stream {
-            set_query(&mut params, GEMINI_ALT_QUERY, "sse");
+        if let Some(raw) = raw_query {
+            let raw = if stream {
+                override_raw_query(raw, GEMINI_ALT_QUERY, "sse")
+            } else {
+                raw.to_owned()
+            };
+            append_query(&mut parsed, Some(&raw), &[]);
+        } else {
+            let mut params = query.to_vec();
+            if stream {
+                set_query(&mut params, GEMINI_ALT_QUERY, "sse");
+            }
+            append_query(&mut parsed, None, &params);
         }
-        append_query(&mut parsed, &params);
         Ok(parsed)
     }
 
@@ -162,7 +172,14 @@ impl GeminiProvider {
                 "gemini model is required"
             )));
         }
-        let endpoint = Self::generate_content_endpoint(&req.query, base_url, model, req.stream)?;
+        let raw_query = request_query(req);
+        let endpoint = Self::generate_content_endpoint(
+            Some(raw_query.as_ref()),
+            &[],
+            base_url,
+            model,
+            req.stream,
+        )?;
 
         let mut headers = HeaderMap::new();
         default_content_negotiation(&mut headers, req.stream);

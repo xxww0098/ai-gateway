@@ -339,6 +339,86 @@ pub fn upstream_dialect(surface: Surface) -> UpstreamDialect {
     }
 }
 
+// --- exact query forwarding -------------------------------------------------
+
+/// Returns the exact inbound query when production supplied one, otherwise
+/// serializes the legacy pair representation used by unit fixtures.
+#[must_use]
+pub fn request_query(req: &ProviderRequest) -> std::borrow::Cow<'_, str> {
+    if let Some(raw) = req.raw_query.as_deref() {
+        return std::borrow::Cow::Borrowed(raw);
+    }
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in &req.query {
+        serializer.append_pair(key, value);
+    }
+    std::borrow::Cow::Owned(serializer.finish())
+}
+
+/// Appends a raw query without decoding and re-encoding existing percent
+/// escapes. Existing provider-owned parameters stay first.
+pub fn append_raw_query(url: &mut url::Url, raw: &str) {
+    let raw = raw.strip_prefix('?').unwrap_or(raw);
+    if raw.is_empty() {
+        return;
+    }
+    let merged = match url.query() {
+        Some(existing) if !existing.is_empty() => format!("{existing}&{raw}"),
+        _ => raw.to_owned(),
+    };
+    url.set_query(Some(&merged));
+}
+
+/// Replaces every occurrence of a provider-owned query key while preserving all
+/// other raw segments byte-for-byte. Only the key is percent-decoded for the
+/// comparison; values and unrelated segments are never touched.
+#[must_use]
+pub fn override_raw_query(raw: &str, owned_key: &str, owned_value: &str) -> String {
+    fn hex(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    fn decoded_key(segment: &str) -> Option<Vec<u8>> {
+        let key = segment.split_once('=').map_or(segment, |(key, _)| key);
+        let bytes = key.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut at = 0;
+        while at < bytes.len() {
+            match bytes[at] {
+                b'+' => {
+                    out.push(b' ');
+                    at += 1;
+                }
+                b'%' if at + 2 < bytes.len() => {
+                    out.push(hex(bytes[at + 1])? * 16 + hex(bytes[at + 2])?);
+                    at += 3;
+                }
+                byte => {
+                    out.push(byte);
+                    at += 1;
+                }
+            }
+        }
+        Some(out)
+    }
+
+    let mut kept: Vec<&str> = raw
+        .strip_prefix('?')
+        .unwrap_or(raw)
+        .split('&')
+        .filter(|segment| !segment.is_empty())
+        .filter(|segment| decoded_key(segment).as_deref() != Some(owned_key.as_bytes()))
+        .collect();
+    let owned = format!("{owned_key}={owned_value}");
+    kept.push(&owned);
+    kept.join("&")
+}
+
 // --- endpoint construction ---------------------------------------------------
 
 /// The two endpoint leaves an OpenAI-compatible upstream exposes, in the order
@@ -356,7 +436,16 @@ pub fn chat_completions_endpoint(
     base_url: &str,
     query: &[(String, String)],
 ) -> Result<String, ProviderError> {
-    openai_compatible_endpoint(base_url, OPENAI_CHAT_LEAF, query)
+    openai_compatible_endpoint(base_url, OPENAI_CHAT_LEAF, None, query)
+}
+
+/// Production form that preserves the inbound query byte representation.
+pub fn chat_completions_endpoint_for(
+    base_url: &str,
+    req: &ProviderRequest,
+) -> Result<String, ProviderError> {
+    let raw = request_query(req);
+    openai_compatible_endpoint(base_url, OPENAI_CHAT_LEAF, Some(raw.as_ref()), &[])
 }
 
 /// Builds the `responses` endpoint for an OpenAI-compatible base URL.
@@ -376,7 +465,16 @@ pub fn responses_endpoint(
     base_url: &str,
     query: &[(String, String)],
 ) -> Result<String, ProviderError> {
-    openai_compatible_endpoint(base_url, OPENAI_RESPONSES_LEAF, query)
+    openai_compatible_endpoint(base_url, OPENAI_RESPONSES_LEAF, None, query)
+}
+
+/// Production form that preserves the inbound query byte representation.
+pub fn responses_endpoint_for(
+    base_url: &str,
+    req: &ProviderRequest,
+) -> Result<String, ProviderError> {
+    let raw = request_query(req);
+    openai_compatible_endpoint(base_url, OPENAI_RESPONSES_LEAF, Some(raw.as_ref()), &[])
 }
 
 /// Shared body of the two endpoint builders.
@@ -390,6 +488,7 @@ pub fn responses_endpoint(
 fn openai_compatible_endpoint(
     base_url: &str,
     leaf: &str,
+    raw_query: Option<&str>,
     query: &[(String, String)],
 ) -> Result<String, ProviderError> {
     let base = base_url.trim().trim_end_matches('/');
@@ -417,7 +516,9 @@ fn openai_compatible_endpoint(
     };
     let mut parsed = url::Url::parse(&endpoint)
         .map_err(|err| ProviderError::Other(anyhow::anyhow!("invalid base_url: {err}")))?;
-    if !query.is_empty() {
+    if let Some(raw) = raw_query {
+        append_raw_query(&mut parsed, raw);
+    } else if !query.is_empty() {
         let mut pairs = parsed.query_pairs_mut();
         for (key, value) in query {
             pairs.append_pair(key, value);

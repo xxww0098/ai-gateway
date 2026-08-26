@@ -540,3 +540,27 @@ fn a_route_plan_never_dumps_the_credential_it_carries() {
         assert!(!dump.contains(LIVE), "RoutePlan 把活密钥打了出来：{dump}");
     }
 }
+
+#[test]
+fn raw_query_percent_escapes_and_bare_flags_are_preserved() {
+    let req = crate::types::ProviderRequest {
+        raw_query: Some("tag=a%20b&plus=a+b&pct=%25&empty=&flag&key=a&key=b".to_owned()),
+        ..Default::default()
+    };
+    let endpoint =
+        super::chat_completions_endpoint_for("https://api.example.test", &req).expect("endpoint");
+    let parsed = url::Url::parse(&endpoint).expect("url");
+    assert_eq!(
+        parsed.query(),
+        Some("tag=a%20b&plus=a+b&pct=%25&empty=&flag&key=a&key=b"),
+    );
+}
+
+#[test]
+fn provider_owned_query_override_does_not_reencode_unrelated_segments() {
+    let raw = "alt=json&x=a%20b&%61lt=other&flag";
+    assert_eq!(
+        super::override_raw_query(raw, "alt", "sse"),
+        "x=a%20b&flag&alt=sse",
+    );
+}

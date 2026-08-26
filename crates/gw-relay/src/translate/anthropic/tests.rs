@@ -909,3 +909,38 @@ fn a_translator_reports_the_grid_cell_it_covers() {
         crate::UpstreamDialect::OpenAiChat
     );
 }
+
+#[test]
+fn a_late_system_message_is_rejected_instead_of_being_hoisted() {
+    let body = serde_json::json!({
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": "first"},
+            {"role": "system", "content": "late instruction"}
+        ]
+    });
+    let err = OpenAiToAnthropic
+        .translate_request("m", body.to_string().as_bytes())
+        .expect_err("late system changes ordering");
+    assert!(matches!(err, TranslateError::Unsupported(_)));
+}
+
+#[test]
+fn tool_arguments_must_encode_an_object_for_anthropic() {
+    let body = serde_json::json!({
+        "model": "m",
+        "messages": [{
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "f", "arguments": "[1,2,3]"}
+            }]
+        }]
+    });
+    let err = OpenAiToAnthropic
+        .translate_request("m", body.to_string().as_bytes())
+        .expect_err("Anthropic tool input is an object");
+    assert!(matches!(err, TranslateError::Malformed(_)));
+}

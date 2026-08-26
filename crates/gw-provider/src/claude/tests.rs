@@ -30,7 +30,7 @@ fn provider(base_url: &str, api_key: &str) -> ClaudeProvider {
 }
 
 fn endpoint(base_url: &str) -> Url {
-    ClaudeProvider::messages_endpoint(&[], base_url).expect("endpoint")
+    ClaudeProvider::messages_endpoint(None, &[], base_url).expect("endpoint")
 }
 
 // --- count_tokens（根除伪造值，`docs/relay-surface-plan.md` §2.1 缺陷 ①）--------
@@ -46,8 +46,8 @@ fn the_count_tokens_endpoint_hangs_off_the_messages_endpoint() {
         "https://relay.example.com/v1",
         "https://relay.example.com/v1/messages",
     ] {
-        let messages = ClaudeProvider::messages_endpoint(&[], base).expect("messages");
-        let counting = ClaudeProvider::count_tokens_endpoint(&[], base).expect("count");
+        let messages = ClaudeProvider::messages_endpoint(None, &[], base).expect("messages");
+        let counting = ClaudeProvider::count_tokens_endpoint(None, &[], base).expect("count");
         assert_eq!(
             counting.origin(),
             messages.origin(),
@@ -66,7 +66,7 @@ fn the_count_tokens_endpoint_hangs_off_the_messages_endpoint() {
 #[test]
 fn caller_query_parameters_reach_the_count_tokens_endpoint() {
     let query = vec![("beta".to_owned(), "1".to_owned())];
-    let url = ClaudeProvider::count_tokens_endpoint(&query, "https://relay.example.com")
+    let url = ClaudeProvider::count_tokens_endpoint(None, &query, "https://relay.example.com")
         .expect("endpoint");
     let pairs: Vec<(String, String)> = url
         .query_pairs()
@@ -104,6 +104,7 @@ fn trailing_slashes_and_padding_do_not_change_the_endpoint() {
 #[test]
 fn caller_query_parameters_reach_the_endpoint_in_order() {
     let url = ClaudeProvider::messages_endpoint(
+        None,
         &[
             ("beta".to_owned(), "first".to_owned()),
             ("beta".to_owned(), "second".to_owned()),
@@ -127,9 +128,9 @@ fn caller_query_parameters_reach_the_endpoint_in_order() {
 
 #[test]
 fn a_base_url_without_a_host_is_rejected() {
-    assert!(ClaudeProvider::messages_endpoint(&[], "not-a-url").is_err());
+    assert!(ClaudeProvider::messages_endpoint(None, &[], "not-a-url").is_err());
     assert!(
-        ClaudeProvider::messages_endpoint(&[], "https://").is_err(),
+        ClaudeProvider::messages_endpoint(None, &[], "https://").is_err(),
         "a hostless URL must not re-parse with a path segment as the host"
     );
     assert!(

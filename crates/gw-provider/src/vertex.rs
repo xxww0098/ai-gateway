@@ -496,6 +496,7 @@ impl VertexProvider {
 
     /// Builds the publisher-model endpoint.
     fn generate_content_endpoint(
+        raw_query: Option<&str>,
         query: &[(String, String)],
         endpoint: &VertexEndpoint,
         model: &str,
@@ -521,7 +522,7 @@ impl VertexProvider {
         let mut parsed = Url::parse(&url).map_err(|err| {
             ProviderError::Other(anyhow::anyhow!("invalid vertex base_url: {err}"))
         })?;
-        append_query(&mut parsed, query);
+        append_query(&mut parsed, raw_query, query);
         Ok(parsed)
     }
 
@@ -546,7 +547,13 @@ impl VertexProvider {
                 "vertex model is required"
             )));
         }
-        let url = Self::generate_content_endpoint(&req.query, endpoint, &model, req.stream)?;
+        let url = Self::generate_content_endpoint(
+            req.raw_query.as_deref(),
+            &req.query,
+            endpoint,
+            &model,
+            req.stream,
+        )?;
 
         let mut headers = HeaderMap::new();
         default_content_negotiation(&mut headers, req.stream);

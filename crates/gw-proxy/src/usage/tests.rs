@@ -18,7 +18,7 @@ fn inputs() -> SettlementInputs {
         upstream_failed: false,
         strict_mode: false,
         active_hold: Some(0.2),
-        streaming_estimate: 0.3,
+        fallback_estimate: 0.3,
     }
 }
 
@@ -75,14 +75,14 @@ fn a_present_envelope_is_billed_precisely_even_in_strict_mode() {
 }
 
 #[test]
-fn the_fallback_never_bills_below_the_hold_or_the_streaming_estimate() {
+fn the_fallback_never_bills_below_the_hold_or_the_fallback_estimate() {
     // "no free upstream output" is the whole point of this branch.
     for hold in [0.0, 0.1, 5.0] {
         for estimate in [0.0, 0.2, 3.0] {
             let plan = plan_settlement(&SettlementInputs {
                 usage_present: false,
                 active_hold: Some(hold),
-                streaming_estimate: estimate,
+                fallback_estimate: estimate,
                 ..inputs()
             });
             let SettlementPlan::Settle { cost, fallback } = plan else {

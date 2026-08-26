@@ -177,6 +177,8 @@ fn to_bytes(value: &Value) -> Result<Bytes, TranslateError> {
 /// 分块与 SSE 事件边界没有任何关系 —— 一个 `content_block_delta` 完全可能横跨两个
 /// TCP 段。这里内部缓一个半事件，`push` 只处理**已经完整**的事件，剩下的留到下次。
 /// 于是「一次喂一帧」和「一次喂半帧」两种调用方式都对。
+const MAX_SSE_EVENT: usize = 1024 * 1024;
+
 #[derive(Debug, Default)]
 struct SseSplit {
     buf: Vec<u8>,
@@ -184,17 +186,39 @@ struct SseSplit {
 
 impl SseSplit {
     /// 吃进一段字节，吐出其中所有**完整**的 SSE 事件（不含事件间的空行）。
-    fn push(&mut self, chunk: &[u8]) -> Vec<Vec<u8>> {
+    ///
+    /// 每个网络 chunk 只做一次尾部压缩，不再为每个小事件从 `Vec` 前端
+    /// `drain` 一次。一个 chunk 内有 N 个事件时，数据移动从潜在 O(N²)
+    /// 收敛为一次线性扫描 + 一次尾部移动。
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<Vec<u8>>, TranslateError> {
         self.buf.extend_from_slice(chunk);
         let mut out = Vec::new();
-        while let Some((end, skip)) = find_event_end(&self.buf) {
-            let event: Vec<u8> = self.buf.drain(..end).collect();
-            self.buf.drain(..skip);
-            if !event.is_empty() {
-                out.push(event);
+        let mut consumed = 0;
+
+        while let Some((relative_end, skip)) = find_event_end(&self.buf[consumed..]) {
+            let end = consumed + relative_end;
+            if end.saturating_sub(consumed) > MAX_SSE_EVENT {
+                self.buf.clear();
+                return Err(TranslateError::UpstreamShape(
+                    "上游 SSE 单事件超过 1 MiB 上限".to_owned(),
+                ));
             }
+            if end > consumed {
+                out.push(self.buf[consumed..end].to_vec());
+            }
+            consumed = end + skip;
         }
-        out
+
+        if consumed > 0 {
+            self.buf.drain(..consumed);
+        }
+        if self.buf.len() > MAX_SSE_EVENT {
+            self.buf.clear();
+            return Err(TranslateError::UpstreamShape(
+                "上游 SSE 事件未终止且超过 1 MiB 上限".to_owned(),
+            ));
+        }
+        Ok(out)
     }
 
     /// 流结束时缓冲区里剩下的那半个事件。上游正常收尾时通常只剩换行，返回 `None`。

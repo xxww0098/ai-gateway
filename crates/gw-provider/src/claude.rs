@@ -228,7 +228,11 @@ impl ClaudeProvider {
     /// origin; all three converge. The *base* is what gets validated, not the
     /// assembled endpoint: `url` is lenient about slashes for special schemes,
     /// so a hostless `https://` would otherwise re-parse with `v1` as the host.
-    fn messages_endpoint(query: &[(String, String)], base_url: &str) -> Result<Url, ProviderError> {
+    fn messages_endpoint(
+        raw_query: Option<&str>,
+        query: &[(String, String)],
+        base_url: &str,
+    ) -> Result<Url, ProviderError> {
         let mut base = shared::trim_base_url(base_url);
         if base.is_empty() {
             base = CLAUDE_DEFAULT_BASE_URL.to_owned();
@@ -245,7 +249,7 @@ impl ClaudeProvider {
         let mut parsed = Url::parse(&endpoint).map_err(|err| {
             ProviderError::Other(anyhow::anyhow!("invalid claude base_url: {err}"))
         })?;
-        append_query(&mut parsed, query);
+        append_query(&mut parsed, raw_query, query);
         Ok(parsed)
     }
 
@@ -254,13 +258,14 @@ impl ClaudeProvider {
     /// 刻意复用 [`Self::messages_endpoint`] 而不是再写一遍 base 归一化 ——
     /// 三种 base 形态（全路径 / `/v1` / 裸 origin）的收敛规则只该有一处。
     fn count_tokens_endpoint(
+        raw_query: Option<&str>,
         query: &[(String, String)],
         base_url: &str,
     ) -> Result<Url, ProviderError> {
-        let mut parsed = Self::messages_endpoint(&[], base_url)?;
+        let mut parsed = Self::messages_endpoint(None, &[], base_url)?;
         let path = format!("{}/count_tokens", parsed.path().trim_end_matches('/'));
         parsed.set_path(&path);
-        append_query(&mut parsed, query);
+        append_query(&mut parsed, raw_query, query);
         Ok(parsed)
     }
 
@@ -303,7 +308,7 @@ impl ClaudeProvider {
         }
         Ok(RoutePlan {
             provider: PROVIDER_CLAUDE,
-            endpoint: Self::messages_endpoint(&req.query, base_url)?,
+            endpoint: Self::messages_endpoint(req.raw_query.as_deref(), &req.query, base_url)?,
             credential: Credential::XApiKey(credential.value.clone()),
             headers: Self::outbound_headers(req, req.stream),
             body: None,
@@ -396,7 +401,7 @@ impl RoutePlanner for ClaudeProvider {
         }
         Ok(RoutePlan {
             provider: PROVIDER_CLAUDE,
-            endpoint: Self::count_tokens_endpoint(&req.query, &base_url)?,
+            endpoint: Self::count_tokens_endpoint(req.raw_query.as_deref(), &req.query, &base_url)?,
             credential: Credential::XApiKey(credential.value.clone()),
             headers: Self::outbound_headers(req, false),
             body: None,
@@ -569,7 +574,11 @@ pub(crate) mod shared {
     ///
     /// Order and duplicate keys are both significant, so this appends rather
     /// than merging into a map.
-    pub(crate) fn append_query(url: &mut Url, query: &[(String, String)]) {
+    pub(crate) fn append_query(url: &mut Url, raw_query: Option<&str>, query: &[(String, String)]) {
+        if let Some(raw) = raw_query {
+            crate::common::append_raw_query(url, raw);
+            return;
+        }
         if query.is_empty() {
             return;
         }

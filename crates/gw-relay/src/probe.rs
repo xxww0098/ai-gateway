@@ -391,7 +391,10 @@ fn anthropic_input(usage: &AnthropicUsage) -> Option<Option<i64>> {
     if columns.iter().all(Option::is_none) {
         return Some(None);
     }
-    let total = columns.into_iter().flatten().try_fold(0_i64, i64::checked_add)?;
+    let total = columns
+        .into_iter()
+        .flatten()
+        .try_fold(0_i64, i64::checked_add)?;
     Some(Some(total))
 }
 

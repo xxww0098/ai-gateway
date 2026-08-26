@@ -69,17 +69,23 @@ jobs:
           CARGO_INCREMENTAL: "0"
         run: cargo clippy -p gw-relay -p gw-provider -p gw-proxy --all-targets -- -D warnings
 
+      # The generators and this workflow are not part of the final product.
+      # Remove them before architecture validation so the gate inspects exactly
+      # the tree that will be committed, not temporary bootstrap machinery.
+      - name: Remove one-shot machinery before final-tree checks
+        run: |
+          rm tools/one_shot_core_hardening.py
+          rm tools/run_core_hardening.py
+          rm .github/workflows/one-shot-core-hardening.yml
+
       - name: Architecture gates
         run: cargo xtask ci
 
       - name: Verify patch cleanliness
         run: git diff --check
 
-      - name: Commit verified source changes and remove one-shot machinery
+      - name: Commit verified source changes
         run: |
-          rm tools/one_shot_core_hardening.py
-          rm tools/run_core_hardening.py
-          rm .github/workflows/one-shot-core-hardening.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add \

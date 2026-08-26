@@ -78,13 +78,19 @@ jobs:
     name: Rust integration (Postgres + Redis)
     runs-on: ubuntu-latest
     env:
-      GW_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+      POSTGRES_ADMIN_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+      GW_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/ai_gateway
       GW_TEST_REDIS_URL: redis://127.0.0.1:6379
     services:
       postgres:
         image: postgres:16
         env:
           POSTGRES_PASSWORD: postgres
+          # `gw-infra` intentionally tests DbSettings::default(), whose local
+          # development account has no password. Trust is scoped to this
+          # ephemeral Actions service and lets that exact production default be
+          # exercised instead of silently replacing the test configuration.
+          POSTGRES_HOST_AUTH_METHOD: trust
         options: >-
           --health-cmd pg_isready --health-interval 10s
           --health-timeout 5s --health-retries 5
@@ -100,6 +106,27 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      # One ignored gw-infra test intentionally connects with the exact
+      # config.example.yaml defaults (`ai_gateway` role/database, blank
+      # password), while the rest of the integration suite uses the explicit
+      # admin URL above. Provision both views over the same ephemeral server.
+      - name: Create integration role and database
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql "$POSTGRES_ADMIN_URL" --set ON_ERROR_STOP=1 <<'SQL'
+          DO $$
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_gateway') THEN
+              CREATE ROLE ai_gateway LOGIN;
+            END IF;
+          END
+          $$;
+          SELECT 'CREATE DATABASE ai_gateway OWNER ai_gateway'
+          WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'ai_gateway')
+          \gexec
+          SQL
+
       # Several ignored tests connect directly to the shared database rather
       # than creating their own fresh database. Apply the same ordered,
       # idempotent SQL set production embeds before any of those tests run.
@@ -112,10 +139,12 @@ jobs:
             psql "$GW_TEST_DATABASE_URL" --set ON_ERROR_STOP=1 --file "$migration"
           done
 
-      # The tests that need real services are #[ignore]d so a bare `cargo test`
-      # stays honest on a machine without them. This job is where they run.
+      # These tests deliberately share one database and mutate global tables.
+      # Serialize the test harness while preserving concurrency inside each
+      # test, so isolation failures are real product failures rather than
+      # cross-test schema races.
       - name: Test (ignored tier)
-        run: cargo test --workspace -- --ignored
+        run: cargo test --workspace -- --ignored --test-threads=1
 
   frontend:
     name: Frontend

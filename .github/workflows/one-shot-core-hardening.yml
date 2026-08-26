@@ -5,6 +5,7 @@ on:
     branches: [audit/core-adversarial-hardening]
     paths:
       - tools/one_shot_core_hardening.py
+      - tools/run_core_hardening.py
       - .github/workflows/one-shot-core-hardening.yml
 
 permissions:
@@ -28,7 +29,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Apply adversarial hardening patch
-        run: python tools/one_shot_core_hardening.py
+        run: python tools/run_core_hardening.py
 
       - name: Format changed Rust files
         run: |
@@ -75,6 +76,7 @@ jobs:
       - name: Commit verified source changes and remove one-shot machinery
         run: |
           rm tools/one_shot_core_hardening.py
+          rm tools/run_core_hardening.py
           rm .github/workflows/one-shot-core-hardening.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -101,6 +103,9 @@ jobs:
             crates/gw-proxy/src/routes/tests/dispatch.rs \
             crates/gw-proxy/src/usage.rs \
             crates/gw-proxy/src/usage/tests.rs
-          git add -u tools/one_shot_core_hardening.py .github/workflows/one-shot-core-hardening.yml
+          git add -u \
+            tools/one_shot_core_hardening.py \
+            tools/run_core_hardening.py \
+            .github/workflows/one-shot-core-hardening.yml
           git commit -m "fix(core): wire protocol translation and harden billing"
           git push origin HEAD:audit/core-adversarial-hardening

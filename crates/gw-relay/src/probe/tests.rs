@@ -214,7 +214,7 @@ fn a_whitespace_only_first_frame_does_not_hide_non_streaming_usage() {
     probe.observe(&Bytes::from_static(
         b"{\"usage\":{\"prompt_tokens\":13,\"completion_tokens\":5}}",
     ));
-    drop(probe.finish());
+    let _ = probe.finish();
 
     let usage = handle.get().expect("已结束").expect("有 usage");
     assert_eq!(usage.input_tokens, Some(13));

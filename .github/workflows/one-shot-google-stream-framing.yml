@@ -1,0 +1,85 @@
+name: One-shot Google stream framing hardening
+
+on:
+  push:
+    branches: [audit/core-adversarial-hardening]
+    paths:
+      - tools/one_shot_google_stream_framing.py
+      - .github/workflows/one-shot-google-stream-framing.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: one-shot-google-stream-framing
+  cancel-in-progress: true
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/core-adversarial-hardening
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Apply Google stream framing hardening
+        run: python tools/one_shot_google_stream_framing.py
+
+      - name: Format changed Rust files
+        run: |
+          rustfmt --edition 2024 \
+            crates/gw-relay/src/translate/google/wire.rs \
+            crates/gw-relay/src/translate/google/openai.rs \
+            crates/gw-relay/src/translate/google/anthropic.rs \
+            crates/gw-relay/src/translate/google/tests.rs \
+            crates/gw-proxy/src/routes.rs \
+            crates/gw-proxy/src/routes/translation.rs \
+            crates/gw-proxy/src/routes/stream.rs \
+            crates/gw-proxy/src/routes/tests/stream.rs \
+            crates/gw-proxy/src/routes/tests/dispatch.rs
+
+      - name: Test relay and proxy
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo test -p gw-relay -p gw-proxy
+
+      - name: Clippy relay and proxy
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo clippy -p gw-relay -p gw-proxy --all-targets -- -D warnings
+
+      - name: Remove one-shot machinery before final-tree checks
+        run: |
+          rm tools/one_shot_google_stream_framing.py
+          rm .github/workflows/one-shot-google-stream-framing.yml
+
+      - name: Architecture gates
+        run: cargo xtask ci
+
+      - name: Verify patch cleanliness
+        run: git diff --check
+
+      - name: Commit verified source changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            crates/gw-relay/src/translate/google/wire.rs \
+            crates/gw-relay/src/translate/google/openai.rs \
+            crates/gw-relay/src/translate/google/anthropic.rs \
+            crates/gw-relay/src/translate/google/tests.rs \
+            crates/gw-proxy/src/routes.rs \
+            crates/gw-proxy/src/routes/translation.rs \
+            crates/gw-proxy/src/routes/stream.rs \
+            crates/gw-proxy/src/routes/tests/stream.rs \
+            crates/gw-proxy/src/routes/tests/dispatch.rs
+          git add -u \
+            tools/one_shot_google_stream_framing.py \
+            .github/workflows/one-shot-google-stream-framing.yml
+          git commit -m "fix(relay): make Google SSE translation chunk-safe"
+          git push origin HEAD:audit/core-adversarial-hardening

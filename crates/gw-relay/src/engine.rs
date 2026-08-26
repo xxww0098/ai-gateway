@@ -159,7 +159,6 @@ impl Transport for ReqwestTransport {
         let status = response.status();
         let headers = response.headers().clone();
         // 上游读到什么就转发什么：**不做 SSE 解析，不重新分帧**。
-        // 这是当前实现唯一做对的一条，必须原样继承。
         let body = StreamBody::new(
             response
                 .bytes_stream()
@@ -242,19 +241,20 @@ impl<T: Transport> Relay for RelayEngine<T> {
         // 流式与非流式走**同一条**回写路径：逐帧转发，probe 在旁路看。
         //
         // 曾经这里为非流式分了一条 `collect_frames` 的岔路，收完最后一个字节才
-        // 返回响应头 —— 因为非流式的 usage 在完整 JSON 的末尾，probe 要整份 body。
-        // 那是把**计费的需要塞进了回写路径**，恰好违反本 crate 的核心原则。
-        // 实测代价（`docs/relay-perf-acceptance.md` §4.1）：1 MiB 响应比 floor 慢
-        // 493.7 µs，其中约 400 µs 不是拷贝，而是「上游读与客户端写从并行变串行」。
-        // 缓冲已经搬回旁路（见 [`crate::probe::SseUsageProbe`] 的 JSON 累积）。
+        // 返回响应头。缓冲已经搬回旁路（见 [`crate::probe::SseUsageProbe`]）。
         //
-        // 差别只剩超时口径：流式看**帧间**空闲，非流式看整请求剩余预算。
-        let idle = if is_event_stream(&head.headers) {
-            to.timeouts.stream_idle
+        // 差别只剩超时口径：SSE 看**帧间**空闲；非流式看从请求开始算的
+        // **绝对截止时间**。绝不能在每一帧重新发一份完整“剩余预算”，否则一个
+        // 每隔 budget-ε 吐一字节的上游可以把 60 秒一元请求无限延长。
+        let watchdog = if is_event_stream(&head.headers) {
+            FrameWatchdog::Idle(to.timeouts.stream_idle)
         } else {
-            to.timeouts.request.saturating_sub(started.elapsed())
+            FrameWatchdog::Deadline {
+                at: started + to.timeouts.request,
+                budget: to.timeouts.request,
+            }
         };
-        let body = RelayResponseBody::Stream(watch_frames(head.body, probe, idle));
+        let body = RelayResponseBody::Stream(watch_frames(head.body, probe, watchdog));
 
         Ok(RelayResponse {
             status: head.status,
@@ -274,16 +274,13 @@ impl<T: Transport> Relay for RelayEngine<T> {
 ///
 /// # 根除缺陷 #9
 ///
-/// query 是**字节**：不解码、不重编码、不拆键值对。今天入站不解码 + 出站
-/// `append_pair` 重编码 = 客户端发 `?tag=a%20b`，上游收到 `?tag=a%2520b`。
+/// query 是**字节**：不解码、不重编码、不拆键值对。
 ///
 /// # Errors
 ///
 /// 拼出来的字符串不是合法 URL 时返回 [`RelayTransportError::BadTarget`]。
 /// 错误信息**不含拼接结果** —— query 里可能有客户端凭证（审计 §4.1 #12）。
 fn upstream_url(origin: &Url, target: &PathAndQuery) -> Result<Url, RelayTransportError> {
-    // `data:` / `mailto:` 这类非层级 URL 拼上 path 之后仍然「parse 得通」，
-    // 但拼出来的东西毫无意义。在这里挡下来，别让它变成一个看不懂的 connect 错误。
     if origin.cannot_be_a_base() {
         return Err(RelayTransportError::BadTarget(format!(
             "upstream origin scheme `{}` is not hierarchical",
@@ -309,42 +306,68 @@ fn is_event_stream(headers: &HeaderMap) -> bool {
         })
 }
 
-/// 流式：逐帧转发 + 帧间空闲看门狗 + 旁路 probe。
-///
-/// # 根除缺陷 #6
+/// 响应体看门狗的两种口径。
+#[derive(Debug, Clone, Copy)]
+enum FrameWatchdog {
+    /// SSE：每一帧到达都会重新开始一片空闲窗口。
+    Idle(Duration),
+    /// 一元响应：整个请求共用一个绝对截止时间。
+    Deadline { at: Instant, budget: Duration },
+}
+
+impl FrameWatchdog {
+    /// 这一帧最多还能等多久。`None` 表示绝对截止时间已经过去。
+    fn remaining(self) -> Option<Duration> {
+        match self {
+            Self::Idle(idle) => Some(idle),
+            Self::Deadline { at, .. } => {
+                let remaining = at.saturating_duration_since(Instant::now());
+                (!remaining.is_zero()).then_some(remaining)
+            }
+        }
+    }
+
+    /// 错误里报告配置的窗口，而不是最后剩下的几毫秒。
+    fn configured(self) -> Duration {
+        match self {
+            Self::Idle(idle) => idle,
+            Self::Deadline { budget, .. } => budget,
+        }
+    }
+}
+
+/// 逐帧转发 + 超时看门狗 + 旁路 probe。
 ///
 /// item 类型是 `Result<Frame<Bytes>, RelayError>`，**不是** `Infallible`。
-/// 中途失败（上游 transport error 或帧间空闲超时）把 `Err` 交给 hyper：
-/// h2 发 `RST_STREAM`，h1 直接掐连接。这是 SSE 唯一能让客户端察觉截断的手段 ——
-/// 今天客户端拿到的是一次**干净的 EOF**，Claude Code 不报错不重试。
+/// 中途失败或超时交给 hyper：h2 发 `RST_STREAM`，h1 掐连接。
 ///
-/// # 取消传播
-///
-/// 上游 body 就住在 unfold 的 state 里，**没有 spawn**。客户端断开 → hyper 丢弃
-/// 响应体 → state 被 drop → 上游 body 被 drop → h2 发 `RST_STREAM` / h1 关连接。
-/// 上游不会继续跑完，token 不会白烧。
+/// 上游 body 直接住在 unfold 的 state 里，**没有 spawn**。客户端断开时 state
+/// 被 drop，取消会立即传播到上游连接。
 fn watch_frames(
     body: BoxBody<Bytes, RelayError>,
     probe: Option<Box<dyn UsageProbe>>,
-    idle: Duration,
+    watchdog: FrameWatchdog,
 ) -> BoxBody<Bytes, RelayError> {
     struct State {
         body: BoxBody<Bytes, RelayError>,
         probe: ProbeGuard,
-        idle: Duration,
+        watchdog: FrameWatchdog,
     }
 
     let state = State {
         body,
         probe: ProbeGuard::new(probe),
-        idle,
+        watchdog,
     };
 
     StreamBody::new(stream::unfold(Some(state), |state| async move {
         let mut state = state?;
-        match timeout(state.idle, state.body.frame()).await {
-            // 空闲超时：把失败交出去，state 随之 drop → probe.finish()。
-            Err(_) => Some((Err(RelayError::Idle(state.idle)), None)),
+        let Some(wait) = state.watchdog.remaining() else {
+            return Some((Err(RelayError::Idle(state.watchdog.configured())), None));
+        };
+        match timeout(wait, state.body.frame()).await {
+            // 超时：把失败交出去，state 随之 drop → probe.finish()。
+            Err(_) => Some((Err(RelayError::Idle(state.watchdog.configured())), None)),
             Ok(None) => None,
             Ok(Some(Err(err))) => Some((Err(err), None)),
             Ok(Some(Ok(frame))) => {

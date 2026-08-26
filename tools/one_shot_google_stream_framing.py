@@ -59,6 +59,10 @@ const MAX_SSE_EVENT: usize = 8 * 1024 * 1024;
 #[derive(Debug, Default)]
 pub(super) struct SseDecoder {
     pending: Vec<u8>,
+    /// Bytes before this index were already proved not to start a separator.
+    /// Keep the last three bytes in the next scan because `\r\n\r\n` can
+    /// straddle a transport boundary.
+    scan_from: usize,
 }
 
 impl SseDecoder {
@@ -66,13 +70,12 @@ impl SseDecoder {
         self.pending.extend_from_slice(chunk);
         let mut payloads = Vec::new();
         let mut consumed = 0usize;
+        let mut search_from = self.scan_from.min(self.pending.len());
 
-        while let Some((relative_end, separator_len)) =
-            find_event_end(&self.pending[consumed..])
-        {
-            let end = consumed + relative_end;
+        while let Some((end, separator_len)) = find_event_end(&self.pending, search_from) {
             if end.saturating_sub(consumed) > MAX_SSE_EVENT {
                 self.pending.clear();
+                self.scan_from = 0;
                 return Err(TranslateError::UpstreamShape(
                     "google SSE event exceeds 8 MiB".to_owned(),
                 ));
@@ -81,6 +84,7 @@ impl SseDecoder {
                 payloads.extend(data_payloads(&self.pending[consumed..end]));
             }
             consumed = end + separator_len;
+            search_from = consumed;
         }
 
         if consumed > 0 {
@@ -88,16 +92,20 @@ impl SseDecoder {
         }
         if self.pending.len() > MAX_SSE_EVENT {
             self.pending.clear();
+            self.scan_from = 0;
             return Err(TranslateError::UpstreamShape(
                 "unterminated google SSE event exceeds 8 MiB".to_owned(),
             ));
         }
+        // Everything before this point has already been scanned. Retaining the
+        // final three bytes is sufficient for the longest separator prefix.
+        self.scan_from = self.pending.len().saturating_sub(3);
         Ok(payloads)
     }
 }
 
-fn find_event_end(buf: &[u8]) -> Option<(usize, usize)> {
-    for index in 0..buf.len() {
+fn find_event_end(buf: &[u8], start: usize) -> Option<(usize, usize)> {
+    for index in start..buf.len() {
         if buf[index] == b'\n' && buf.get(index + 1) == Some(&b'\n') {
             return Some((index, 2));
         }

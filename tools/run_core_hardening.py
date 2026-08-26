@@ -47,6 +47,55 @@ if code.count(old) != 1:
     raise RuntimeError(f"expected one embedded Claude patch block, got {code.count(old)}")
 code = code.replace(old, new, 1)
 
+marker = 'print("core hardening patch applied")\n'
+extra = r'''
+# Keep the non-billable count-tokens route on the same exact-query and usage
+# handle contracts as the inference routes.
+replace_once(
+    "crates/gw-proxy/src/routes.rs",
+    """pub(crate) use routing::{
+    RoutedProvider, dialect_error, partition_routable, rewrite_model, select_upstreams,
+};
+""",
+    """pub(crate) use routing::{
+    dialect_error, partition_routable, rewrite_model, select_upstreams,
+};
+""",
+)
+replace_once(
+    "crates/gw-proxy/src/routes/catalogue.rs",
+    """use super::stream::{Relayed, relay_response, usage_probe};
+""",
+    """use super::stream::{Relayed, relay_response};
+use super::translation::usage_probe;
+""",
+)
+replace_once(
+    "crates/gw-proxy/src/routes/catalogue.rs",
+    """            headers: headers.clone(),
+            query: query.clone(),
+""",
+    """            headers: headers.clone(),
+            query: Vec::new(),
+            raw_query: Some(query.clone()),
+""",
+)
+replace_once(
+    "crates/gw-proxy/src/routes/catalogue.rs",
+    """        return match state.dispatch.send(&plan, &request, outgoing, probe).await {
+""",
+    """        return match state
+            .dispatch
+            .send(&plan, &request, outgoing, Some(probe))
+            .await
+        {
+""",
+)
+'''
+if code.count(marker) != 1:
+    raise RuntimeError("hardening script completion marker is missing")
+code = code.replace(marker, extra + "\n" + marker, 1)
+
 exec(compile(code, str(BOOTSTRAP), "exec"), {
     "__file__": str(BOOTSTRAP),
     "__name__": "__main__",

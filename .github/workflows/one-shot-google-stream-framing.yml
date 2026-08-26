@@ -34,6 +34,7 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
+          # The proxy-level regression needs the concrete Bytes type.
           path = Path("crates/gw-proxy/src/routes/tests/stream.rs")
           text = path.read_text(encoding="utf-8")
           old = "use super::*;\n"
@@ -42,6 +43,23 @@ jobs:
               if text.count(old) != 1:
                   raise RuntimeError("stream test import anchor not found")
               path.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          # Keep the 1,000-line ratchet intact: move the new adversarial framing
+          # tests into a child module rather than growing the legacy test file.
+          parent = Path("crates/gw-relay/src/translate/google/tests.rs")
+          source = parent.read_text(encoding="utf-8")
+          marker = "/// HTTP transport chunks are unrelated to SSE event boundaries."
+          start = source.find(marker)
+          if start < 0:
+              raise RuntimeError("Google framing test block not found")
+          block = source[start:].strip()
+          parent.write_text(
+              source[:start].rstrip() + "\n\nmod stream_framing;\n",
+              encoding="utf-8",
+          )
+          child = Path("crates/gw-relay/src/translate/google/tests/stream_framing.rs")
+          child.parent.mkdir(parents=True, exist_ok=True)
+          child.write_text("use super::*;\n\n" + block + "\n", encoding="utf-8")
           PY
 
       - name: Format changed Rust files
@@ -51,6 +69,7 @@ jobs:
             crates/gw-relay/src/translate/google/openai.rs \
             crates/gw-relay/src/translate/google/anthropic.rs \
             crates/gw-relay/src/translate/google/tests.rs \
+            crates/gw-relay/src/translate/google/tests/stream_framing.rs \
             crates/gw-proxy/src/routes.rs \
             crates/gw-proxy/src/routes/translation.rs \
             crates/gw-proxy/src/routes/stream.rs \
@@ -87,6 +106,7 @@ jobs:
             crates/gw-relay/src/translate/google/openai.rs \
             crates/gw-relay/src/translate/google/anthropic.rs \
             crates/gw-relay/src/translate/google/tests.rs \
+            crates/gw-relay/src/translate/google/tests/stream_framing.rs \
             crates/gw-proxy/src/routes.rs \
             crates/gw-proxy/src/routes/translation.rs \
             crates/gw-proxy/src/routes/stream.rs \

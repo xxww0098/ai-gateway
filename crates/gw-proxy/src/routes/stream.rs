@@ -5,13 +5,12 @@
 //!
 //! # One response path
 //!
-//! There is no streaming/unary fork here any more. `gw_relay::RelayEngine`
-//! hands back frames for both, the client's body is those frames verbatim, and
-//! usage is read on a **side band** — `gw-relay`'s [`UsageProbe`] sees a
-//! read-only view of every frame and never sits in the write path. A 4xx from
-//! the upstream travels this same way, with its headers intact.
+//! Passthrough frames remain byte-for-byte identical. Translate cells wrap the
+//! same upstream body with one request-scoped state machine before this module
+//! sees it; that state machine also owns usage extraction. Both paths still
+//! share this single header-copy, disconnect and settlement implementation.
 //!
-//! # Settling
+//! //! # Settling
 //!
 //! [`StreamSettler`] carries the obligation. It settles when the body ends
 //! and, through `Drop`, when the client hangs up mid-stream — the case a plain

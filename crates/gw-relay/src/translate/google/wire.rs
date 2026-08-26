@@ -167,15 +167,77 @@ pub(super) fn anthropic_stop_reason(google: &str, has_tool_call: bool) -> &'stat
 
 // ============================================================ SSE 原语
 
-/// 从一段 SSE 字节里取出每个事件块的 `data:` 载荷。
+/// Incrementally splits arbitrary HTTP body chunks into complete SSE events.
 ///
-/// 按契约 `StreamTranslator::push` 每次只喂一帧，但这里仍然按空行切块：
-/// 多切一次的成本是几行代码，而把两帧的 data 拼成一个 JSON 去解析是必然的
-/// `UpstreamShape` 错误。注释行（`:` 开头）、`event:` / `id:` / `retry:`
-/// 在 Google 侧没有语义，直接跳过 —— 这也是 `push` 允许产出零帧的原因。
-///
-/// 多行 `data:` 按 SSE 规范用 `\n` 连接。
-pub(super) fn data_payloads(buf: &[u8]) -> Vec<Vec<u8>> {
+/// `reqwest` / hyper expose transport chunks, not SSE records. A single Google
+/// JSON event may therefore be split at any byte. The decoder keeps only the
+/// unterminated tail, emits complete `data:` payloads, and bounds one event so
+/// a peer that never sends a blank line cannot grow memory without limit.
+const MAX_SSE_EVENT: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, Default)]
+pub(super) struct SseDecoder {
+    pending: Vec<u8>,
+    /// Bytes before this index were already proved not to start a separator.
+    /// Keep the last three bytes in the next scan because `\r\n\r\n` can
+    /// straddle a transport boundary.
+    scan_from: usize,
+}
+
+impl SseDecoder {
+    pub(super) fn push(&mut self, chunk: &[u8]) -> Result<Vec<Vec<u8>>, TranslateError> {
+        self.pending.extend_from_slice(chunk);
+        let mut payloads = Vec::new();
+        let mut consumed = 0usize;
+        let mut search_from = self.scan_from.min(self.pending.len());
+
+        while let Some((end, separator_len)) = find_event_end(&self.pending, search_from) {
+            if end.saturating_sub(consumed) > MAX_SSE_EVENT {
+                self.pending.clear();
+                self.scan_from = 0;
+                return Err(TranslateError::UpstreamShape(
+                    "google SSE event exceeds 8 MiB".to_owned(),
+                ));
+            }
+            if end > consumed {
+                payloads.extend(data_payloads(&self.pending[consumed..end]));
+            }
+            consumed = end + separator_len;
+            search_from = consumed;
+        }
+
+        if consumed > 0 {
+            self.pending.drain(..consumed);
+        }
+        if self.pending.len() > MAX_SSE_EVENT {
+            self.pending.clear();
+            self.scan_from = 0;
+            return Err(TranslateError::UpstreamShape(
+                "unterminated google SSE event exceeds 8 MiB".to_owned(),
+            ));
+        }
+        // Everything before this point has already been scanned. Retaining the
+        // final three bytes is sufficient for the longest separator prefix.
+        self.scan_from = self.pending.len().saturating_sub(3);
+        Ok(payloads)
+    }
+}
+
+fn find_event_end(buf: &[u8], start: usize) -> Option<(usize, usize)> {
+    for index in start..buf.len() {
+        if buf[index] == b'\n' && buf.get(index + 1) == Some(&b'\n') {
+            return Some((index, 2));
+        }
+        if buf[index] == b'\r' && buf[index + 1..].starts_with(b"\n\r\n") {
+            return Some((index, 4));
+        }
+    }
+    None
+}
+
+/// Extracts every `data:` payload from one or more complete SSE event blocks.
+/// Multi-line data fields are joined with `\n` as required by the SSE grammar.
+fn data_payloads(buf: &[u8]) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     let mut cur: Option<Vec<u8>> = None;
     for raw in buf.split(|&b| b == b'\n') {

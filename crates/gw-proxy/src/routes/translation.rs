@@ -119,9 +119,13 @@ pub(super) async fn prepare_response(
     let usage = parse_usage(upstream, &original);
     let translated = match translator.translate_response(&original) {
         Ok(body) => body,
-        // Infrastructure error pages are often HTML. Preserve their real
-        // status/body rather than replacing a useful 429/503 with a gateway 502.
-        Err(_) if !response.status.is_success() => original,
+        // Infrastructure error pages are often HTML. Preserve the status,
+        // bytes *and entity headers*; labelling HTML as application/json is
+        // another form of corruption and breaks SDK diagnostics.
+        Err(_) if !response.status.is_success() => {
+            response.body = RelayResponseBody::Buffered(original);
+            return Ok((response, UsageHandle::completed(usage)));
+        }
         Err(err) => return Err(err),
     };
     response.body = RelayResponseBody::Buffered(translated);

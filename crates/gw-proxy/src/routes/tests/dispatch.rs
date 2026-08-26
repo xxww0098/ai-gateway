@@ -644,3 +644,53 @@ async fn the_six_converged_routes_are_gone_not_merely_unbilled() {
 }
 
 mod catalogue;
+
+/// When a translated provider returns a non-JSON infrastructure page, the
+/// gateway cannot change its dialect. It must preserve the useful status, bytes
+/// and content type rather than claiming the HTML body is JSON.
+#[tokio::test]
+async fn an_untranslatable_upstream_error_keeps_its_original_entity_headers() {
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _;
+
+    let harness = Harness::build_routed(
+        vec![auth_record("acct-1", "gemini")],
+        Some(gemini_only_resolver()),
+    );
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    let original = Bytes::from_static(b"<html><body>temporarily unavailable</body></html>");
+    harness.transport.queue(Ok(CannedResponse {
+        status: 503,
+        headers,
+        frames: vec![original.clone()],
+    }));
+
+    let response = harness
+        .router()
+        .oneshot(signed_request(
+            "/v1/chat/completions",
+            chat_body("house-model"),
+        ))
+        .await
+        .expect("router responds");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/html; charset=utf-8")
+    );
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    assert_eq!(body, original);
+}

@@ -557,6 +557,7 @@ enum BlockKind {
 ///   上游的若干帧里。
 #[derive(Default)]
 struct AnthropicStream {
+    sse: wire::SseDecoder,
     id: Option<String>,
     model: Option<String>,
     started: bool,
@@ -644,7 +645,7 @@ impl AnthropicStream {
 impl StreamTranslator for AnthropicStream {
     fn push(&mut self, upstream_frame: &[u8]) -> Result<Vec<Bytes>, TranslateError> {
         let mut frames = Vec::new();
-        for payload in wire::data_payloads(upstream_frame) {
+        for payload in self.sse.push(upstream_frame)? {
             if !wire::is_parseable(&payload) {
                 continue;
             }
@@ -741,12 +742,15 @@ impl StreamTranslator for AnthropicStream {
     }
 
     fn finish(&mut self) -> Result<Vec<Bytes>, TranslateError> {
-        let mut frames = Vec::new();
         if self.stopped {
             // 幂等：重复收尾会发出第二个 `message_stop`，客户端会把它当成
             // 第二条消息的开头。
-            return Ok(frames);
+            return Ok(Vec::new());
         }
+        // Flush a final event that omitted the trailing blank line. If it is a
+        // truncated JSON object, `push` returns an error and the client sees a
+        // reset rather than a fabricated clean EOF.
+        let mut frames = self.push(b"\n\n")?;
         self.stopped = true;
         if !self.started {
             // 一帧内容都没产出的流仍然要给客户端一个语法完整的信封，

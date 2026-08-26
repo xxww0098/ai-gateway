@@ -10,22 +10,14 @@
 //! | 「所有入口都直通、错了让上游回 400」的隐式派发 | [`gw_relay::endpoint::matrix::route`] 的 15 格显式表 | 审计缺陷 #1（S1）的一半 —— 见下面的**已知缺口** |
 //! | `hold.rs` 与 `routes.rs` 各解析一次 body | 唯一一次解析的 [`RequestSpec`] 经请求扩展下发 | 审计缺陷 #15（S3） |
 //!
-//! # 已知缺口（本轮**未**根除，需要 `gw-provider` 配合）
+//! # 已根除的协议接缝
 //!
-//! 缺陷 #1 的另一半：`POST /v1/responses` 打到 openai / codex 时，
-//! [`gw_relay::endpoint::matrix::upstream_dialect`] 已经正确判定为
-//! [`gw_relay::UpstreamDialect::OpenAiResponses`]，**但 `gw-provider` 的
-//! executor 仍然只会构造 `{base}/v1/chat/completions`**
-//! （`gw-provider/src/openai.rs` 的 `chat_completions_endpoint`），
-//! 而 `ProviderRequest` 上没有承载入口方言的字段（`gw-provider/src/types.rs`
-//! 是协调者独占，本轮不动）。所以入口 B 打到 OpenAI 系上游时**仍然是坏的**。
+//! `/v1/responses` 的端点由入口元数据决定；7 个 Translate 格现在在 proxy
+//! 中显式调用对应 [`gw_relay::Translator`]。请求、普通响应和 SSE 都只翻译一次，
+//! translated stream 的 usage 直接取自同一个状态机，不再额外挂 probe 重复解析。
+//! 无法等价表达的 Responses→非 OpenAI 三格仍按矩阵明确返回 400。
 //!
-//! 需要的补丁在别人的文件里：`gw-provider` 新增 `responses_endpoint()`，
-//! 并让 `ProviderRequest` 带上方言（`docs/relay-surface-plan.md` §4.6）。
-//! 或者由 wave 4 用 [`gw_relay::engine::RelayEngine`] 整体取代本文件的转发段
-//! —— 那时端点由入口决定，provider 根本不参与拼 URL。
-//!
-//! Dispatch 选出上游候选，通过 [`crate::channel`] 挑账号，失败时换**另一个**账号
+//! //! Dispatch 选出上游候选，通过 [`crate::channel`] 挑账号，失败时换**另一个**账号
 //! 重试。结算**恰好一次**，在最后一次尝试之后 —— 跨账号重试只结算一次，
 //! 所以 failover 不会重复计费。
 
@@ -859,9 +851,8 @@ endpoint!(
 endpoint!(
     /// 入口 B · `POST /v1/responses` —— OpenAI Responses 方言。
     ///
-    /// ⚠️ **打到 openai / codex 时今天仍然是坏的**：矩阵已经把它判成
-    /// [`gw_relay::UpstreamDialect::OpenAiResponses`]，但 `gw-provider` 的
-    /// executor 只会构造 `{base}/v1/chat/completions`。见模块 doc 的「已知缺口」。
+    /// OpenAI / Codex 原生直通；Claude / Google 三格因有状态 item 语义无法
+    /// 等价表达，按 15 格矩阵明确返回入口方言的 400。
     responses,
     Surface::OpenAiResponses
 );

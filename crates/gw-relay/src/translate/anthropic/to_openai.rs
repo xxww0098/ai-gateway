@@ -640,7 +640,7 @@ struct OpenAiSseToAnthropic {
 impl StreamTranslator for OpenAiSseToAnthropic {
     fn push(&mut self, upstream_frame: &[u8]) -> Result<Vec<Bytes>, TranslateError> {
         let mut out = Vec::new();
-        for event in self.split.push(upstream_frame) {
+        for event in self.split.push(upstream_frame)? {
             self.handle(&event, &mut out)?;
         }
         Ok(out)

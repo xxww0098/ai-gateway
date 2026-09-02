@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use gw_pricing::{Calculator, ModelPriceCache, TokenUsage};
+use gw_pricing::{Calculator, ModelPriceCache, ObservedUsage, UsageDialect};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool};
 
@@ -149,29 +149,40 @@ async fn null_price_columns_read_as_zero_rather_than_dropping_the_row() {
     fx.cleanup().await;
 }
 
-/// The whole point of sharing one cache handle: an admin price edit followed
-/// by `invalidate` is visible to a `Calculator` that was built before the
-/// edit, with no restart and no second cache.
+/// 共用一个缓存句柄的全部意义：管理员改价 + `invalidate` 之后，
+/// **新报的价**对一个改价前就建好的 `Calculator` 立即可见 —— 不重启、不建第二份缓存。
+///
+/// 而**改价前冻下来的那份报价不受影响**：在途请求按准入时的价结算。
+/// 两条一起测，因为它们是同一个设计的两面。
 #[tokio::test]
 #[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
-async fn an_admin_price_edit_reaches_an_already_built_calculator() {
+async fn an_admin_price_edit_reaches_the_next_quote_but_not_a_frozen_one() {
     let fx = Fixture::new().await;
     fx.upsert("gpt-test", Some(1.0), Some(0.0)).await;
 
     let cache = Arc::new(ModelPriceCache::load(&fx.pool).await.expect("load"));
     let calc = Calculator::new(Some(Arc::clone(&cache)), 0.0);
-    let one_million_input = TokenUsage {
-        input: 1_000_000,
-        ..TokenUsage::default()
-    };
+    let one_million_input = ObservedUsage::new(1_000_000, 0, 0, 0)
+        .expect("a non-negative envelope")
+        .normalize(UsageDialect::OpenAi)
+        .expect("a consistent envelope");
 
-    let before = calc.compute("gpt-test", one_million_input, 1.0).total_cost;
+    let frozen = calc.quote("gpt-test", 1.0);
+    let before = frozen.compute(one_million_input).total_cost;
     assert_eq!(before, 1.0);
 
     fx.upsert("gpt-test", Some(2.0), Some(0.0)).await;
     cache.invalidate(&fx.pool).await.expect("invalidate");
 
-    let after = calc.compute("gpt-test", one_million_input, 1.0).total_cost;
+    assert_eq!(
+        frozen.compute(one_million_input).total_cost,
+        before,
+        "冻结的报价被改价追上了",
+    );
+    let after = calc
+        .quote("gpt-test", 1.0)
+        .compute(one_million_input)
+        .total_cost;
     assert_eq!(after, 2.0, "the calculator kept a stale price");
 
     fx.cleanup().await;

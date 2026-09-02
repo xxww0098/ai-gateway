@@ -4,7 +4,6 @@ use gw_authcore::AuthRecord;
 use serde_json::json;
 
 use super::*;
-use crate::streambuf::StreamUsageProbe;
 use bytes::Bytes;
 
 fn auth_with(metadata: serde_json::Value) -> AuthRecord {
@@ -27,7 +26,7 @@ fn provider(base_url: &str, api_key: &str) -> GeminiProvider {
 }
 
 fn endpoint(query: &[(String, String)], model: &str, stream: bool) -> Url {
-    GeminiProvider::generate_content_endpoint(query, "https://gl.example.com", model, stream)
+    GeminiProvider::generate_content_endpoint(None, query, "https://gl.example.com", model, stream)
         .expect("endpoint")
 }
 
@@ -99,9 +98,11 @@ fn a_slash_in_the_model_name_cannot_add_a_path_segment() {
 
 #[test]
 fn a_base_url_without_a_host_is_rejected() {
-    assert!(GeminiProvider::generate_content_endpoint(&[], "gl.example.com", "m", false).is_err());
     assert!(
-        GeminiProvider::generate_content_endpoint(&[], "https://", "m", false).is_err(),
+        GeminiProvider::generate_content_endpoint(None, &[], "gl.example.com", "m", false).is_err()
+    );
+    assert!(
+        GeminiProvider::generate_content_endpoint(None, &[], "https://", "m", false).is_err(),
         "a hostless URL must not re-parse with a path segment as the host"
     );
     assert!(
@@ -175,29 +176,56 @@ fn a_record_can_override_the_base_url() {
 }
 
 #[test]
-fn the_api_key_travels_as_a_header_when_one_is_configured() {
-    let mut headers = HeaderMap::new();
-    GeminiProvider::inject_api_key(&mut headers, "  secret  ").expect("inject");
-    assert_eq!(headers["x-goog-api-key"], "secret");
+fn the_api_key_travels_as_a_credential_not_as_a_header() {
+    // The relay sets `x-goog-api-key` from `RoutePlan::credential`, after
+    // stripping whatever the client sent. A planner that also stamped the
+    // header would defeat the strip.
+    let provider = provider("https://gl.example.com", "k");
+    let plan = provider
+        .plan_generate_content(
+            &model_request("gemini-2.5-pro"),
+            "  secret  ",
+            "https://gl.example.com",
+        )
+        .expect("plans");
+    assert!(!plan.headers.contains_key("x-goog-api-key"));
+    assert!(matches!(&plan.credential, gw_relay::Credential::GoogleApiKey(k) if k == "secret"));
 }
 
-/// With no configured key the request still goes out unauthenticated: the
-/// caller may have supplied `?key=`, and Google is the right place to reject a
-/// request that has neither.
+/// A keyless account is refused here rather than sent as an empty
+/// `x-goog-api-key`: the relay always sets the credential header, so an empty
+/// one would reach Google as a malformed request instead of a missing one —
+/// and refusing lets the dispatcher fail over to an account that has a key.
 #[test]
-fn a_missing_api_key_is_not_turned_into_a_header() {
+fn a_missing_api_key_is_refused_rather_than_sent_empty() {
+    let provider = provider("https://gl.example.com", "k");
     for key in ["", "   "] {
-        let mut headers = HeaderMap::new();
-        GeminiProvider::inject_api_key(&mut headers, key).expect("inject");
-        assert!(headers.is_empty());
+        let err = provider
+            .plan_generate_content(
+                &model_request("gemini-2.5-pro"),
+                key,
+                "https://gl.example.com",
+            )
+            .expect_err("a keyless account must not produce a plan");
+        assert!(matches!(err, ProviderError::Credential(_)), "{err:?}");
     }
 }
 
 #[test]
-fn an_api_key_that_cannot_be_a_header_value_is_reported_not_panicked() {
-    let mut headers = HeaderMap::new();
-    let err = GeminiProvider::inject_api_key(&mut headers, "bad\nkey").expect_err("rejected");
-    assert!(matches!(err, ProviderError::Credential(_)));
+fn a_request_without_a_model_is_refused() {
+    let provider = provider("https://gl.example.com", "k");
+    let err = provider
+        .plan_generate_content(&ProviderRequest::default(), "k", "https://gl.example.com")
+        .expect_err("GenerateContent needs a model in the path");
+    assert!(matches!(err, ProviderError::Other(_)), "{err:?}");
+}
+
+/// A request whose model the planner needs in the URL path.
+fn model_request(model: &str) -> ProviderRequest {
+    ProviderRequest {
+        model: model.to_owned(),
+        ..Default::default()
+    }
 }
 
 // --- stream usage -----------------------------------------------------------
@@ -259,40 +287,6 @@ fn a_stream_with_no_usage_metadata_yields_no_tally() {
 ///
 /// 这条把「按行喂」与「一次喂完」对账：Gemini 会对不同调用方分别用 SSE 帧与
 /// 空行分隔的 JSON chunk 作答，两种都得走通。
-#[test]
-fn the_incremental_probe_agrees_with_the_whole_body_scanner() {
-    let bodies = [
-        concat!(
-            "data: {\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":5}}\n",
-            "\n",
-            "data: {\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":42}}\n",
-            "\n",
-            "data: [DONE]\n",
-        ),
-        concat!(
-            "{\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":5}}\n",
-            "\n",
-            "{\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":42}}\n",
-        ),
-    ];
-    for body in bodies {
-        let whole = parse_gemini_stream_usage(body.as_bytes());
-        for chunk in [1, 11, body.len()] {
-            let mut probe = StreamUsageProbe::new(parse_gemini_stream_usage);
-            for part in body.as_bytes().chunks(chunk) {
-                probe.observe(part);
-            }
-            assert_eq!(
-                probe.finish(),
-                whole,
-                "chunk={chunk} 的增量结论与整 body 扫描不一致：{body}"
-            );
-        }
-    }
-}
-
-// --- provider surface -------------------------------------------------------
-
 /// An API-key provider has nothing to rotate, but refusing the record would
 /// fail the whole credential load at startup.
 #[tokio::test]
@@ -318,9 +312,9 @@ async fn token_counting_refuses_rather_than_fabricating_a_number() {
     for len in [0, 4, 400, 4000] {
         assert!(
             provider
-                .count_tokens(
+                .plan_count_tokens(
                     &auth,
-                    ProviderRequest {
+                    &ProviderRequest {
                         payload: Bytes::from(vec![b'x'; len]),
                         ..Default::default()
                     },

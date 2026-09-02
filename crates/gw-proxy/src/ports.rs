@@ -13,6 +13,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use gw_authcore::Claims;
+use gw_ledger::{BillingOperationId, NewOperation, OperationConflict};
+use gw_pricing::PricingQuote;
 
 /// Primary-key type used across every entity.
 ///
@@ -20,16 +22,6 @@ use gw_authcore::Claims;
 /// trait surface does not move when the entity layer does; the two must stay
 /// the same width (`gw_model::Id`).
 pub type Id = i64;
-
-/// Per-column token counts fed into [`PricingCalculator::compute`].
-/// Matches `gw_pricing::TokenUsage`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct TokenUsage {
-    pub input: i64,
-    pub output: i64,
-    pub cached: i64,
-    pub reasoning: i64,
-}
 
 /// Why a ledger operation refused.
 ///
@@ -44,6 +36,11 @@ pub enum BillingError {
     OutstandingDebt,
     #[error("hold not found")]
     HoldNotFound,
+    /// The server-minted operation id is taken by a *different* hold — a
+    /// different tenant, amount or request, or one that already terminated.
+    /// Never an overwrite: see [`gw_ledger::operation::admit`].
+    #[error("billing operation conflict: {0}")]
+    OperationConflict(#[from] OperationConflict),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -51,40 +48,74 @@ pub enum BillingError {
 // ---------------------------------------------------------------- billing
 
 /// Minimal ledger surface consumed by [`crate::hold`] and [`crate::usage`].
-/// A 1:1 narrowing of `gw_ledger::Ledger`.
+/// A 1:1 narrowing of the operation-level `gw_ledger::Ledger` API.
+///
+/// Every method keys on a [`BillingOperationId`] — the **server-minted** money
+/// key. There is deliberately no overload taking a `&str`: an inbound
+/// `X-Trace-ID` is a [`gw_ledger::ClientTraceId`], and the type system keeps it
+/// out of these arguments.
 #[async_trait]
 pub trait BillingLedger: Send + Sync {
-    /// Reserves `amount` against `user_id` for `request_id`, valid for `ttl`.
-    async fn hold(
+    /// Admits a billing operation: writes the durable `billing_operations`
+    /// row, then takes the reservation.
+    ///
+    /// `redis_ttl` is `Some` on the normal path and `None` when the
+    /// reservation already came from the process-local budget token — the
+    /// durable row is written either way, because it is the operation's
+    /// identity rather than its cache entry.
+    ///
+    /// A floor refusal is [`HoldAdmit::Insufficient`] and must not leave a
+    /// reservation or a `held` row behind; that is what keeps a 402
+    /// `insufficient_balance` from stranding money.
+    async fn admit_operation(
+        &self,
+        operation: &NewOperation,
+        redis_ttl: Option<Duration>,
+    ) -> Result<HoldAdmit, BillingError>;
+
+    /// Debits `min(balance, actual_amount)` for the operation and clears the
+    /// reservation — **exactly once**, however many callers race.
+    ///
+    /// Returns the un-debited shortfall on the call that performed the debit,
+    /// and [`SettleTerminal::AlreadyTerminal`] for every other one. A
+    /// non-positive `actual_amount` still terminates the operation; it just
+    /// debits nothing.
+    async fn settle_once(
         &self,
         user_id: Id,
-        amount: f64,
-        request_id: &str,
-        ttl: Duration,
+        operation: &BillingOperationId,
+        actual_amount: f64,
+    ) -> Result<SettleTerminal, BillingError>;
+
+    /// Terminates the operation without touching the persistent balance —
+    /// also exactly once. Used when the upstream request failed.
+    async fn release_once(
+        &self,
+        user_id: Id,
+        operation: &BillingOperationId,
     ) -> Result<(), BillingError>;
 
-    /// Clears the outstanding hold for `request_id` and debits
-    /// `min(balance, actual_amount)`, returning the un-debited shortfall.
-    /// A non-positive `actual_amount` only clears the hold.
-    async fn settle(
-        &self,
-        user_id: Id,
-        request_id: &str,
-        actual_amount: f64,
-    ) -> Result<f64, BillingError>;
-
-    /// Clears the hold without touching the persistent balance. Used when the
-    /// upstream request failed.
-    async fn release(&self, user_id: Id, request_id: &str) -> Result<(), BillingError>;
-
-    /// Amount currently held for `(user_id, request_id)` without mutating any
-    /// state. `Ok(None)` means "no hold exists"; `Err` means "unknown" and the
+    /// Amount currently reserved for the operation, without mutating any
+    /// state. `Ok(None)` means "no reservation"; `Err` means "unknown" and the
     /// caller must NOT treat it as zero (see [`crate::usage`] fallback path).
     async fn active_hold_amount(
         &self,
         user_id: Id,
-        request_id: &str,
+        operation: &BillingOperationId,
     ) -> Result<Option<f64>, BillingError>;
+
+    /// 把预留的租约到期时刻往后推一片，返回**没有变化**的预留金额。
+    ///
+    /// 刻意不收金额参数：续租不是第二次准入，「换个金额续租」这种操作
+    /// 不存在。调用方是流式回写包装（[`crate::routes`]），中继引擎不碰它。
+    ///
+    /// 一个没有活预留的操作是 [`BillingError::HoldNotFound`] ——
+    /// 续租绝不凭空造出一笔预留。
+    async fn renew_lease(
+        &self,
+        user_id: Id,
+        operation: &BillingOperationId,
+    ) -> Result<f64, BillingError>;
 
     /// Reports whether the user owns a settle `balance_logs` row with a
     /// positive `metadata.shortfall_usd` that has not been paired with a
@@ -94,35 +125,18 @@ pub trait BillingLedger: Send + Sync {
     /// Available balance (persisted balance minus active holds), used for the
     /// structured 402 body.
     async fn available_balance(&self, user_id: Id) -> Result<f64, BillingError>;
-
-    /// Reserve `amount` only if available balance covers `min_available`.
-    ///
-    /// The reserved score is `amount` (never the floor) so this cannot
-    /// over-hold. A floor refusal is [`HoldAdmit::Insufficient`] and must
-    /// not create a reservation — that is what keeps a 402
-    /// `insufficient_balance` from leaving a Redis hold behind.
-    ///
-    /// Default implementation: one available-balance peek, then [`Self::hold`].
-    /// Production overrides this with a single Lua script so the peek and the
-    /// reservation share one Redis RTT.
-    async fn hold_gated(
-        &self,
-        user_id: Id,
-        amount: f64,
-        min_available: f64,
-        request_id: &str,
-        ttl: Duration,
-    ) -> Result<HoldAdmit, BillingError> {
-        let available = self.available_balance(user_id).await.unwrap_or(0.0);
-        if available < min_available {
-            return Ok(HoldAdmit::Insufficient { available });
-        }
-        self.hold(user_id, amount, request_id, ttl).await?;
-        Ok(HoldAdmit::Reserved)
-    }
 }
 
-/// Outcome of [`BillingLedger::hold_gated`].
+/// What a [`BillingLedger::settle_once`] call actually did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SettleTerminal {
+    /// This call performed the one debit. Carries the un-debited shortfall.
+    Debited { shortfall: f64 },
+    /// The operation had already settled or released. **Nothing was debited.**
+    AlreadyTerminal,
+}
+
+/// Outcome of [`BillingLedger::admit_operation`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HoldAdmit {
     /// The reservation is live (or this request id already had one).
@@ -134,37 +148,17 @@ pub enum HoldAdmit {
     },
 }
 
-/// Pricing surface consumed by the hold pre-flight and the settlement pipeline.
+/// 计价面：**只有一个方法**，因为计价在一次请求里只发生一次。
 ///
-/// The calculator and the token estimator are merged into one trait because
-/// every production calculator implements both.
+/// Hold 处报一次价，把四列单价与倍率冻进 [`PricingQuote`]，此后估算（预扣）
+/// 与精算（结算）都在那个报价上做。所以这里没有 `estimate` / `compute` ——
+/// 它们在 [`PricingQuote`] 上，而且拿不到价目表缓存，也就无从二次查价。
+///
+/// 这正是「在途请求不会因为管理员改价、或上游回一个别的模型名就换一个价钱
+/// 结算」的类型层面保证。
 pub trait PricingCalculator: Send + Sync {
-    /// Over-approximate USD cost used by Hold.
-    fn estimate(&self, model: &str, stream: bool, rate_mult: f64) -> f64;
-
-    /// Tighter USD upper bound when the client supplied an output cap. A
-    /// non-positive `max_output_tokens` MUST fall back to [`Self::estimate`].
-    fn estimate_with_max_tokens(
-        &self,
-        model: &str,
-        max_output_tokens: i64,
-        stream: bool,
-        rate_mult: f64,
-    ) -> f64;
-
-    /// Reservation priced from the real (approximated) input-token count so a
-    /// large prompt reserves proportional funds.
-    fn estimate_with_tokens(
-        &self,
-        model: &str,
-        input_tokens: i64,
-        max_output_tokens: i64,
-        stream: bool,
-        rate_mult: f64,
-    ) -> f64;
-
-    /// Exact USD cost from per-column token counts, used by Settle.
-    fn compute(&self, model: &str, tokens: TokenUsage, rate_mult: f64) -> f64;
+    /// 冻结 `model`（**请求**里那个模型名）在此刻的四列单价与倍率。
+    fn quote(&self, model: &str, rate_mult: f64) -> PricingQuote;
 }
 
 // ---------------------------------------------------------------- identity
@@ -242,22 +236,48 @@ pub trait TenantDirectory: Send + Sync {
     async fn touch_api_key(&self, api_key_id: Id);
 }
 
-/// Row-locking quota store used by the hold pre-flight.
+/// 订阅配额的**在途预留**，键是 [`BillingOperationId`]。
 ///
-/// The implementation performs a `SELECT ... FOR UPDATE` lock and persists
-/// rotated counters; the *decision* of what to rotate and
-/// whether the quota is exceeded stays in [`crate::hold`] via
-/// [`crate::hold::rotate_counters`] and [`crate::hold::evaluate_quota`].
+/// 与余额预扣同一个精神：**比较必须发生在锁里**。实现方在一个事务里
+/// 锁订阅行 → 应用 [`crate::hold::rotate_counters`] → 用
+/// [`crate::hold::evaluate_quota`] 把「已用 + 在途预留 + 这一笔」和限额比
+/// → 落预留行；超限就整个回滚，一行都不留下。
+///
+/// *决定*（轮转什么、超没超）留在 [`crate::hold`] 的纯函数里，实现方只提供
+/// 那把锁和那份持久化 —— 拿 SQL 再写一遍边界算术是第二份实现。
 #[async_trait]
 pub trait SubscriptionQuotaStore: Send + Sync {
-    /// Locks the subscription row, applies [`crate::hold::rotate_counters`],
-    /// persists it when dirty, and returns the post-rotation snapshot.
-    /// `Ok(None)` for a missing row, treated as permissive.
-    async fn lock_and_rotate(
+    /// 在**一个事务**里锁行、轮转、比限额、落预留。
+    ///
+    /// `amount` 是准入时拿去和余额比的那个上限（预付模式下 = 预留住的数），
+    /// 于是配额看见的在途负债和账本看见的是同一个数。
+    ///
+    /// 同一个 `operation` 重复预留是**恢复**，不是第二笔：金额已经在
+    /// 「在途合计」里了，再比一次会把自己算两遍。
+    async fn reserve(
         &self,
         subscription_id: Id,
+        operation: &BillingOperationId,
+        amount: f64,
         now: DateTime<Utc>,
-    ) -> anyhow::Result<Option<SubscriptionQuota>>;
+    ) -> anyhow::Result<QuotaAdmission>;
+
+    /// 丢掉预留，**不**累加任何计数器。请求被拒、上游失败、准入失败都走它。
+    ///
+    /// 删一行不存在的预留是成功：调用方已经在错误路径上，没有东西要还。
+    async fn release_reservation(&self, operation: &BillingOperationId) -> anyhow::Result<()>;
+}
+
+/// [`SubscriptionQuotaStore::reserve`] 的三种结局。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaAdmission {
+    /// 预留已落（或这个操作本来就有一笔同样的预留）。
+    Reserved,
+    /// 订阅行不存在。配额是**可选**的，这样的用户纯按余额计费 ——
+    /// 这不是「拒绝」。
+    NoSubscription,
+    /// 某个周期会被这一笔顶穿。没有留下任何预留行。
+    Exceeded { reason: &'static str },
 }
 
 // ---------------------------------------------------------------- settlement
@@ -270,7 +290,12 @@ pub struct UsageLogEntry {
     pub user_id: Id,
     pub api_key_id: Id,
     pub group_id: Option<Id>,
+    /// The client-facing trace id. **Observability**: it is what the tenant
+    /// sees in `X-Trace-ID` and what a support ticket quotes.
     pub request_id: String,
+    /// The server-minted [`BillingOperationId`] as text. **This is the money
+    /// key**, and it is never empty on a billed or settled row.
+    pub event_key: String,
     pub idempotency_key: String,
     pub model: String,
     pub provider: String,
@@ -302,10 +327,18 @@ pub struct BalanceEvent {
 }
 
 /// Everything that must commit atomically for one settled request.
+///
+/// Idempotency is **not** a caller option here. The implementation moves the
+/// operation to a terminal state inside the same transaction as the debit, so
+/// a second commit for the same [`BillingOperationId`] — a retry, a concurrent
+/// reconciler, a duplicated finalizer — reports
+/// [`SettleReceipt::AlreadyTerminal`] and moves no money. There is no flag to
+/// forget to set.
 #[derive(Debug, Clone)]
 pub struct SettlementCommit {
     pub user_id: Id,
-    pub request_id: String,
+    /// The money key. Also written to `usage_logs.event_key`.
+    pub operation: BillingOperationId,
     pub actual_cost: f64,
     /// The row to insert. Its `raw_metadata` already carries any
     /// `billing_fallback` tag; the implementation MUST fold the partial-debit
@@ -315,10 +348,6 @@ pub struct SettlementCommit {
     /// Accumulate the three usage counters on this subscription when the cost
     /// is positive and the row is still active.
     pub subscription_id: Option<Id>,
-    /// Re-check `usage_logs.request_id` INSIDE the transaction and abort with
-    /// [`SettleReceipt::AlreadySettled`] if a row exists. Used by
-    /// [`crate::reconcile`] so an orphaned hold can never be double-charged.
-    pub skip_if_already_logged: bool,
 }
 
 /// Outcome of [`UsageStore::commit_settlement`].
@@ -330,8 +359,8 @@ pub enum SettleReceipt {
         balance_before: f64,
         balance_after: f64,
     },
-    /// `skip_if_already_logged` was set and a `usage_logs` row already existed.
-    AlreadySettled,
+    /// The operation was already settled or released. No debit, no usage row.
+    AlreadyTerminal,
 }
 
 /// Transactional writes owned by the settlement pipeline.
@@ -353,7 +382,64 @@ pub trait UsageStore: Send + Sync {
     async fn insert_balance_event(&self, event: &BalanceEvent) -> anyhow::Result<()>;
 
     /// Releases the Redis reservation after the settle transaction commits.
-    async fn clear_hold(&self, user_id: Id, request_id: &str) -> anyhow::Result<()>;
+    async fn clear_hold(&self, user_id: Id, operation: &BillingOperationId) -> anyhow::Result<()>;
+
+    /// 当地今日零点以来、按模型折叠的 token 消耗。供 `GET /v1/usage`。
+    async fn model_usage_since(
+        &self,
+        user_id: Id,
+        since: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<ModelTokenUsage>>;
+}
+
+/// 一个模型在某个时间窗内的 token 小计。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelTokenUsage {
+    pub model: String,
+    pub requests: i64,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+}
+
+impl ModelTokenUsage {
+    /// `tokens_in + tokens_out`，给 JSON 的 `tokens` 字段。
+    #[must_use]
+    pub fn tokens(&self) -> i64 {
+        self.tokens_in.saturating_add(self.tokens_out)
+    }
+}
+
+/// 把逐条 usage 折成按模型的 token 小计。空模型名变成 `unknown`。
+///
+/// 排序与面板 `buildUsageModels` 同口径：请求数降序，同数按模型名升序。
+#[must_use]
+pub fn fold_model_usage<'a>(
+    logs: impl IntoIterator<Item = &'a UsageLogEntry>,
+) -> Vec<ModelTokenUsage> {
+    let mut table: HashMap<String, ModelTokenUsage> = HashMap::new();
+    for entry in logs {
+        let name = entry.model.trim();
+        let name = if name.is_empty() { "unknown" } else { name };
+        let point = table
+            .entry(name.to_owned())
+            .or_insert_with(|| ModelTokenUsage {
+                model: name.to_owned(),
+                requests: 0,
+                tokens_in: 0,
+                tokens_out: 0,
+            });
+        point.requests += 1;
+        point.tokens_in += entry.input_tokens;
+        point.tokens_out += entry.output_tokens;
+    }
+    let mut items: Vec<ModelTokenUsage> = table.into_values().collect();
+    items.sort_by(|left, right| {
+        right
+            .requests
+            .cmp(&left.requests)
+            .then_with(|| left.model.cmp(&right.model))
+    });
+    items
 }
 
 // ---------------------------------------------------------------- infra
@@ -478,6 +564,19 @@ pub struct ModelReasoningEffort {
 #[async_trait]
 pub trait ModelCatalog: Send + Sync {
     async fn list_models(&self) -> anyhow::Result<Vec<ModelEntry>>;
+
+    /// One visible catalogue entry, or `None` when the id is hidden or absent.
+    ///
+    /// The default walks [`Self::list_models`]. Adapters that can look up a
+    /// single row — or a snapshot keyed by id — override this so a detail
+    /// request does not rescan the listing.
+    async fn get_model(&self, id: &str) -> anyhow::Result<Option<ModelEntry>> {
+        Ok(self
+            .list_models()
+            .await?
+            .into_iter()
+            .find(|model| model.id == id))
+    }
 
     /// **路由用**的 `model_id → channel_key[]`，顺序即优先级。
     ///

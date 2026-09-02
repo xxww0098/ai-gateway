@@ -6,17 +6,28 @@
 //!
 //! 1. skip non-billable paths
 //! 2. read the [`AccessMetadata`] the access layer published (401 if absent)
-//! 3. peek the body for `model` / `stream` / `max_tokens` / input size
+//! 3. peek **a prefix of** the body for `model` / `stream` / `max_tokens` / input size
 //! 4. rate limiter (fail-open on infrastructure error)
 //! 5. idempotency check — replay a completed duplicate, reject an in-flight one
 //! 6. circuit breaker (503 when the provider is broken)
 //! 7. **outstanding-debt pre-flight** -> 402 `outstanding_debt`
-//! 8. subscription quota (lock, rotate stale counters, compare against estimate)
-//! 9. **upper-bound pre-flight**: `max(hold, EstimateWithMaxTokens, Estimate(stream))`
-//!    vs available balance -> 402 `insufficient_balance`, no hold created
-//! 10. budget token -> else `ledger.Hold`
-//! 11. idempotency claim (only now that funds are reserved)
-//! 12. run downstream, then settle-or-release exactly once
+//! 8. **冻结报价**：`calc.quote(price_key, rate_mult)`，此后估算与结算都在它上面做
+//! 9. **mint the server [`BillingOperationId`]**
+//! 10. 订阅配额：在**一个事务**里锁行、轮转、比「已用 + 在途预留 + 这一笔」、落预留
+//! 11. **upper-bound pre-flight**: `max(hold, EstimateWithMaxTokens, Estimate(stream))`
+//!     vs available balance -> 402 `insufficient_balance`, no hold created；
+//!     预算代币 -> 否则 `ledger.admit_operation`。准入失败要把配额预留还回去。
+//! 12. idempotency claim (only now that funds are reserved)
+//! 13. run downstream, then settle-or-release exactly once
+//!
+//! Step 9 is where the money key comes from, and it comes from the *server*.
+//! The inbound `X-Trace-ID` never reaches it — see [`client_trace_from`].
+//!
+//! # 为什么 mint 提到了配额之前
+//!
+//! 因为配额预留是**按操作 id 键住的**：一次操作一笔预留，释放和转实际都靠它。
+//! 收敛前 mint 在配额之后，配额也就没有任何可以键住的东西 —— 那正是它只能
+//! 「提交完再比一次」的原因。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,23 +37,32 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use chrono::Utc;
+use gw_ledger::{BillingOperationId, ClientTraceId, IdempotencyScope, NewOperation};
+use gw_relay::RelayBody;
 use gw_relay::endpoint::spec::{RequestSpec, SurfaceError, validate};
 
 use crate::ProxyState;
-use crate::access::is_proxy_path;
+use crate::body::{BILLING_PEEK_LIMIT, InboundBody, read_inbound};
 use crate::error::HoldRejection;
 use crate::idempotency::{CachedResponse, IdempotencyManager};
 use crate::kernel::{self, Phase, RelayCtx};
 use crate::ports::{
     AccessMetadata, BillingError, BillingLedger, CircuitBreaker, HoldAdmit, Id, PricingCalculator,
-    RateLimiter, SubscriptionQuota, SubscriptionQuotaStore,
+    QuotaAdmission, RateLimiter, SubscriptionQuotaStore,
 };
 use crate::settlectx::{BillingHandle, RequestBilling, SettleCtx};
 use crate::usage::Settlement;
 
-/// Caps how many bytes of the request body are read during pre-flight.
-pub const HOLD_REQUEST_BODY_LIMIT: usize = 1 << 20;
+mod preflight;
+
+use preflight::request_fingerprint;
+pub use preflight::{
+    approximate_tokens_from_bytes, client_trace_from, compute_reservation, evaluate_quota,
+    extract_idempotency_key, extract_ip_address, infer_provider, is_billable,
+    next_daily_reset_after, next_monthly_reset_after, next_weekly_reset_after,
+    preflight_upper_bound, rotate_counters,
+};
 
 /// Caps how many response bytes are buffered for idempotent replay.
 pub const IDEMPOTENCY_BODY_CAPTURE_LIMIT: usize = 10 << 20;
@@ -65,9 +85,12 @@ const DETACHED_TIMEOUT: Duration = Duration::from_secs(2);
 /// 流式还有第三遍）。这个结构只补上中继层不关心、而计费必需的东西。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BillingPeek {
-    /// 已 trim 的模型名。`RequestSpec::model` 按合同保留原样字节，
-    /// 而计费要拿它当缓存键与价格表键，必须先归一。
+    /// 已 trim 的模型名。`RequestSpec::model` 按合同保留原样字节；
+    /// 目录 / 熔断 / 日志仍用这份，大小写保持 peek 时的样子。
     pub model: String,
+    /// [`gw_pricing::normalize_model_key`] 的结果。三次 estimator 共用，
+    /// 价目表 lookup 不再对同一请求重复 `trim` + `to_lowercase`。
+    pub price_key: String,
     /// 由原始 body 长度近似而来；略微高估，对预扣而言是安全方向。
     pub input_tokens: i64,
     /// 输出上限。`None`（客户端没说）在这里塌缩成 0 = 「无上限」，
@@ -80,8 +103,10 @@ impl BillingPeek {
     /// 从唯一一次解析的结果派生。**不再解析 body**。
     #[must_use]
     pub fn from_spec(spec: &RequestSpec, body_len: usize) -> Self {
+        let model = spec.model().unwrap_or_default().trim().to_owned();
         Self {
-            model: spec.model().unwrap_or_default().trim().to_owned(),
+            price_key: gw_pricing::normalize_model_key(&model),
+            model,
             input_tokens: approximate_tokens_from_bytes(body_len),
             // 负数与缺失同义：都表示「客户端没有给出可用的上限」。
             max_tokens: spec.max_tokens.unwrap_or(0).max(0),
@@ -89,11 +114,6 @@ impl BillingPeek {
         }
     }
 }
-
-/// The peeked request body, republished as an extension so the dispatcher does
-/// not read the stream twice.
-#[derive(Debug, Clone)]
-pub struct PeekedBody(pub Bytes);
 
 /// Pre-flight balance reservation and quota gate.
 ///
@@ -173,6 +193,16 @@ impl HoldMiddleware {
         self.ttl
     }
 
+    /// 只读账本。`GET /v1/usage` 查余额用，不把 ledger 再克隆进 [`crate::ProxyState`]。
+    pub fn ledger(&self) -> &Arc<dyn BillingLedger> {
+        &self.ledger
+    }
+
+    /// 只读用量存储。`GET /v1/usage` 查今日模型 token 用。
+    pub fn usage_store(&self) -> &Arc<dyn crate::ports::UsageStore> {
+        self.settlement.store()
+    }
+
     /// The full billable-request flow.
     pub async fn handle(&self, mut req: Request, next: Next) -> Response {
         if !is_billable(req.method(), req.uri().path()) {
@@ -202,7 +232,7 @@ impl HoldMiddleware {
             1.0
         };
 
-        let request_id = trace_id_from(req.headers());
+        let client_trace = client_trace_from(req.headers());
         let ip_address = extract_ip_address(req.headers());
         let idempotency_key = extract_idempotency_key(req.headers());
         let method = req.method().clone();
@@ -235,13 +265,17 @@ impl HoldMiddleware {
             }
         };
 
-        // --- body peek (body is restored so the handler sees it unchanged) ---
-        let (spec, body_bytes) = match peek_request_body(&mut req, surface).await {
+        // --- body peek：只读**前缀**，超阈值的部分边收边转 ---
+        //
+        // 这里不再把整份 body 收进内存。超 [`crate::body::BILLING_PEEK_LIMIT`]
+        // 只意味着计费看不见它（`spec.body_visible == false`），
+        // **请求照样转发、hold 照样建**。计费降级，转发不降级。
+        let (spec, body) = match peek_request_body(&mut req, surface).await {
             Ok(v) => v,
             Err(resp) => return resp,
         };
-        let peek = BillingPeek::from_spec(&spec, body_bytes.len());
-        req.extensions_mut().insert(PeekedBody(body_bytes));
+        let peek = BillingPeek::from_spec(&spec, peeked_len(&body, req.headers()));
+        req.extensions_mut().insert(InboundBody::new(body));
         // 唯一一次解析的结果原样交给 handler，`routes::inbound` 直接复用。
         req.extensions_mut().insert(spec);
         kernel::advance_ext(&mut req, Phase::Inspected);
@@ -265,7 +299,7 @@ impl HoldMiddleware {
                     meta,
                     rate_mult,
                     peek,
-                    request_id,
+                    client_trace,
                     ip_address,
                     idempotency_key,
                     method,
@@ -293,7 +327,7 @@ impl HoldMiddleware {
             meta,
             rate_mult,
             peek,
-            request_id,
+            client_trace,
             ip_address,
             idempotency_key,
             method,
@@ -361,59 +395,72 @@ impl HoldMiddleware {
             }
         }
 
+        // --- 冻结报价 ---
+        //
+        // 价目表在这里读**最后一次**。预扣的三个估算、结算的精算，之后全都
+        // 在这份报价上做，所以在途的改价追不上这个请求，上游回一个别的模型名
+        // 也换不掉价格键。
+        let quote = self.calc.quote(&peek.price_key, rate_mult);
+
         // The reservation scales with the real prompt size so a large request
         // reserves proportional funds instead of under-holding on a flat
         // nominal input assumption.
-        let hold_amount = self.calc.estimate_with_tokens(
-            &peek.model,
-            peek.input_tokens,
-            peek.max_tokens,
-            peek.stream,
-            rate_mult,
-        );
+        //
+        // 之后只用 `upper_bound`：预付模式下「拿去和余额比的那个上界」就是
+        // 预留住的数、也是压给配额的数。`hold_amount` 是它的一个下界
+        // （`preflight_upper_bound` 取三者最大），预留得比认可的责任少
+        // 正是大请求结算成欠款的来路。
+        let (hold_amount, upper_bound) = compute_reservation(&peek, &quote);
+        debug_assert!(upper_bound >= hold_amount);
 
-        // --- subscription quota ---
-        if let (Some(sub), Some(store)) = (&meta.subscription, &self.quota_store) {
-            match store.lock_and_rotate(sub.id, Utc::now()).await {
-                // A missing subscription row is permissive: the quota system is
-                // opt-in and such a user is billed purely from their balance.
-                Ok(None) => {}
-                Ok(Some(rotated)) => {
-                    if let Some(reason) = evaluate_quota(&rotated, hold_amount) {
-                        return HoldRejection::QuotaExceeded(reason.to_owned()).into_response();
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(%err, subscription_id = sub.id, "quota check failed");
-                    return HoldRejection::QuotaExceeded(
-                        "subscription quota check failed".to_owned(),
-                    )
-                    .into_response();
-                }
-            }
+        // --- mint the money key ---
+        //
+        // **The server mints it.** Not the inbound `X-Trace-ID`, not the
+        // client `Idempotency-Key`, not a hash of either. A caller can replay
+        // or collide a header it controls; it cannot reach this.
+        //
+        // 它在配额之前铸造，因为配额预留就是按它键住的。
+        let operation_id = BillingOperationId::mint();
+
+        // --- subscription quota：锁里比，锁里留 ---
+        //
+        // 留的是 `upper_bound`，也就是马上要拿去和余额比、并且真的会预留住的
+        // 那个数 —— 配额看见的在途负债与账本看见的必须是同一个数。
+        if let Err(response) = self.reserve_quota(&meta, &operation_id, upper_bound).await {
+            return response;
         }
 
         // --- upper-bound pre-flight ---
-        // Reject before creating a hold when the balance cannot cover even the
-        // worst case. The reserved amount stays `hold_amount`; the upper bound
-        // only gates the balance comparison.
-        let upper_bound = preflight_upper_bound(
-            self.calc.as_ref(),
-            &peek.model,
-            peek.max_tokens,
-            peek.stream,
-            rate_mult,
-            hold_amount,
-        );
-        // 预算代币先 peek 再扣（门在扣之前）。常见路径走 hold_gated，
-        // floor + 预扣 + EXPIRE 同一趟 Redis。
-        let used_budget_token = if self.budget_tokens.is_some() {
-            let available = self
-                .ledger
-                .available_balance(meta.user_id)
-                .await
-                .unwrap_or(0.0);
-            if available < upper_bound {
+        //
+        // Reject before reserving when the balance cannot cover the worst
+        // case. **Prepaid reserves the bound it checked**: `reserved_amount`
+        // is `upper_bound`, not the smaller `hold_amount` — reserving less
+        // than the liability that was admitted is exactly the under-hold that
+        // lets a large request settle into debt.
+        let operation = NewOperation {
+            operation_id: operation_id.clone(),
+            user_id: meta.user_id,
+            reserved_amount: upper_bound,
+            admitted_liability: upper_bound,
+            request_fingerprint: request_fingerprint(meta.user_id, &method, &path, &peek),
+            client_trace_id: client_trace.as_str().to_owned(),
+        };
+
+        // 预算代币：仅 try_deduct 命中时跳过 Redis 预留；无 token / 不足 /
+        // 过期走 admit_operation 的单趟 Lua（floor + 预扣 + EXPIRE）。
+        // **持久化那一行两条路都写** —— 它是操作的身份，不是它的缓存。
+        let used_budget_token = self
+            .budget_tokens
+            .as_ref()
+            .is_some_and(|bts| bts.try_deduct(meta.user_id, upper_bound));
+        let redis_ttl = (!used_budget_token).then_some(self.ttl);
+
+        match self.ledger.admit_operation(&operation, redis_ttl).await {
+            Ok(HoldAdmit::Reserved) => {}
+            Ok(HoldAdmit::Insufficient { available }) => {
+                // 余额闸门拒了，那这次操作对计费而言从未存在过 —— 配额上的
+                // 那一笔在途预留也必须跟着消失，否则一次 402 就永久吃掉一格额度。
+                self.release_quota(&operation_id).await;
                 tracing::warn!(
                     event = "preflight_insufficient_balance",
                     user_id = meta.user_id,
@@ -427,43 +474,9 @@ impl HoldMiddleware {
                 }
                 .into_response();
             }
-            self.budget_tokens
-                .as_ref()
-                .is_some_and(|bts| bts.try_deduct(meta.user_id, hold_amount))
-        } else {
-            false
-        };
-
-        if !used_budget_token {
-            match self
-                .ledger
-                .hold_gated(
-                    meta.user_id,
-                    hold_amount,
-                    upper_bound,
-                    &request_id,
-                    self.ttl,
-                )
-                .await
-            {
-                Ok(HoldAdmit::Reserved) => {}
-                Ok(HoldAdmit::Insufficient { available }) => {
-                    tracing::warn!(
-                        event = "preflight_insufficient_balance",
-                        user_id = meta.user_id,
-                        model = %peek.model,
-                        upper_bound,
-                        available,
-                    );
-                    return HoldRejection::InsufficientBalance {
-                        current_balance: available,
-                        required_amount: upper_bound,
-                    }
-                    .into_response();
-                }
-                Err(err) => {
-                    return self.reject_hold_error(err, meta.user_id, hold_amount).await;
-                }
+            Err(err) => {
+                self.release_quota(&operation_id).await;
+                return self.reject_hold_error(err, meta.user_id, upper_bound).await;
             }
         }
 
@@ -471,25 +484,26 @@ impl HoldMiddleware {
 
         let billing: BillingHandle = Arc::new(RequestBilling::new(
             SettleCtx {
-                request_id: request_id.clone(),
+                operation: operation_id.clone(),
+                client_trace: client_trace.clone(),
                 user_id: meta.user_id,
                 api_key_id: meta.api_key_id,
                 group_id: meta.group_id,
-                rate_mult,
+                quote,
                 subscription_id: meta.subscription.as_ref().map(|s| s.id),
                 model: peek.model.clone(),
                 stream: peek.stream,
                 ip_address,
                 idempotency_key,
             },
-            hold_amount,
             used_budget_token,
         ));
         req.extensions_mut().insert(billing.clone());
         kernel::advance_ext(&mut req, Phase::Reserved);
         if let Some(ctx) = req.extensions_mut().get_mut::<RelayCtx>() {
             ctx.peek = Some(peek);
-            ctx.request_id.clone_from(&billing.ctx.request_id);
+            ctx.client_trace = billing.ctx.client_trace.clone();
+            ctx.operation = Some(billing.ctx.operation.clone());
             ctx.ip_address.clone_from(&billing.ctx.ip_address);
             ctx.idempotency_key.clone_from(&billing.ctx.idempotency_key);
             ctx.billing = Some(billing.clone());
@@ -506,9 +520,9 @@ impl HoldMiddleware {
                 Ok(false) => {
                     // Lost the race: give the reservation back, then either
                     // replay the winner's response or report the conflict.
-                    if !used_budget_token {
-                        let _ = with_timeout(self.ledger.release(meta.user_id, &request_id)).await;
-                    }
+                    let _ =
+                        with_timeout(self.ledger.release_once(meta.user_id, &operation_id)).await;
+                    self.release_quota(&operation_id).await;
                     if let Ok(Some(other)) = im.check(&idem_store_key).await
                         && !other.processing
                         && !other.truncated
@@ -542,7 +556,7 @@ impl HoldMiddleware {
             self.finalize_idempotency(
                 im,
                 &idem_store_key,
-                &request_id,
+                client_trace.as_str(),
                 status,
                 content_type,
                 captured,
@@ -569,12 +583,60 @@ impl HoldMiddleware {
             self.settlement.settle_missing_usage(&billing.ctx).await;
             return;
         }
-        if !billing.used_budget_token {
-            let _ = with_timeout(
-                self.ledger
-                    .release(billing.ctx.user_id, &billing.ctx.request_id),
-            )
-            .await;
+        // The durable operation is terminated on **both** reservation paths:
+        // a budget-token request has no Redis hold to give back, but it still
+        // owns a `held` row that reconciliation would otherwise charge.
+        let _ = with_timeout(
+            self.ledger
+                .release_once(billing.ctx.user_id, &billing.ctx.operation),
+        )
+        .await;
+        // 配额那一格同样要还：一个 4xx 不该永久占着订阅的额度。
+        self.release_quota(&billing.ctx.operation).await;
+    }
+
+    /// 在配额存储的**锁里**预留 `amount`。
+    ///
+    /// `Err` 已经是要回给客户端的 402。查询失败 fail-closed：查不出限额时
+    /// 放行等于把限额当不存在。
+    async fn reserve_quota(
+        &self,
+        meta: &AccessMetadata,
+        operation: &BillingOperationId,
+        amount: f64,
+    ) -> Result<(), Response> {
+        let (Some(sub), Some(store)) = (&meta.subscription, &self.quota_store) else {
+            return Ok(());
+        };
+        match store.reserve(sub.id, operation, amount, Utc::now()).await {
+            // A missing subscription row is permissive: the quota system is
+            // opt-in and such a user is billed purely from their balance.
+            Ok(QuotaAdmission::Reserved | QuotaAdmission::NoSubscription) => Ok(()),
+            Ok(QuotaAdmission::Exceeded { reason }) => {
+                Err(HoldRejection::QuotaExceeded(reason.to_owned()).into_response())
+            }
+            Err(err) => {
+                tracing::warn!(%err, subscription_id = sub.id, "quota reserve failed");
+                Err(
+                    HoldRejection::QuotaExceeded("subscription quota check failed".to_owned())
+                        .into_response(),
+                )
+            }
+        }
+    }
+
+    /// 还掉这次操作的配额预留。
+    ///
+    /// 无条件调用：删一行不存在的预留是成功（见
+    /// [`SubscriptionQuotaStore::release_reservation`]），所以调用方不必记住
+    /// 「刚才到底留没留」—— 一个需要记得设的标志就是一个会被忘记的标志。
+    /// 没有配额存储时连一次往返都不发生。
+    async fn release_quota(&self, operation: &BillingOperationId) {
+        let Some(store) = &self.quota_store else {
+            return;
+        };
+        if let Some(Err(err)) = with_timeout(store.release_reservation(operation)).await {
+            tracing::warn!(%err, operation = %operation, "quota reservation release failed");
         }
     }
 
@@ -583,7 +645,7 @@ impl HoldMiddleware {
     async fn finalize_idempotency(
         &self,
         im: &IdempotencyManager,
-        store_key: &str,
+        store_key: &IdempotencyScope,
         request_id: &str,
         status: StatusCode,
         content_type: Option<String>,
@@ -625,6 +687,13 @@ impl HoldMiddleware {
         if matches!(err, BillingError::OutstandingDebt) {
             return HoldRejection::OutstandingDebt.into_response();
         }
+        if let BillingError::OperationConflict(conflict) = &err {
+            // A minted id collided with a live or finished operation. That is
+            // a gateway bug, not a tenant error — refuse rather than reuse the
+            // row, and say so loudly enough to be found.
+            tracing::error!(%conflict, user_id, "billing operation id conflict");
+            return HoldRejection::PaymentRequired.into_response();
+        }
         tracing::warn!(%err, user_id, "hold failed");
         HoldRejection::PaymentRequired.into_response()
     }
@@ -635,7 +704,8 @@ struct ReservationInput {
     meta: AccessMetadata,
     rate_mult: f64,
     peek: BillingPeek,
-    request_id: String,
+    /// Observability only. The money key is minted later, in `handle_reserved`.
+    client_trace: ClientTraceId,
     ip_address: String,
     idempotency_key: String,
     method: Method,
@@ -648,302 +718,57 @@ pub async fn layer(State(state): State<ProxyState>, req: Request, next: Next) ->
     state.hold.clone().handle(req, next).await
 }
 
-// ---------------------------------------------------------------- pure logic
-
-/// 一个请求要不要走计费 preflight。
-///
-/// 路径集合来自 [`crate::access::is_proxy_path`]，与鉴权层共用，
-/// 所以一条路由**不可能**在没被鉴权的情况下被计费。
-///
-/// # 三个零成本端点已被移出计费范围（本轮修复，用户已批准）
-///
-/// `GET /v1/models`、`GET /v1/models/{model}`、`POST /v1/messages/count_tokens`
-/// 此前是**按 LLM 价格收钱的**。三者都会带着「没有 usage 信封」抵达结算：
-///
-/// * 两条 catalogue 读落到 usage 解析的默认分支；
-/// * `count_tokens` 命中它的 `/messages` 分支，但 Anthropic 的回复是裸
-///   `{"input_tokens": N}`，没有 `usage` 包装，所以 usage 解析器什么也找不到，
-///   报 `present = false`。
-///
-/// 「usage 缺失 + 非 strict」= fallback 结算，于是每次调用被收
-/// `max(ActiveHoldAmount, Estimate(model, stream = true, rate_mult))`。
-/// 按发布配置（`default_price_per_1k_tokens: 0.001`、`estimatedTokens = 1000`），
-/// 一次 catalogue 读要收租户约 $0.004；`count_tokens` 带着真实模型名，
-/// 按那个模型的费率计价，**可能贵得多**。而上游对这三者都收 0
-/// —— Anthropic 的 token 计数是免费的，catalogue 读根本不出网（纯 DB 读）。
-///
-/// 此前不敢改的理由是「Go parity：改了会漂移成没人能与移植 bug 区分的差异」。
-/// **这个理由已经被证伪**：`docs/relay-surface-plan.md` 证据 C 显示 Go 侧 149 条
-/// 路由里 `/v1` 与 `/v1beta` 的匹配数为 **0** —— 整个 `/v1` 面来自先前 SDK 的
-/// Builder，根本不在 Go 权威参照内，不存在 A/B 对账时被误判的风险。
-///
-/// # 这改的是「计费范围」，不是「计费语义」
-///
-/// Hold / Settle / Release 三段式、partial-debit shortfall、strict-usage-metadata
-/// 模式 —— 签名与语义一行未动。变的只是**哪些路径进入这条管线**。
-/// 这是 `CONTRACT.md` 硬约束「计费语义不变」允许的那一半。
-pub fn is_billable(method: &Method, path: &str) -> bool {
-    is_proxy_path(path)
-        && !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
-        && !path.ends_with("/count_tokens")
-}
-
-/// Conservative worst case used by the balance gate:
-/// `max(hold, EstimateWithMaxTokens, Estimate(stream = true))`.
-///
-/// `EstimateWithMaxTokens` tightens the bound when the client supplied a cap;
-/// the streaming estimate guards the case where the cap is absent or absurd.
-/// The upper-bound computation for the balance gate.
-pub fn preflight_upper_bound(
-    calc: &dyn PricingCalculator,
-    model: &str,
-    max_tokens: i64,
-    stream: bool,
-    rate_mult: f64,
-    hold_amount: f64,
-) -> f64 {
-    let with_max = calc.estimate_with_max_tokens(model, max_tokens, stream, rate_mult);
-    let streaming = calc.estimate(model, true, rate_mult);
-    hold_amount.max(with_max).max(streaming)
-}
-
-/// Returns the rejection reason when `estimated` would push any period over its
-/// limit.
-pub fn evaluate_quota(quota: &SubscriptionQuota, estimated: f64) -> Option<&'static str> {
-    let periods = [
-        (
-            quota.daily_limit_usd,
-            quota.daily_usage_usd,
-            "subscription daily quota exceeded",
-        ),
-        (
-            quota.weekly_limit_usd,
-            quota.weekly_usage_usd,
-            "subscription weekly quota exceeded",
-        ),
-        (
-            quota.monthly_limit_usd,
-            quota.monthly_usage_usd,
-            "subscription monthly quota exceeded",
-        ),
-    ];
-    for (limit, used, reason) in periods {
-        if let Some(limit) = limit
-            && used + estimated > limit
-        {
-            return Some(reason);
-        }
-    }
-    None
-}
-
-/// Zeroes any period counter whose reset boundary has passed and advances that
-/// boundary. Returns whether anything changed.
-///
-/// `pub` so a [`SubscriptionQuotaStore`] implementation can apply the identical
-/// rotation inside its `SELECT ... FOR UPDATE` transaction instead of
-/// re-deriving the rule in SQL.
-pub fn rotate_counters(quota: &mut SubscriptionQuota, now: DateTime<Utc>) -> bool {
-    let mut dirty = false;
-    if let Some(at) = quota.daily_reset_at
-        && now > at
-    {
-        quota.daily_usage_usd = 0.0;
-        quota.daily_reset_at = Some(next_daily_reset_after(now));
-        dirty = true;
-    }
-    if let Some(at) = quota.weekly_reset_at
-        && now > at
-    {
-        quota.weekly_usage_usd = 0.0;
-        quota.weekly_reset_at = Some(next_weekly_reset_after(now));
-        dirty = true;
-    }
-    if let Some(at) = quota.monthly_reset_at
-        && now > at
-    {
-        quota.monthly_usage_usd = 0.0;
-        quota.monthly_reset_at = Some(next_monthly_reset_after(now));
-        dirty = true;
-    }
-    dirty
-}
-
-fn midnight(date: NaiveDate) -> DateTime<Utc> {
-    date.and_hms_opt(0, 0, 0)
-        .expect("midnight is always a valid time")
-        .and_utc()
-}
-
-/// Next UTC midnight strictly after `t`.
-pub fn next_daily_reset_after(t: DateTime<Utc>) -> DateTime<Utc> {
-    midnight(t.date_naive() + chrono::Duration::days(1))
-}
-
-/// Next UTC Monday 00:00 strictly after `t` (ISO weeks start on Monday),
-/// including the "today is Monday midnight counts as past" rule.
-pub fn next_weekly_reset_after(t: DateTime<Utc>) -> DateTime<Utc> {
-    let day = t.date_naive();
-    let iso = i64::from(day.weekday().number_from_monday()); // Mon=1 .. Sun=7
-    midnight(day + chrono::Duration::days(8 - iso))
-}
-
-/// First day of the next UTC month at 00:00.
-pub fn next_monthly_reset_after(t: DateTime<Utc>) -> DateTime<Utc> {
-    let d = t.date_naive();
-    let (year, month) = if d.month() == 12 {
-        (d.year() + 1, 1)
-    } else {
-        (d.year(), d.month() + 1)
-    };
-    midnight(NaiveDate::from_ymd_opt(year, month, 1).expect("first of month is always valid"))
-}
-
-/// Maps a model name onto the circuit-breaker key (NOT the dispatch registry —
-/// 派发用的是 `gw_relay::endpoint::upstream::select` 的四级链，见
-/// [`crate::routes::select_upstreams`]).
-pub fn infer_provider(model: &str) -> Option<&'static str> {
-    // 不分配：热路径上每个请求都会走到这里，to_ascii_lowercase 只为几个前缀。
-    if starts_ignore_ascii(model, "gpt-")
-        || starts_ignore_ascii(model, "o1")
-        || starts_ignore_ascii(model, "o3")
-        || starts_ignore_ascii(model, "o4")
-    {
-        Some("openai")
-    } else if starts_ignore_ascii(model, "claude-") {
-        Some("anthropic")
-    } else if starts_ignore_ascii(model, "gemini-") {
-        Some("google")
-    } else if contains_ignore_ascii(model, "codex") {
-        Some("codex")
-    } else {
-        None
-    }
-}
-
-fn starts_ignore_ascii(hay: &str, prefix: &str) -> bool {
-    hay.len() >= prefix.len()
-        && hay.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
-}
-
-fn contains_ignore_ascii(hay: &str, needle: &str) -> bool {
-    hay.as_bytes()
-        .windows(needle.len())
-        .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
-}
-
-/// Approximates a token count from a byte length (`ceil(size / 4)`).
-pub fn approximate_tokens_from_bytes(size: usize) -> i64 {
-    if size == 0 {
-        return 0;
-    }
-    size.div_ceil(4) as i64
-}
-
-/// Stable request id used as the ledger hold key: an inbound `X-Trace-ID`, else
-/// a freshly minted one.
-///
-/// # 为什么不是 `Uuid::new_v4()`
-///
-/// 基线实测（`docs/relay-perf-baseline.md` 热点 #6）：`Uuid::new_v4()` 每请求
-/// 一次 `getentropy` 系统调用，占有效 CPU **1.93%**。trace id 不是密码学材料
-/// —— 它只需要在**这个进程的生命周期内**不重复，供账本 hold 键与日志关联。
-///
-/// 所以换成「**进程随机前缀 + 单调原子计数**」：前缀在进程启动时取一次熵
-/// （整个进程一次，不是每请求一次），计数器保证同进程内唯一，
-/// 前缀保证跨进程/跨副本不碰撞。`getentropy` 的每请求调用次数归 **0**（验收目标 T12）。
-///
-/// 形状仍是十六进制文本，长度固定，对既有的 `usage_logs.request_id`
-/// / Redis hold 键完全兼容（列是文本，没有 UUID 约束）。
-pub fn trace_id_from(headers: &HeaderMap) -> String {
-    headers
-        .get(TRACE_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(new_trace_id)
-}
-
-/// 进程级随机前缀。`LazyLock` 保证整个进程**只取一次**熵；
-/// 复用 `uuid` 的 v4 生成器只是为了不多引一个熵源，那一次 `getentropy`
-/// 摊到进程生命周期上等于零。
-static TRACE_PREFIX: std::sync::LazyLock<u64> =
-    std::sync::LazyLock::new(|| uuid::Uuid::new_v4().as_u64_pair().0);
-
-/// 同进程内的单调计数器。`Relaxed` 足够：这里只要求**唯一**，不要求跨线程有序。
-static TRACE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-fn new_trace_id() -> String {
-    let n = TRACE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("{:016x}{n:016x}", *TRACE_PREFIX)
-}
-
-/// Client IP: `X-Forwarded-For` (first entry) -> `X-Real-IP` -> nothing.
-///
-/// The `RemoteAddr` fallback is the caller's job here because axum surfaces the
-/// peer address as a `ConnectInfo` extension rather than on the request itself.
-pub fn extract_ip_address(headers: &HeaderMap) -> String {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        let first = xff.split(',').next().unwrap_or("").trim();
-        if !first.is_empty() {
-            return first.to_owned();
-        }
-    }
-    headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.trim().to_owned())
-        .unwrap_or_default()
-}
-
-/// Reads `Idempotency-Key`, then `X-Idempotency-Key`.
-pub fn extract_idempotency_key(headers: &HeaderMap) -> String {
-    for name in ["idempotency-key", "x-idempotency-key"] {
-        if let Some(v) = headers.get(name).and_then(|v| v.to_str().ok()) {
-            let v = v.trim();
-            if !v.is_empty() {
-                return v.to_owned();
-            }
-        }
-    }
-    String::new()
-}
-
 // ---------------------------------------------------------------- plumbing
 
-/// 把入站 body 收成一块 [`Bytes`] 供 peek 与转发共用。
+/// 读入站 body 的**前缀**，交出唯一一次解析的结果与那份 body 本身。
 ///
-/// 超 [`HOLD_REQUEST_BODY_LIMIT`] 回 413。**不再写回 `Request`**：
-/// handler 走 [`PeekedBody`]，再 `Body::from(bytes.clone())` 只是多挂一个
-/// `Full`，火焰图上 `peek_request_body` 的一部分就是这个。
+/// 阈值内是一块 [`Bytes`]（peek 与转发共用同一块内存），超阈值是一条流
+/// （前缀接回流头，剩下的边收边转）。**不再写回 `Request`**：
+/// handler 走 [`InboundBody`]，再往请求上挂一个 `Full` 是白搭一次分配。
+///
+/// # 这里不再有 413
+///
+/// 收敛前它是 `to_bytes(body, 1 MiB)`，超限即 413 —— 一个**计费实现细节**
+/// 泄漏成了转发能力限制。现在超限只是 [`RequestSpec::body_visible`] 为 `false`。
 async fn peek_request_body(
     req: &mut Request,
     surface: gw_relay::Surface,
-) -> Result<(RequestSpec, Bytes), Response> {
+) -> Result<(RequestSpec, RelayBody), Response> {
     let body = std::mem::replace(req.body_mut(), Body::empty());
-    let bytes = match axum::body::to_bytes(body, HOLD_REQUEST_BODY_LIMIT).await {
-        Ok(b) => b,
-        Err(_) => {
-            return Err((
-                StatusCode::PAYLOAD_TOO_LARGE,
-                axum::Json(serde_json::json!({
-                    "error": "Payload Too Large",
-                    "message": "request body exceeds the billing pre-flight limit",
-                })),
-            )
-                .into_response());
-        }
-    };
+    let body = read_inbound(body).await?;
 
     // **全链路唯一一次** JSON 解析（根除缺陷 #15）。结果作为扩展下发，
     // `routes::inbound` 直接复用，不再解第二遍。
-    let spec = RequestSpec::parse(surface, Some(&bytes));
+    // `peek()` 为 `None`（看不见 body）时 spec 全是缺省值且 `body_visible=false`
+    // —— 计费必须显式面对这一支，见 [`peeked_len`]。
+    let spec = RequestSpec::parse(surface, body.peek());
     // 规则 S3：`Accept` 与 body 的 `stream` 冲突时**以 body 为准**，只告警不改行为
     // （告警由被调用方自己打，返回值这里不需要）。
     let _conflicted =
         gw_relay::endpoint::accept_conflicts_with_body(&spec, req.headers(), req.uri().path());
-    Ok((spec, bytes))
+    Ok((spec, body))
+}
+
+/// 计费按多少字节估算输入 token。
+///
+/// 看得见就用真实长度。**看不见时取一个下界当估计**：body 一定超过了
+/// [`BILLING_PEEK_LIMIT`]（否则它就被缓冲了），客户端给了 `Content-Length`
+/// 就用更大的那个。往大了估是预扣唯一安全的方向 —— 预留得比认可的责任少，
+/// 正是大请求结算成欠款的来路（AGENTS.md「计费身份」）。
+fn peeked_len(body: &RelayBody, headers: &HeaderMap) -> usize {
+    match body.peek() {
+        Some(bytes) => bytes.len(),
+        None => content_length(headers).unwrap_or(0).max(BILLING_PEEK_LIMIT),
+    }
+}
+
+fn content_length(headers: &HeaderMap) -> Option<usize> {
+    headers
+        .get(header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()
 }
 
 /// Buffers a response body for idempotent replay when it is small enough and

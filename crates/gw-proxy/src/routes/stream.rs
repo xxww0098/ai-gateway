@@ -1,129 +1,155 @@
-//! Streamed relay + the shared off-path settler used by unary too.
+//! Relaying an upstream response back to the client, and the off-path settler.
 //!
 //! Split out of `routes.rs` so the dispatch file stays under the 1,000-line
-//! ratchet. Stream payload bytes go to the client; usage / error chunks stay
-//! on [`StreamSettler`]. A client hang-up still settles through
-//! [`ProxyState::drain`].
+//! ratchet.
 //!
-//! Unary reuses the same settler: the HTTP response is built as soon as the
-//! upstream body and usage (or the fallback / strict / release decision
-//! inputs) are in hand, and the ledger write is spawned onto
-//! [`ProxyState::drain`] via [`StreamSettler`]'s `Drop`. That is the same
-//! path a hung-up stream already uses — not a second queue.
+//! # One response path
+//!
+//! Passthrough frames remain byte-for-byte identical. Translate cells wrap the
+//! same upstream body with one request-scoped state machine before this module
+//! sees it; that state machine also owns usage extraction. Both paths still
+//! share this single header-copy, disconnect and settlement implementation.
+//!
+//! //! # Settling
+//!
+//! [`StreamSettler`] carries the obligation. It settles when the body ends
+//! and, through `Drop`, when the client hangs up mid-stream — the case a plain
+//! "settle after the handler returns" misses entirely. `Drop` spawns onto
+//! [`ProxyState::drain`] so a settle straddling shutdown is waited out rather
+//! than aborted with the runtime.
+//!
+//! # 长流的租约
+//!
+//! Redis 里的预留只有一片 TTL（[`gw_ledger::DEFAULT_HOLD_TTL`]，300 秒）。
+//! 一条跑得比它久的健康流会在**自己还活着的时候**被过期清理掉，那之后余额
+//! 闸门就看不见这笔在途负债了。所以 body 每动一次就检查一下租约，
+//! 到点了就续一片 —— 见 [`LEASE_RENEW_PERIOD`]。
+//!
+//! 续租挂在这里（回写包装），**不在 `gw-relay::engine` 里**：中继层是计费盲的。
+//!
+//! `claim_finalize` 三入口（每请求恰一次结算权）：
+//! | 入口 | 语义 |
+//! | [`relay_response`] | 上游出了 body：settler 持票，body 结束或断开时结算 |
+//! | [`schedule_release`] | 上游未出 body：Release |
+//! | [`crate::hold::HoldMiddleware::finalize`] | 兜底：handler 未结算时 settle_missing 或 Release |
 
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{StatusCode, header};
 use axum::response::Response;
 use futures_util::Stream;
-use gw_provider::types::{ProviderResponse, StreamChunk, StreamResponse, UsageRecord};
+use gw_provider::types::UsageRecord;
+use gw_relay::{RelayError, RelayResponse, RelayResponseBody, RelayUsage};
+use http_body_util::BodyExt as _;
 use tokio_util::task::TaskTracker;
 
+use super::translation::UsageHandle;
 use crate::ProxyState;
 use crate::settlectx::{BillingHandle, SettleCtx};
 use crate::usage::{Settlement, UsageOutcome};
 
-/// Relays a streamed response, settling when the stream ends.
+/// 多久续一次租约：一片租约（[`gw_ledger::DEFAULT_HOLD_TTL`]）的**一半**。
 ///
-/// Settlement is claimed up-front so the hold middleware's finalizer stands
-/// down; the actual charge is applied by [`StreamSettler`] once the last chunk
-/// has been forwarded, or by its `Drop` if the client hangs up mid-stream.
-pub(super) fn stream_response(
-    state: &ProxyState,
-    upstream: StreamResponse,
-    billing: Option<BillingHandle>,
-    auth_id: String,
-    provider: &str,
-    started: Instant,
-) -> Response {
-    let StreamResponse {
+/// 这个比例是有意义的：丢掉一次续租（Redis 抖一下、任务被调度晚了）之后
+/// 还剩整整半片的余量，预留不会因为一次瞬时故障就消失。
+///
+/// 由那个 TTL **算出来**而不是抄一个数字，所以 TTL 改了这里跟着改；
+/// 但它不读配置 —— 它是这条回路的阻尼系数，不是运维旋钮。
+const LEASE_RENEW_PERIOD: Duration = Duration::from_secs(gw_ledger::DEFAULT_HOLD_TTL.as_secs() / 2);
+
+/// Everything one relayed attempt needs to become a client response.
+///
+/// A struct rather than eight positional parameters: `auth_id`, `provider` and
+/// `model` are all strings, and at that width the compiler stops helping.
+pub(super) struct Relayed {
+    pub(super) response: RelayResponse,
+    pub(super) handle: UsageHandle,
+    pub(super) billing: Option<BillingHandle>,
+    pub(super) auth_id: String,
+    pub(super) provider: &'static str,
+    pub(super) model: String,
+    pub(super) started: Instant,
+}
+
+/// Relays one upstream response to the client and settles it exactly once.
+///
+/// The status is whatever the upstream said — 200, 429 or 503 — and it travels
+/// with its own headers. A non-2xx is still a *response*; the only thing that
+/// differs is that it settles as a failure so the hold is released rather than
+/// charged.
+pub(super) fn relay_response(state: &ProxyState, relayed: Relayed) -> Response {
+    let Relayed {
+        response,
+        handle,
+        billing,
+        auth_id,
+        provider,
+        model,
+        started,
+    } = relayed;
+    let RelayResponse {
         status,
         headers,
-        chunks,
-    } = upstream;
-    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+        body,
+    } = response;
+
     let settler = billing.and_then(|b| {
         b.claim_finalize().then(|| StreamSettler {
             settlement: state.dispatch.settlement.clone(),
             drain: state.drain.clone(),
             ctx: b.ctx.clone(),
             usage: None,
-            failed: false,
+            // An upstream error status is a failed request for billing: it
+            // released nothing upstream, so it must release here.
+            failed: !status.is_success(),
             auth_id,
             provider: provider.to_owned(),
+            model,
             started,
+            // 预算代币付的账在 Redis 里根本没有预留，续租只会得到
+            // HoldNotFound —— 不去问，省掉每分钟一次的噪音告警。
+            renewable: !b.used_budget_token,
+            last_renew: started,
             done: false,
         })
     });
 
-    let mut response = Response::new(Body::from_stream(RelayBody {
-        chunks,
+    let stream = SettledBody {
+        inner: Some(match body {
+            RelayResponseBody::Stream(body) => Box::pin(body.into_data_stream()),
+            RelayResponseBody::Buffered(bytes) => {
+                Box::pin(futures_util::stream::once(async move { Ok(bytes) }))
+            }
+        }),
+        handle,
         settler,
-        finishing: None,
-    }));
+    };
+
+    let mut response = Response::new(Body::from_stream(stream));
     *response.status_mut() = status;
-    apply_upstream_headers(response.headers_mut(), headers);
-    let response_headers = response.headers_mut();
-    if !response_headers.contains_key(header::CONTENT_TYPE) {
-        response_headers.insert(
+    // 上游 header 回写：复制**只有一份实现**，在 `gw-relay`。它保住 `set-cookie`
+    // 这类同名多值（逐个 `insert` 会折成最后一条），并按 RFC 7230 §6.1 剥掉这条
+    // 消息自己 `Connection` 点名的逐跳头。这里曾经有第二张写死的 `HOP_BY_HOP`
+    // 名单 —— 两张名单必然漂：那张漏了 `expect`，也从不看 `Connection` 的值，
+    // 于是上游一句 `Connection: close, x-foo` 里的 `x-foo` 被原样发给客户端。
+    gw_relay::copy_preserving_multivalue(response.headers_mut(), &headers);
+    if !response.headers().contains_key(header::CONTENT_TYPE) {
+        response.headers_mut().insert(
             header::CONTENT_TYPE,
-            header::HeaderValue::from_static("text/event-stream"),
-        );
-    }
-    if !response_headers.contains_key(header::CACHE_CONTROL) {
-        response_headers.insert(
-            header::CACHE_CONTROL,
-            header::HeaderValue::from_static("no-cache"),
+            header::HeaderValue::from_static("application/json"),
         );
     }
     response
 }
 
-/// Relays a completed non-streaming response without waiting for the ledger.
-///
-/// The settle-vs-release-vs-strict decision is made from inputs we already
-/// have (status, parsed usage, in-memory strict flag). The *write* is the
-/// same detached [`StreamSettler`] drop a hung-up stream uses, so the client
-/// is not blocked on Redis / Postgres. [`claim_finalize`][BillingHandle::claim_finalize]
-/// still runs here so the hold middleware's safety net stands down and
-/// failover cannot bill twice.
-pub(super) fn unary_response(
-    state: &ProxyState,
-    response: ProviderResponse,
-    billing: Option<BillingHandle>,
-    auth_id: String,
-    provider: &str,
-    started: Instant,
-) -> Response {
-    let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::OK);
-    // Bind the settler so it drops *after* the response is built and
-    // *before* we return: Drop spawns onto `state.drain`. Marking `done`
-    // would skip the spawn and leak the hold.
-    let _settler = billing.and_then(|b| {
-        b.claim_finalize().then(|| StreamSettler {
-            settlement: state.dispatch.settlement.clone(),
-            drain: state.drain.clone(),
-            ctx: b.ctx.clone(),
-            usage: response.usage,
-            failed: !status.is_success(),
-            auth_id,
-            provider: provider.to_owned(),
-            started,
-            done: false,
-        })
-    });
-    relay(status, response.headers, response.body)
-}
-
 /// Releases (never charges) a request that never produced an upstream body.
 ///
-/// Same drain path as [`unary_response`]: claim here, ledger I/O off the
-/// client wait. Matches [`UsageOutcome::failed`]: no usage envelope, `failed`.
+/// Claim here, ledger I/O off the client's wait. Matches
+/// [`UsageOutcome::failed`]: no usage envelope, `failed`.
 pub(super) fn schedule_release(state: &ProxyState, billing: Option<&BillingHandle>) {
     let Some(billing) = billing else {
         return;
@@ -139,69 +165,108 @@ pub(super) fn schedule_release(state: &ProxyState, billing: Option<&BillingHandl
         failed: true,
         auth_id: String::new(),
         provider: String::new(),
+        model: String::new(),
         started: Instant::now(),
+        // 这条路上没有 body，也就没有要续的租约。
+        renewable: false,
+        last_renew: Instant::now(),
         done: false,
     };
 }
 
-/// Client-facing body of a streamed relay.
+/// The client-facing body: the upstream's frames, plus the settlement.
 ///
-/// Filters [`StreamChunk::Usage`] / [`StreamChunk::Error`] out of the byte
-/// stream (they are billing metadata, not SSE) and settles exactly once when
-/// the upstream ends. A `Stream` impl rather than `unfold` so each chunk is a
-/// poll, not a new future that moves the settler and the boxed upstream.
-struct RelayBody {
-    chunks: Pin<Box<dyn Stream<Item = StreamChunk> + Send>>,
+/// The frames are forwarded byte-for-byte. The only thing this type adds is
+/// *when* to settle — and it has to read the probe's result **after** the
+/// relay's own body has been dropped, because that drop is what calls
+/// `finish()`. Hence the explicit `inner.take()` in both paths.
+/// The upstream's frames, boxed. `RelayResponseBody` has two shapes and this
+/// erases the difference.
+type UpstreamFrames = Pin<Box<dyn Stream<Item = Result<Bytes, RelayError>> + Send>>;
+
+struct SettledBody {
+    /// `Option` so it can be dropped early, releasing the relay's probe guard
+    /// before the usage handle is read.
+    inner: Option<UpstreamFrames>,
+    handle: UsageHandle,
     settler: Option<StreamSettler>,
-    finishing: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
 }
 
-impl Stream for RelayBody {
-    type Item = Result<Bytes, std::convert::Infallible>;
+impl SettledBody {
+    /// Drops the upstream body — which finishes the probe — then hands the
+    /// resulting usage to the settler and lets it go.
+    ///
+    /// Dropping the settler is what schedules the ledger write, so this is
+    /// also where the request stops being billable.
+    fn finish(&mut self) {
+        let Some(mut settler) = self.settler.take() else {
+            return;
+        };
+        drop(self.inner.take());
+        settler.usage = self
+            .handle
+            .get()
+            .flatten()
+            .map(|usage| to_record(usage, &settler.model, &settler.provider));
+    }
+}
+
+impl Stream for SettledBody {
+    type Item = Result<Bytes, RelayError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        loop {
-            if let Some(fut) = this.finishing.as_mut() {
-                ready!(fut.as_mut().poll(cx));
-                this.finishing = None;
-                return Poll::Ready(None);
+        let Some(inner) = this.inner.as_mut() else {
+            return Poll::Ready(None);
+        };
+        match ready!(inner.as_mut().poll_next(cx)) {
+            Some(Ok(bytes)) => {
+                // 客户端的 body 还在动 = 这个请求还活着 = 它的预留不该过期。
+                if let Some(settler) = this.settler.as_mut() {
+                    settler.maybe_renew_lease();
+                }
+                Poll::Ready(Some(Ok(bytes)))
             }
-            match ready!(this.chunks.as_mut().poll_next(cx)) {
-                Some(StreamChunk::Payload(bytes)) => {
-                    return Poll::Ready(Some(Ok(bytes)));
+            Some(Err(err)) => {
+                // A mid-stream failure is a real error, not a clean EOF: hyper
+                // turns it into RST_STREAM so the client can tell it was cut
+                // off. It also means the response is not billable as a success.
+                tracing::warn!(%err, "upstream stream failed mid-response");
+                if let Some(settler) = this.settler.as_mut() {
+                    settler.failed = true;
                 }
-                Some(StreamChunk::Usage(record)) => {
-                    if let Some(s) = this.settler.as_mut() {
-                        s.usage = Some(record);
-                    }
-                }
-                Some(StreamChunk::Error { status, message }) => {
-                    tracing::warn!(?status, %message, "upstream stream error");
-                    if let Some(s) = this.settler.as_mut() {
-                        s.failed = true;
-                    }
-                }
-                None => match this.settler.take() {
-                    Some(mut s) => {
-                        // Same order as the old unfold: mark done first so
-                        // Drop does not also spawn, then await settle inline.
-                        s.done = true;
-                        let settlement = s.settlement.clone();
-                        let ctx = s.ctx.clone();
-                        let outcome = s.into_outcome();
-                        this.finishing = Some(Box::pin(async move {
-                            settlement.settle(&ctx, outcome).await;
-                        }));
-                    }
-                    None => return Poll::Ready(None),
-                },
+                this.finish();
+                Poll::Ready(Some(Err(err)))
+            }
+            None => {
+                this.finish();
+                Poll::Ready(None)
             }
         }
     }
 }
 
-/// Carries the settlement obligation for a streamed response.
+impl Drop for SettledBody {
+    /// The client hung up. `finish` is idempotent (`settler.take()`), so a body
+    /// that already ended does nothing here.
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+/// `gw-relay`'s side-band usage → the record the settlement pipeline bills on.
+fn to_record(usage: RelayUsage, model: &str, provider: &str) -> UsageRecord {
+    UsageRecord {
+        model: model.to_owned(),
+        provider: provider.to_owned(),
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cached_tokens: usage.cached_tokens,
+        reasoning_tokens: usage.reasoning_tokens,
+    }
+}
+
+/// Carries the settlement obligation for one relayed response.
 struct StreamSettler {
     settlement: Arc<Settlement>,
     /// The composition root's tracker, so a settlement spawned from `drop`
@@ -213,19 +278,45 @@ struct StreamSettler {
     failed: bool,
     auth_id: String,
     provider: String,
+    /// The upstream model name, stamped onto the usage record the probe
+    /// produces — the probe reads token counts, not model names.
+    model: String,
     started: Instant,
+    /// 这个请求在 Redis 里有没有预留可续。预算代币那条路没有。
+    renewable: bool,
+    /// 上一次续租（或开始）的时刻。
+    last_renew: Instant,
     done: bool,
 }
 
 impl StreamSettler {
-    fn into_outcome(mut self) -> UsageOutcome {
-        UsageOutcome {
-            usage: self.usage.take(),
-            failed: self.failed,
-            auth_id: std::mem::take(&mut self.auth_id),
-            provider: std::mem::take(&mut self.provider),
-            duration_ms: self.started.elapsed().as_millis() as i64,
+    /// 到点就续一片租约，**在结算之外**：它不动金额，也不重新检查余额。
+    ///
+    /// 失败只记日志，绝不中断这条流 —— 预留会在剩下的 TTL 里自然过期，
+    /// 那一行留给对账。为了一次 Redis 抖动把客户端的回复切断是明显更坏的交易。
+    ///
+    /// 账本写在 [`ProxyState::drain`] 上，所以 poll 不会被 I/O 卡住。
+    fn maybe_renew_lease(&mut self) {
+        if !self.renewable || self.last_renew.elapsed() < LEASE_RENEW_PERIOD {
+            return;
         }
+        self.last_renew = Instant::now();
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let ledger = self.settlement.ledger().clone();
+        let user_id = self.ctx.user_id;
+        let operation = self.ctx.operation.clone();
+        self.drain.spawn(async move {
+            if let Err(err) = ledger.renew_lease(user_id, &operation).await {
+                tracing::warn!(
+                    user_id,
+                    operation = %operation,
+                    %err,
+                    "hold lease renew failed; the reservation will expire on its TTL",
+                );
+            }
+        });
     }
 
     fn outcome(&self) -> UsageOutcome {
@@ -241,11 +332,6 @@ impl StreamSettler {
 
 impl Drop for StreamSettler {
     /// Detaches the ledger write onto [`ProxyState::drain`].
-    ///
-    /// Two callers land here: a stream body dropped mid-flight, and a unary
-    /// response that already has its usage (or the release / strict inputs)
-    /// and must not make the client wait for Redis / Postgres. Either way
-    /// the hold must not be left to its TTL — that is free upstream output.
     ///
     /// The task goes to [`ProxyState::drain`], **not** to `tokio::spawn`. A
     /// bare spawn is aborted the instant the runtime is dropped, which for a
@@ -274,46 +360,7 @@ impl Drop for StreamSettler {
     }
 }
 
-/// Copies an upstream response through, minus hop-by-hop headers.
-pub(super) fn relay(status: StatusCode, headers: HeaderMap, body: Bytes) -> Response {
-    let mut response = Response::new(Body::from(body));
-    *response.status_mut() = status;
-    apply_upstream_headers(response.headers_mut(), headers);
-    if !response.headers().contains_key(header::CONTENT_TYPE) {
-        response.headers_mut().insert(
-            header::CONTENT_TYPE,
-            header::HeaderValue::from_static("application/json"),
-        );
-    }
-    response
-}
-
-/// Moves upstream headers onto the client response, dropping hop-by-hop names.
-///
-/// A move, not a clone: the provider is done with the map. Replacing the
-/// destination keeps repeated values (`set-cookie`) that a per-name `insert`
-/// would collapse.
-fn apply_upstream_headers(dst: &mut HeaderMap, mut src: HeaderMap) {
-    for name in HOP_BY_HOP {
-        src.remove(*name);
-    }
-    *dst = src;
-}
-
-/// Headers that describe one hop and must not be forwarded.
-const HOP_BY_HOP: &[&str] = &[
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-    "content-length",
-];
-
-#[cfg(test)]
-pub(crate) fn is_hop_by_hop(name: &str) -> bool {
-    HOP_BY_HOP.contains(&name)
+/// Status codes that mean "this account, right now" rather than "this request".
+pub(super) fn is_retryable_status(status: StatusCode) -> bool {
+    status.as_u16() >= 500 || status == StatusCode::TOO_MANY_REQUESTS
 }

@@ -157,3 +157,62 @@ fn usage_emptiness_separates_absent_from_zero() {
         );
     }
 }
+
+/// 凭证的 `Debug` 不许带出活密钥 —— 连带任何**包含**它的类型。
+///
+/// 守护的 bug：把 `#[derive(Debug)]` 还给 `Credential`。那样一句
+/// `tracing::debug!(?target)`、一个 `.expect(&format!("{cred:?}"))`，
+/// 打出来的就是一把可以直接拿去用的上游 key，而这些字节落到哪个文件、
+/// 被谁收走、留多久，全都不由本进程决定。
+///
+/// 密文是**测试自己造的**（生产的掩码实现里不存在这个串），所以断言的期望值
+/// 来自输入而不是源码字面量（规范 2.11）。
+#[test]
+fn credential_debug_never_carries_the_live_secret() {
+    const LIVE: &str = "sk-live-UNIQUE-KNIFE3-9f3a7c";
+
+    let creds = [
+        Credential::Bearer(LIVE.to_owned()),
+        Credential::XApiKey(LIVE.to_owned()),
+        Credential::GoogleApiKey(LIVE.to_owned()),
+    ];
+
+    let dumps: Vec<String> = creds.iter().map(|cred| format!("{cred:?}")).collect();
+    for dump in &dumps {
+        assert!(
+            !dump.contains(LIVE),
+            "凭证的 Debug 把活密钥打了出来：{dump}"
+        );
+    }
+
+    // 脱敏不许把三个变体抹成同一坨：日志还要能回答「这次用的是哪种载体」。
+    for (i, a) in dumps.iter().enumerate() {
+        for (j, b) in dumps.iter().enumerate() {
+            if i != j {
+                assert_ne!(a, b, "两个变体的 dump 无法区分");
+            }
+        }
+    }
+
+    // 掩码必须稳定：同一个密文两次 dump 必须一模一样，否则日志里同一把 key
+    // 会变成两把，去重与关联全部失效。
+    assert_eq!(
+        format!("{:?}", Credential::Bearer(LIVE.to_owned())),
+        dumps[0],
+        "掩码不稳定"
+    );
+
+    // 嵌套：包含凭证的类型照样 derive(Debug)，泄漏点收在 Credential 这一层。
+    for cred in creds {
+        let target = UpstreamTarget {
+            origin: "https://upstream.invalid/"
+                .parse()
+                .expect("测试用的 origin"),
+            credential: cred,
+            timeouts: RelayTimeouts::default(),
+            dialect: UpstreamDialect::OpenAiChat,
+        };
+        let dump = format!("{target:?}");
+        assert!(!dump.contains(LIVE), "嵌套的凭证把活密钥带了出来：{dump}");
+    }
+}

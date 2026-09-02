@@ -10,10 +10,8 @@ use std::time::Duration;
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 
-use super::{
-    Ledger, audit_metadata, hold_keys_ttl, is_cache_miss, is_insufficient_balance,
-    parse_insufficient_available,
-};
+use super::reply::{is_cache_miss, is_insufficient_balance, parse_insufficient_available};
+use super::{Ledger, audit_metadata, hold_keys_ttl};
 use crate::scripts::{CACHE_MISS, INSUFFICIENT_BALANCE};
 use crate::{DEFAULT_BALANCE_TTL, DEFAULT_HOLD_TTL, LedgerError};
 
@@ -103,17 +101,6 @@ async fn holding_without_redis_is_refused() {
 async fn releasing_without_redis_succeeds() {
     redisless().release(1, "req").await.expect("release");
     redisless().clear_hold(1, "req").await.expect("clear_hold");
-}
-
-/// With no Redis there are no reservations, so a scan is empty rather than an
-/// error — an ops scan must not fail a deployment that runs without holds.
-#[tokio::test]
-async fn scanning_without_redis_finds_nothing() {
-    let stale = redisless()
-        .scan_stale_holds(Duration::from_secs(600))
-        .await
-        .expect("scan");
-    assert!(stale.is_empty());
 }
 
 /// Amount guards reject before any state moves. Every rejected call below must

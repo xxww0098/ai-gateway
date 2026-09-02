@@ -1,17 +1,16 @@
 //! Unit tests for [`crate::common`].
 //!
 //! The include_usage rewrite is covered by an exhaustive matrix over its
-//! generator space, the stream-idle watchdog by its three behaviours.
+//! generator space. The stream machinery these used to also cover is gone —
+//! frame relaying and side-band usage now live in `gw-relay`, which tests them.
 
 use super::*;
-use crate::usage::parse_openai_stream_usage;
-use futures_util::StreamExt;
 use serde_json::json;
 
 // --- include_usage 定点插入（审计缺陷 #4）---------------------------------------
 
-/// 把两段拼回一个完整 body，供断言检查。生产路径**不做**这次拼接
-/// （[`attach_body`] 直接把两段当两帧发出去），这里只是为了能看整体。
+/// 把两段拼回一个完整 body，供断言检查。
+/// 生产路径走 [`crate::RoutePlan::splice`]，同样是这两段。
 fn joined(spliced: &Spliced) -> Vec<u8> {
     let mut out = Vec::with_capacity(spliced.len());
     out.extend_from_slice(&spliced.prefix);
@@ -424,330 +423,144 @@ fn a_base_url_without_a_host_is_rejected() {
     }
 }
 
-// --- stream idle watchdog ----------------------------------------------------
+// --- 密钥不许被 Debug 带出去 -------------------------------------------------
 
-#[tokio::test]
-async fn a_stalled_stream_is_terminated_by_the_watchdog() {
-    let stalling = futures_util::stream::once(async {
-        tokio::time::sleep(Duration::from_secs(3600)).await;
-        1u8
-    });
-    let mut guarded = Box::pin(with_stream_idle_timeout(
-        stalling,
-        Duration::from_millis(40),
-    ));
-
-    assert_eq!(guarded.next().await, Some(Err(StreamIdleElapsed)));
-    assert_eq!(
-        guarded.next().await,
-        None,
-        "the stream must end after the idle error, not keep waiting"
-    );
-}
-
-/// Every delivered item restarts the window.
-#[tokio::test]
-async fn steady_traffic_keeps_the_stream_alive() {
-    let ticking = futures_util::stream::unfold(0u8, |i| async move {
-        if i >= 5 {
-            return None;
-        }
-        tokio::time::sleep(Duration::from_millis(15)).await;
-        Some((i, i + 1))
-    });
-    let guarded = with_stream_idle_timeout(ticking, Duration::from_millis(400));
-    let items: Vec<_> = guarded.collect().await;
-    assert_eq!(items.len(), 5);
-    assert!(
-        items.iter().all(Result::is_ok),
-        "no gap exceeded the idle window, so nothing may be reported as idle"
-    );
-}
-
-/// A non-positive idle passes the inner stream through untouched.
-#[tokio::test]
-async fn a_zero_idle_window_disables_the_watchdog() {
-    let inner = futures_util::stream::once(async {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        7u8
-    });
-    let guarded = with_stream_idle_timeout(inner, Duration::ZERO);
-    let items: Vec<_> = guarded.collect().await;
-    assert_eq!(items, vec![Ok(7)]);
-}
-
-/// Immediately-ready items must never be killed by the idle window.
+/// [`Redacted`] 的守护测试：**每一个** executor 的 `Debug` 都不许打出配置里的活密钥。
 ///
-/// The old `timeout(idle, inner.next())` built a Sleep on every poll. This
-/// guards the new impl: if the watchdog is armed *before* the inner stream is
-/// polled, a 1 ns window can expire between two ready items on a busy runtime.
-#[tokio::test]
-async fn ready_items_are_not_killed_by_a_tiny_idle_window() {
-    let inner = futures_util::stream::iter(0u16..1_000);
-    let guarded = with_stream_idle_timeout(inner, Duration::from_nanos(1));
-    let items: Vec<_> = guarded.collect().await;
-    assert_eq!(items.len(), 1_000);
-    assert!(
-        items.iter().all(Result::is_ok),
-        "a ready item is not an idle gap"
-    );
+/// 密文是这条测试自己造的（生产源码里不存在这个串），所以断言的期望值来自输入
+/// 而不是源码字面量（规范 2.11）。
+///
+/// 守护的 bug：给这些结构体加回 `#[derive(Debug)]`。那时一句
+/// `tracing::debug!(?provider)`、一个带上下文的 `expect`，写进日志的就是一把
+/// 能直接拿去用的上游 key —— 而日志落到哪、留多久、被谁看到，都不由本进程决定。
+///
+/// 逐个列出来而不是只测一个：这七个 executor 是同一条规矩的七处落点，
+/// 新加第八个上游时漏掉脱敏，这条会红。
+#[test]
+fn no_executor_debug_carries_its_api_key() {
+    const LIVE: &str = "sk-live-UNIQUE-KNIFE3-provider-4b81de";
+
+    let cfg = ProviderConfig {
+        base_url: "https://upstream.test/v1".to_owned(),
+        api_key: LIVE.to_owned(),
+        enabled: true,
+    };
+
+    let dumps: Vec<(&str, String)> = vec![
+        ("ProviderConfig", format!("{cfg:?}")),
+        (
+            "ClaudeProvider",
+            format!(
+                "{:?}",
+                crate::claude::ClaudeProvider::new(&cfg, 0).expect("claude")
+            ),
+        ),
+        (
+            "OpenAiCompatibleProvider",
+            format!(
+                "{:?}",
+                crate::openai::OpenAiCompatibleProvider::new(&cfg, 0).expect("openai")
+            ),
+        ),
+        (
+            "GeminiProvider",
+            format!(
+                "{:?}",
+                crate::gemini::GeminiProvider::new(&cfg, 0).expect("gemini")
+            ),
+        ),
+        (
+            "KiroProvider",
+            format!(
+                "{:?}",
+                crate::kiro::KiroProvider::new(&cfg, 0).expect("kiro")
+            ),
+        ),
+        (
+            "CodexProvider",
+            format!(
+                "{:?}",
+                crate::codex::CodexProvider::new(&cfg, 0).expect("codex")
+            ),
+        ),
+        (
+            "XaiProvider",
+            format!("{:?}", crate::xai::XaiProvider::new(&cfg, 0).expect("xai")),
+        ),
+        (
+            "VertexProvider",
+            format!(
+                "{:?}",
+                crate::vertex::VertexProvider::new(&cfg, 0).expect("vertex")
+            ),
+        ),
+    ];
+
+    for (name, dump) in &dumps {
+        assert!(
+            !dump.contains(LIVE),
+            "{name} 的 Debug 把活密钥打了出来：{dump}"
+        );
+        assert!(
+            dump.contains(name),
+            "脱敏不许把类型名一起吃掉，否则日志读不出这是谁：{dump}"
+        );
+    }
+
+    // 掩码必须稳定：同一份配置两次 dump 一模一样，否则日志里同一把 key
+    // 会变成两把，关联与去重全部失效。
+    assert_eq!(format!("{cfg:?}"), dumps[0].1, "掩码不稳定");
 }
 
-// --- streamed usage accumulation ---------------------------------------------
+/// [`crate::RoutePlan`] 是凭证在本 crate 里唯一的出口值，它的 `Debug` 同样不许漏。
+///
+/// 计划里的凭证是 `gw_relay::Credential`，脱敏收在**它**那一层，所以 `RoutePlan`
+/// 照常 `derive(Debug)`。这条测的正是那个「照常」还成不成立 —— 谁要是往
+/// `RoutePlan` 上加了第二个装密文的裸 `String` 字段，这条会红。
+#[test]
+fn a_route_plan_never_dumps_the_credential_it_carries() {
+    const LIVE: &str = "sk-live-UNIQUE-KNIFE3-plan-e5d9a2";
 
-fn sse(chunks: &[&'static str]) -> Vec<reqwest::Result<Bytes>> {
-    chunks
-        .iter()
-        .map(|c| Ok(Bytes::from_static(c.as_bytes())))
-        .collect()
-}
-
-#[tokio::test]
-async fn payloads_are_forwarded_verbatim_and_followed_by_a_usage_chunk() {
-    let body = futures_util::stream::iter(sse(&[
-        "data: {\"choices\":[{\"delta\":{\"content\":\"he\"}}]}\n\n",
-        "data: {\"choices\":[{\"delta\":{\"content\":\"llo\"}}]}\n\n",
-        "data: {\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":34}}\n\ndata: [DONE]\n\n",
-    ]));
-    let chunks: Vec<StreamChunk> = usage_stream(
-        body,
-        Duration::ZERO,
-        "gpt-4o".to_owned(),
-        PROVIDER_OPENAI,
-        parse_openai_stream_usage,
-        200,
-    )
-    .collect()
-    .await;
-
-    let (last, payloads) = chunks.split_last().expect("at least one chunk");
-    assert_eq!(payloads.len(), 3, "every upstream chunk must be forwarded");
-    let forwarded: Vec<u8> = payloads
-        .iter()
-        .flat_map(|c| match c {
-            StreamChunk::Payload(bytes) => bytes.to_vec(),
-            other => panic!("expected a payload chunk, got {other:?}"),
-        })
-        .collect();
-    assert!(forwarded.starts_with(b"data: {\"choices\""));
-
-    match last {
-        StreamChunk::Usage(record) => {
-            assert_eq!(record.model, "gpt-4o");
-            assert_eq!(record.provider, PROVIDER_OPENAI);
-            assert_eq!(record.input_tokens, Some(12));
-            assert_eq!(record.output_tokens, Some(34));
-            assert_eq!(record.cached_tokens, None, "an omitted column stays absent");
-        }
-        other => panic!("expected a trailing usage chunk, got {other:?}"),
+    for credential in [
+        gw_relay::Credential::Bearer(LIVE.to_owned()),
+        gw_relay::Credential::XApiKey(LIVE.to_owned()),
+        gw_relay::Credential::GoogleApiKey(LIVE.to_owned()),
+    ] {
+        let plan = crate::RoutePlan {
+            provider: PROVIDER_OPENAI,
+            endpoint: url::Url::parse("https://upstream.test/v1/chat/completions")
+                .expect("测试用的 endpoint"),
+            credential,
+            headers: http::HeaderMap::new(),
+            body: None,
+            timeouts: relay_timeouts(DEFAULT_TIMEOUT),
+            dialect: gw_relay::UpstreamDialect::OpenAiChat,
+        };
+        let dump = format!("{plan:?}");
+        assert!(!dump.contains(LIVE), "RoutePlan 把活密钥打了出来：{dump}");
     }
 }
 
-#[tokio::test]
-async fn a_stream_without_a_usage_envelope_emits_no_usage_chunk() {
-    // Absence of the chunk is the signal strict-usage-metadata mode keys off.
-    let body = futures_util::stream::iter(sse(&[
-        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
-        "data: [DONE]\n\n",
-    ]));
-    let chunks: Vec<StreamChunk> = usage_stream(
-        body,
-        Duration::ZERO,
-        "gpt-4o".to_owned(),
-        PROVIDER_OPENAI,
-        parse_openai_stream_usage,
-        200,
-    )
-    .collect()
-    .await;
-
-    assert_eq!(chunks.len(), 2);
-    assert!(
-        !chunks.iter().any(|c| matches!(c, StreamChunk::Usage(_))),
-        "no usage envelope upstream means no usage chunk downstream"
-    );
-}
-
-#[tokio::test]
-async fn usage_survives_a_body_longer_than_the_retained_window() {
-    let mut chunks: Vec<reqwest::Result<Bytes>> = Vec::new();
-    chunks.push(Ok(Bytes::from_static(b"data: {\"choices\":[]}\n\n")));
-    for _ in 0..64 {
-        chunks.push(Ok(Bytes::from(vec![b'x'; 4096])));
-    }
-    chunks.push(Ok(Bytes::from_static(
-        b"\ndata: {\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":6}}\n\ndata: [DONE]\n\n",
-    )));
-
-    let out: Vec<StreamChunk> = usage_stream(
-        futures_util::stream::iter(chunks),
-        Duration::ZERO,
-        "m".to_owned(),
-        PROVIDER_OPENAI,
-        parse_openai_stream_usage,
-        200,
-    )
-    .collect()
-    .await;
-
-    match out.last().expect("chunks") {
-        StreamChunk::Usage(record) => {
-            assert_eq!(record.input_tokens, Some(5));
-            assert_eq!(record.output_tokens, Some(6));
-        }
-        other => panic!("terminal usage lost past the buffer window: {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn an_idle_stall_mid_stream_surfaces_an_error_chunk_then_settles_usage() {
-    let body = futures_util::stream::unfold(0u8, |i| async move {
-        match i {
-            0 => Some((
-                Ok(Bytes::from_static(
-                    b"data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}\n\n",
-                )),
-                1,
-            )),
-            _ => {
-                tokio::time::sleep(Duration::from_secs(3600)).await;
-                None
-            }
-        }
-    });
-    // 206 rather than 200: the relay cannot have guessed it, so an error chunk
-    // carrying it proves the status was threaded through from the response
-    // rather than assumed.
-    let out: Vec<StreamChunk> = usage_stream(
-        body,
-        Duration::from_millis(40),
-        "m".to_owned(),
-        PROVIDER_OPENAI,
-        parse_openai_stream_usage,
-        206,
-    )
-    .collect()
-    .await;
-
-    assert!(matches!(out.first(), Some(StreamChunk::Payload(_))));
-    match out.get(1) {
-        Some(StreamChunk::Error { status, message }) => {
-            assert_eq!(*status, Some(206), "the relayed status must survive");
-            assert!(!message.is_empty(), "a stall must say what happened");
-        }
-        other => panic!("the stall must be reported: {other:?}"),
-    }
-    // A truncated stream still bills whatever usage did arrive.
-    assert!(matches!(out.get(2), Some(StreamChunk::Usage(_))), "{out:?}");
-}
-
-// --- upstream status / header pass-through -----------------------------------
-
-/// Builds a `reqwest::Response` without a socket, so the assembly step can be
-/// tested for what it forwards rather than for what it can reach.
-fn upstream_response(
-    status: u16,
-    headers: &[(&str, &str)],
-    body: &'static str,
-) -> reqwest::Response {
-    let mut builder = http::Response::builder().status(status);
-    for (name, value) in headers {
-        builder = builder.header(*name, *value);
-    }
-    reqwest::Response::from(builder.body(body).expect("a well-formed response"))
-}
-
-/// The defect this guards: with only a chunk stream to return, a relay has
-/// nothing to answer with but a hardcoded `200 text/event-stream`, and every
-/// header the upstream set is dropped on the floor.
-#[tokio::test]
-async fn the_upstream_status_and_headers_reach_the_relay() {
-    let response = upstream_response(
-        206,
-        &[
-            ("content-type", "text/event-stream; charset=utf-8"),
-            ("x-request-id", "req_abc123"),
-            ("anthropic-ratelimit-requests-remaining", "41"),
-        ],
-        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
-    );
-
-    let assembled = stream_response(response, |response, status| {
-        usage_stream(
-            response.bytes_stream(),
-            Duration::ZERO,
-            "m".to_owned(),
-            PROVIDER_OPENAI,
-            parse_openai_stream_usage,
-            status,
-        )
-    });
-
-    assert_eq!(assembled.status, 206, "a status must never be assumed");
+#[test]
+fn raw_query_percent_escapes_and_bare_flags_are_preserved() {
+    let req = crate::types::ProviderRequest {
+        raw_query: Some("tag=a%20b&plus=a+b&pct=%25&empty=&flag&key=a&key=b".to_owned()),
+        ..Default::default()
+    };
+    let endpoint =
+        super::chat_completions_endpoint_for("https://api.example.test", &req).expect("endpoint");
+    let parsed = url::Url::parse(&endpoint).expect("url");
     assert_eq!(
-        assembled.headers.get("x-request-id").map(|v| v.as_bytes()),
-        Some(&b"req_abc123"[..]),
-        "an upstream trace header must survive the relay"
-    );
-    assert_eq!(
-        assembled
-            .headers
-            .get("anthropic-ratelimit-requests-remaining")
-            .map(|v| v.as_bytes()),
-        Some(&b"41"[..]),
-        "rate-limit headers are the caller's only budget signal"
-    );
-    assert_eq!(
-        assembled
-            .headers
-            .get(http::header::CONTENT_TYPE)
-            .map(|v| v.as_bytes()),
-        Some(&b"text/event-stream; charset=utf-8"[..]),
-        "the upstream's own framing must not be overwritten"
-    );
-
-    let relayed: Vec<u8> = assembled
-        .chunks
-        .filter_map(|c| async move {
-            match c {
-                StreamChunk::Payload(bytes) => Some(bytes.to_vec()),
-                _ => None,
-            }
-        })
-        .concat()
-        .await;
-    assert!(
-        relayed.starts_with(b"data: {\"choices\""),
-        "headers must not come at the cost of the body"
+        parsed.query(),
+        Some("tag=a%20b&plus=a+b&pct=%25&empty=&flag&key=a&key=b"),
     );
 }
 
-/// Multi-valued headers survive as a list rather than collapsing to the last
-/// one.
-#[tokio::test]
-async fn a_repeated_upstream_header_keeps_every_value() {
-    let response = upstream_response(
-        200,
-        &[("set-cookie", "a=1"), ("set-cookie", "b=2")],
-        "data: [DONE]\n\n",
+#[test]
+fn provider_owned_query_override_does_not_reencode_unrelated_segments() {
+    let raw = "alt=json&x=a%20b&%61lt=other&flag";
+    assert_eq!(
+        super::override_raw_query(raw, "alt", "sse"),
+        "x=a%20b&flag&alt=sse",
     );
-
-    let assembled = stream_response(response, |response, status| {
-        usage_stream(
-            response.bytes_stream(),
-            Duration::ZERO,
-            "m".to_owned(),
-            PROVIDER_OPENAI,
-            parse_openai_stream_usage,
-            status,
-        )
-    });
-
-    let values: Vec<&[u8]> = assembled
-        .headers
-        .get_all("set-cookie")
-        .iter()
-        .map(http::HeaderValue::as_bytes)
-        .collect();
-    assert_eq!(values, vec![&b"a=1"[..], &b"b=2"[..]]);
 }

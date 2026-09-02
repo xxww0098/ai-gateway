@@ -21,6 +21,8 @@ AI-GateWay：Rust + axum LLM 中转，密钥只认 `agw-`。本文件只写实�
 
 - 品牌是 AI-GateWay，新密钥只发 `agw-`。
 - 公开 `/v1` JSON、Hold/Settle/Release 语义、既有表列名都不改。钱是 `numeric`/`f64`，整数是 `bigint`/`i64`，OAuth 表是 `o_auth_sessions`。
+- **钱的键是服务端生成的 `BillingOperationId`**，不是客户端可控的 `X-Trace-ID`。见下文「计费身份」。
+- **推理 HTTP 只从 `gw-relay` 出网**，`gw-provider` 只规划路由不发包。见下文「谁发包」。
 - 面板 JSON 与业务错误码是契约。接入说明只写 `gw-proxy` 里真实存在的路径（Claude 用站点 origin + `/v1/messages`，不要发明 `/v1beta`）。
 - 按业务域切模块；删一个功能等于删一个文件夹。规范细节走 `docs/rust-engineering.md`，门禁走 `cargo xtask ci`。
 
@@ -38,6 +40,30 @@ AI-GateWay：Rust + axum LLM 中转，密钥只认 `agw-`。本文件只写实�
 - 改 Hold/Settle/Release 的签名与语义，或让停机跳过在途结算排空（见下文「计费与停机」）。
 - 为「以后可能用到」加抽象、新依赖、或第二套同名类型。
 
+## 计费身份
+
+**一次计费操作的身份由服务端生成，客户端碰不到。**
+
+| 类型（`gw-ledger`） | 谁生成 | 键住什么 |
+| --- | --- | --- |
+| `BillingOperationId` | **服务端**，在 hold 准入处 mint | hold / settle / release / 对账 / `usage_logs.event_key` |
+| `ClientTraceId` | 客户端 `X-Trace-ID` 或进程内生成 | 日志、响应头、`usage_logs.request_id` |
+| `IdempotencyScope` | 由客户端 `Idempotency-Key` 派生 | **客户端重试**去重，不是钱的键 |
+| `UpstreamAttemptId` | dispatcher，每次 HTTP 尝试一个 | 一个 RoutePlan / failover 下的单次尝试 |
+
+四个是**四个类型**，不是四个 `String`：`ClientTraceId` 传不进要 `BillingOperationId` 的参数位。
+从前它们是同一个 `X-Trace-ID`，于是一个**客户端能自己指定的头**同时是账本的键 ——
+重放或撞车就落到同一行。
+
+由此定下的不变量：
+
+- `X-Trace-ID` **只是观测**。它不许出现在 hold / settle / release / 对账 / `event_key` 的参数里。
+- `usage_logs.event_key` 是操作 id 的文本，**已结算的行上永不为空串**；`request_id` 留给客户端链路 id。
+- 预付模式下 `reserved_amount` == `admitted_liability`：**准入时拿去和余额比的那个上限就是预留住的数**，
+  不是一个更小的下限 —— 预留得比认可的责任少，正是大请求结算成欠款的来路。
+- 同一个 `BillingOperationId` 换了金额或换了请求指纹再来预扣 = `HoldError::OperationConflict`，
+  **不是 OK，也不是覆盖**。终态操作同理不许重开。
+
 ## 计费与停机
 
 ```
@@ -45,12 +71,24 @@ Request → access 中间件（API Key/JWT → 租户）
   → hold 中间件
       preflight：有未清偿欠款 → 402 outstanding_debt
                  max(holdAmount, EstimateWithMaxTokens, Estimate) 与余额比对
-                 不足 → 402 insufficient_balance，且不创建 Redis hold
-      → ledger.hold（预扣）
-  → gw-provider 执行（含跨账号 failover）
-  → 旁路解析 usage
-  → 结算：pricing.compute 精算 → ledger.settle 或 release → 写 UsageLog → 累加订阅配额
+                 不足 → 402 insufficient_balance，且不创建预留
+      → mint BillingOperationId（服务端）
+      → ledger.admit_operation：先写 billing_operations 那一行，再取 Redis 预留
+  → gw-provider 规划路由（RoutePlan，含跨账号 failover）
+  → gw-relay 逐字节中继（旁路 UsageProbe 读 usage，不进回写路径）
+  → 结算：pricing.compute 精算 → ledger.settle_once 或 release_once
+          → 写 UsageLog（event_key = 操作 id）→ 累加订阅配额
 ```
+
+**`settle_once` / `release_once` 归 `gw-ledger`**，语义是「首个终态调用赢」：
+条件更新 `UPDATE billing_operations SET state=... WHERE state='held'` 拿到行锁，
+并发的第二次看到 0 行，返回 already-terminal，**不再扣第二次钱**。
+这条保证写在事务里，**没有调用方开关** —— 一个需要记得打开的幂等保护就是一个会被忘记的保护。
+
+`billing_operations`（Postgres）是**非终态操作的唯一真相**。Redis 里的预留是缓存：
+它会过期、会被逐出、会随机器一起没，这些都不能说明钱有没有入账。所以对账扫的是
+`terminal_at IS NULL` 的行，**不是 Redis 的 TTL**。「预留最后清」依旧：PG 提交成功而
+Redis 清理失败时，那一行仍然可对账。
 
 三种结算模式必须都在：
 
@@ -58,15 +96,55 @@ Request → access 中间件（API Key/JWT → 租户）
 - **fallback**：上游缺 usage 且非 strict 时，用 `max(ActiveHoldAmount, Estimate(stream=true))` 兜底，
   并在 `UsageLog.RawMetadata.billing_fallback.reason=missing_upstream_usage` 标注
 - **strict**：`billing.strict_usage_metadata_mode=true` 时不结算不释放，
-  写 `UsageLog{failed=true, reason=missing_upstream_usage_strict}`，hold 随 TTL 过期
+  写 `UsageLog{failed=true, reason=missing_upstream_usage_strict}`；操作停在 `held`，
+  预留随 TTL 过期，那一行留给对账
+
+**计价在一次请求里只发生一次。** hold 处 `Calculator::quote(price_key, rate_mult)` 把四列单价、
+倍率与价目表代次冻成一个 `PricingQuote`，放进 `SettleCtx`；预扣的三个估算与结算的精算都在它上面做，
+**结算侧没有第二次查价目表的入口**。于是两件事都不可能发生：管理员的在途改价追上一个已准入的请求，
+以及上游回一个别的模型名把价格键换掉（那等于让上游决定按什么价收租户的钱）。上游那个名字只上
+`usage_logs.model`。
+
+**计价的四列必须互斥。** 上游原话是 `ObservedUsage`（写 `usage_logs` 的就是它，审计要和上游账单对得上），
+计价看的是 `normalize(dialect, observed)` 折出来的 `BillableUsage`。OpenAI / Codex 的 `completion_tokens`
+与 Anthropic 的 `output_tokens` **含**思考，所以可见输出是两者之差；Google 的 `candidatesTokenCount`
+**不含**，思考是并列项。按四条独立价格列直接相乘就是把前两家的思考 token 收两遍。
+负数或自相矛盾的信封**拒绝**（不 clamp、不截断），结算按「上游没报 usage」走既有 fallback / strict。
+`reasoning` 那一列没有价时思考按**输出价**收，不是免费 —— 建表默认值是 0，照字面收就是每次少收一大块。
+
+**配额的比较必须在锁里。** `quota_reservations`（键 = `BillingOperationId`）是在途的那份配额负债：
+hold 在**同一个事务**里锁订阅行 → 轮转 → 比「已用 + 在途预留合计 + 这一笔」→ 落预留行，超限整个回滚。
+提交完再比一次，两个抢最后一格额度的并发请求就都会放行。结算在**扣款那个事务里**删预留 + 加实际
+（只删不加 = 白用一次额度，只加不删 = 算两遍）；释放只删不加。准入失败 / 4xx / 上游失败都要还回去。
+
+**HoldLease 会续期。** `DEFAULT_HOLD_TTL`（300 秒）是**一片租约**，不是一条流的最长时长 ——
+它决定的是进程崩在结算之前时余额被冻多久，所以不该为了迁就长流而调大。活着的流由 `gw-proxy`
+的流式回写包装每隔半片调 `Ledger::renew_lease` 续一次（`gw-relay` 是计费盲的，续租不在中继层）。
+续租**只推时间戳**：不碰 zset 分数、不收金额参数、不重做余额检查。`DEFAULT_MAX_HOLD_DURATION`
+（30 分钟，从 `billing_operations.created_at` 算起）是硬顶 —— 一条永不结束的流不许永久冻结余额。
 
 其余不变量：`settle` 按 `min(balance, actual)` 做 partial-debit，欠款写 `BalanceLog.Metadata.shortfall_usd`，
-通过 `shortfall_resolve:<requestID>:<debitLogID>` 的 Credit 配对解除；订阅购买 `Debit` 成功但建订阅失败时，
+通过 `shortfall_resolve:<billingOperationID>:<debitLogID>` 的 Credit 配对解除；订阅购买 `Debit` 成功但建订阅失败时，
 立刻以 `subscription_purchase:<pkgID>:compensate:<debitRef>` 回滚。
 
 停机时必须排空在途结算：`StreamSettler::drop` 走 `TaskTracker`（流式中途断开，以及一元
 把账本写入从请求路径卸下来的那条），`gw-server` 在 graceful shutdown
 返回之后才 `close()` + `wait()`。顺序反了会让在途 Settle 随 runtime 一起死，hold 只能等 TTL —— 用户白嫖。
+
+## 谁发包
+
+**`gw-relay` 是工作区里唯一的推理 HTTP 出口。**
+
+- `gw-provider` 只产出 `RoutePlan`（端点、凭证、provider 自己的头、可能改写过的 body）——
+  一个纯值，不含 socket。`Provider::execute` / `execute_stream` 已**删除**，不是弃用。
+- 唯一留在 `gw-provider` 的 HTTP 是**凭证刷新**，集中在 `oauth.rs`：它打的是身份提供方的
+  token 端点，不带租户载荷，响应不回给客户端，也不在请求路径上。
+- 这条规矩由 `gw-provider/src/route/tests.rs` 的源码扫描守着：除 `oauth.rs` 外任何文件出现
+  `.send()`、或任何文件出现 `execute` / `execute_stream`，测试就红。加新上游时请照 `RoutePlan` 写。
+
+为什么不是两套：provider 那套自己实现的回写路径会在非 2xx 上丢掉整份 header
+（429 的 `retry-after` 收不到，SDK 就按自己猜的退避打回去）、把多值 `set-cookie` 折成一条、
+把流式中途失败表现成一次干净的 EOF。中继层已经把这三件事做对了，第二套只会把它们做错。
 
 ## 列名既成事实
 
@@ -113,5 +191,5 @@ GW_TEST_REDIS_URL=redis://127.0.0.1:6379 \
 `gw-authcore`/`gw-infra`/`gw-ledger` 直接用连接串指向的库（`ai_gateway_test` 已有迁移）。若换用 `postgres` 超级用户跑过，
 留下的 `gw_*_test_*` 库属主是 `postgres`，`ai_gateway` 删不掉 —— 用 `postgres` 身份 `dropdb` 清掉即可。
 
-**当前状态**：`make lint`、`cargo test --workspace`（含 `--ignored` 全档）、`cargo xtask ci`、前端
-`npm run typecheck` / `npm test` / `npm run build` 全绿；面板登录后各页（含仪表盘/密钥/模型/用量/审计日志）均可正常渲染。
+**当前状态**：`make lint`、`cargo test --workspace`、`cargo xtask ci` 全绿。
+`--ignored` 全档需要本机 PG/Redis（见上），换机器后请先起服务再跑一遍。

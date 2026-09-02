@@ -12,7 +12,7 @@ use super::*;
 async fn a_unary_response_is_not_blocked_on_ledger_io() {
     let harness = Harness::build();
     let release = harness.usage_store.hold_commits();
-    harness.provider.queue(Ok(ok_response(10, 20)));
+    harness.transport.queue(Ok(CannedResponse::ok(10, 20)));
 
     let response = harness
         .router()
@@ -61,7 +61,7 @@ async fn a_unary_response_is_not_blocked_on_ledger_io() {
 async fn dropping_a_unary_response_still_settles_through_the_shutdown_tracker() {
     let harness = Harness::build();
     let release = harness.usage_store.hold_commits();
-    harness.provider.queue(Ok(ok_response(5, 7)));
+    harness.transport.queue(Ok(CannedResponse::ok(5, 7)));
 
     let response = harness
         .router()
@@ -90,7 +90,7 @@ async fn dropping_a_unary_response_still_settles_through_the_shutdown_tracker() 
 #[tokio::test]
 async fn a_unary_settlement_spawned_before_close_is_still_waited_on() {
     let harness = Harness::build();
-    harness.provider.queue(Ok(ok_response(3, 4)));
+    harness.transport.queue(Ok(CannedResponse::ok(3, 4)));
 
     let response = harness
         .router()
@@ -109,7 +109,7 @@ async fn a_unary_settlement_spawned_before_close_is_still_waited_on() {
 #[tokio::test]
 async fn collecting_a_unary_body_does_not_double_settle() {
     let harness = Harness::build();
-    harness.provider.queue(Ok(ok_response(11, 13)));
+    harness.transport.queue(Ok(CannedResponse::ok(11, 13)));
 
     send_settled(
         &harness,
@@ -129,12 +129,7 @@ async fn collecting_a_unary_body_does_not_double_settle() {
 #[tokio::test]
 async fn a_unary_error_status_releases_instead_of_charging() {
     let harness = Harness::build();
-    harness.provider.queue(Ok(gw_provider::types::ProviderResponse {
-        status: 400,
-        headers: http::HeaderMap::new(),
-        body: bytes::Bytes::from_static(b"{\"error\":\"bad\"}"),
-        usage: None,
-    }));
+    harness.transport.queue(Ok(CannedResponse::status(400)));
 
     let (status, _) = send_settled(
         &harness,
@@ -158,7 +153,9 @@ async fn a_unary_error_status_releases_instead_of_charging() {
 #[tokio::test]
 async fn a_unary_without_usage_falls_back_rather_than_billing_zero() {
     let harness = Harness::build();
-    harness.provider.queue(Ok(ok_response_without_usage()));
+    harness
+        .transport
+        .queue(Ok(CannedResponse::ok_without_usage()));
 
     send_settled(
         &harness,
@@ -175,7 +172,9 @@ async fn a_unary_without_usage_falls_back_rather_than_billing_zero() {
 async fn strict_mode_neither_settles_nor_releases_a_usage_less_unary() {
     let harness = Harness::build();
     harness.settlement.set_strict_usage_metadata(true);
-    harness.provider.queue(Ok(ok_response_without_usage()));
+    harness
+        .transport
+        .queue(Ok(CannedResponse::ok_without_usage()));
 
     send_settled(
         &harness,

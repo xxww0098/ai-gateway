@@ -8,21 +8,16 @@
 //! only, with [`gw_authcore::AuthRecord`] as the record.
 
 use crate::common::{
-    DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_CODEX, ProviderConfig, attach_body,
-    chat_completions_endpoint, ensure_include_usage, nested_string, request_surface,
-    requested_model, resolve_timeout, responses_endpoint, shared_client, stream_response,
-    string_from_map, usage_stream,
+    PROVIDER_CODEX, ProviderConfig, Redacted, chat_completions_endpoint_for, ensure_include_usage,
+    nested_string, relay_timeouts, request_surface, resolve_timeout, responses_endpoint_for,
+    string_from_map, upstream_dialect,
 };
-use crate::openai::bearer;
-use crate::types::{
-    Provider, ProviderError, ProviderRequest, ProviderResponse, StreamResponse,
-    copy_outbound_headers,
-};
-use crate::usage::{parse_codex_stream_usage, parse_codex_usage};
+use crate::route::{RoutePlan, RoutePlanner};
+use crate::types::{ProviderError, ProviderRequest};
 use chrono::{SecondsFormat, Utc};
 use gw_authcore::{AuthRecord, AuthStatus};
-use gw_relay::Surface;
-use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use gw_relay::{Credential, Surface};
+use http::header::{ACCEPT, CONTENT_TYPE};
 use http::{HeaderMap, HeaderValue};
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -44,7 +39,7 @@ const CODEX_METADATA_EXPIRED: &str = "expired";
 const CODEX_METADATA_LAST_REFRESH: &str = "last_refresh";
 const CODEX_METADATA_ID_TOKEN: &str = "id_token";
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 struct CodexRefreshResponse {
     #[serde(default)]
     access_token: String,
@@ -56,13 +51,33 @@ struct CodexRefreshResponse {
     expires_in: i64,
 }
 
+impl std::fmt::Debug for CodexRefreshResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodexRefreshResponse")
+            .field("access_token", &Redacted(&self.access_token))
+            .field("refresh_token", &Redacted(&self.refresh_token))
+            .field("id_token", &Redacted(&self.id_token))
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
+}
+
 /// Executor for Codex / OpenAI OAuth credentials.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CodexProvider {
     base_url: String,
     access_token: String,
     timeout: Duration,
-    client: reqwest::Client,
+}
+
+impl std::fmt::Debug for CodexProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodexProvider")
+            .field("base_url", &self.base_url)
+            .field("access_token", &Redacted(&self.access_token))
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 impl CodexProvider {
@@ -88,7 +103,6 @@ impl CodexProvider {
             base_url,
             access_token: cfg.api_key.trim().to_owned(),
             timeout: resolve_timeout(timeout_seconds),
-            client: shared_client(),
         })
     }
 
@@ -163,59 +177,57 @@ impl CodexProvider {
         })
     }
 
-    /// Assembles an outbound chat-completions request.
-    fn build_request(
+    /// Plans an outbound chat-completions / responses request.
+    ///
+    /// 端点由**入口**决定（缺陷 #1），不由 provider 名或 model 名猜。
+    fn plan_request(
         &self,
         req: &ProviderRequest,
-        stream: bool,
         access_token: &str,
         base_url: &str,
-    ) -> Result<reqwest::RequestBuilder, ProviderError> {
+    ) -> Result<RoutePlan, ProviderError> {
         if access_token.is_empty() {
             return Err(ProviderError::Credential(
                 "codex access token is required".to_owned(),
             ));
         }
-        // 与 openai executor 同一条规则：端点由**入口**决定（缺陷 #1）。
-        // Responses 本来就是 Codex 的原生协议（`docs/relay-surface-plan.md` §3.6
-        // 的 B×codex 是直通格），缺的只是把端点拼对。
         let surface = request_surface(req);
         let endpoint = match surface {
-            Surface::OpenAiResponses => responses_endpoint(base_url, &req.query)?,
+            Surface::OpenAiResponses => responses_endpoint_for(base_url, req)?,
             Surface::OpenAiCompletions | Surface::AnthropicMessages => {
-                chat_completions_endpoint(base_url, &req.query)?
+                chat_completions_endpoint_for(base_url, req)?
             }
         };
-        // Like the OpenAI executor: force the terminal usage envelope on
-        // streams, but only after re-verifying `stream: true` in the body.
-        // `None` 表示一个字节都不动。
-        let spliced = if stream {
-            ensure_include_usage(&req.payload, surface)
+        let endpoint = url::Url::parse(&endpoint).map_err(|err| {
+            ProviderError::Other(anyhow::anyhow!("invalid codex endpoint: {err}"))
+        })?;
+        // Force the terminal usage envelope on streams, but only after
+        // re-verifying `stream: true` in the body itself. `None` 表示一个字节都不动。
+        let body = if req.stream {
+            RoutePlan::splice(ensure_include_usage(&req.payload, surface))
         } else {
             None
         };
 
         let mut headers = HeaderMap::new();
-        copy_outbound_headers(&mut headers, &req.headers);
-        if !headers.contains_key(CONTENT_TYPE) {
+        if !req.headers.contains_key(CONTENT_TYPE) {
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         }
-        if stream {
+        if req.stream {
             headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
-        } else if !headers.contains_key(ACCEPT) {
+        } else if !req.headers.contains_key(ACCEPT) {
             headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         }
-        headers.insert(AUTHORIZATION, bearer(access_token)?);
 
-        let mut builder = attach_body(
-            self.client.post(endpoint).headers(headers),
-            &req.payload,
-            spliced,
-        );
-        if !stream {
-            builder = builder.timeout(self.timeout);
-        }
-        Ok(builder)
+        Ok(RoutePlan {
+            provider: PROVIDER_CODEX,
+            endpoint,
+            credential: Credential::Bearer(access_token.to_owned()),
+            headers,
+            body,
+            timeouts: relay_timeouts(self.timeout),
+            dialect: upstream_dialect(surface),
+        })
     }
 
     /// Exchanges a refresh token for a fresh access token.
@@ -223,33 +235,18 @@ impl CodexProvider {
         &self,
         refresh_token: &str,
     ) -> Result<CodexRefreshResponse, ProviderError> {
-        let response = self
-            .client
-            .post(CODEX_OAUTH_TOKEN_URL)
-            .timeout(self.timeout)
-            .header(ACCEPT, HeaderValue::from_static("application/json"))
-            .form(&[
+        let payload = crate::oauth::post_form(
+            CODEX_OAUTH_TOKEN_URL,
+            self.timeout,
+            "codex",
+            &[
                 ("client_id", CODEX_OAUTH_CLIENT_ID),
                 ("grant_type", "refresh_token"),
                 ("refresh_token", refresh_token),
                 ("scope", "openid profile email"),
-            ])
-            .send()
-            .await
-            .map_err(|err| {
-                ProviderError::Other(anyhow::anyhow!("codex token refresh request failed: {err}"))
-            })?;
-
-        let status = response.status().as_u16();
-        let payload = response.bytes().await.map_err(|err| {
-            ProviderError::Other(anyhow::anyhow!("reading codex refresh response: {err}"))
-        })?;
-        if status >= 400 {
-            return Err(ProviderError::Upstream {
-                status,
-                body: String::from_utf8_lossy(&payload).into_owned(),
-            });
-        }
+            ],
+        )
+        .await?;
         serde_json::from_slice(&payload).map_err(|err| {
             ProviderError::Other(anyhow::anyhow!("parsing codex refresh response: {err}"))
         })
@@ -329,85 +326,19 @@ fn updated_token_data(
     data
 }
 
-/// Resolves the model name reported for billing: the body's `model` field, or
-/// the router's translated hint when it is absent.
-fn codex_billing_model(req: &ProviderRequest) -> String {
-    let from_body = codex_model_from_body(&req.payload);
-    if from_body.is_empty() {
-        requested_model(req).to_owned()
-    } else {
-        from_body
-    }
-}
-
 #[async_trait::async_trait]
-impl Provider for CodexProvider {
+impl RoutePlanner for CodexProvider {
     fn name(&self) -> &'static str {
         PROVIDER_CODEX
     }
 
-    /// Like the OpenAI executor this is the non-streaming path by definition
-    /// and ignores [`ProviderRequest::stream`].
-    async fn execute(
+    async fn plan(
         &self,
         auth: &AuthRecord,
-        req: ProviderRequest,
-    ) -> Result<ProviderResponse, ProviderError> {
+        req: &ProviderRequest,
+    ) -> Result<RoutePlan, ProviderError> {
         let (access_token, base_url) = self.resolve_credentials(auth);
-        let model = codex_billing_model(&req);
-        let response = self
-            .build_request(&req, false, &access_token, &base_url)?
-            .send()
-            .await?;
-
-        let status = response.status().as_u16();
-        let headers = response.headers().clone();
-        let body = response.bytes().await?;
-        if status >= 400 {
-            return Err(ProviderError::Upstream {
-                status,
-                body: String::from_utf8_lossy(&body).into_owned(),
-            });
-        }
-        let usage = parse_codex_usage(&body).map(|t| t.to_record(model, PROVIDER_CODEX));
-        Ok(ProviderResponse {
-            status,
-            headers,
-            body,
-            usage,
-        })
-    }
-
-    async fn execute_stream(
-        &self,
-        auth: &AuthRecord,
-        req: ProviderRequest,
-    ) -> Result<StreamResponse, ProviderError> {
-        let (access_token, base_url) = self.resolve_credentials(auth);
-        let model = codex_billing_model(&req);
-        let response = self
-            .build_request(&req, true, &access_token, &base_url)?
-            .send()
-            .await?;
-
-        let status = response.status().as_u16();
-        if status >= 400 {
-            let body = response.bytes().await.unwrap_or_default();
-            return Err(ProviderError::Upstream {
-                status,
-                body: String::from_utf8_lossy(&body).into_owned(),
-            });
-        }
-        Ok(stream_response(response, move |response, status| {
-            usage_stream(
-                response.bytes_stream(),
-                DEFAULT_STREAM_IDLE_TIMEOUT,
-                model,
-                PROVIDER_CODEX,
-                parse_codex_stream_usage,
-                status,
-            )
-        }))
+        self.plan_request(req, &access_token, &base_url)
     }
 
     /// Rotates the OAuth credential.
@@ -487,24 +418,6 @@ impl Provider for CodexProvider {
         refreshed.updated_at = now;
         refreshed.last_refreshed_at = Some(now);
         Ok(refreshed)
-    }
-
-    /// **上游没有这个端点，所以这里报错，不编数字。**
-    ///
-    /// Codex 走的是 OpenAI 的 Chat Completions 兼容面，而 OpenAI 的 REST API
-    /// 没有 token 计数端点 —— 分词在客户端（`tiktoken`）做。
-    ///
-    /// 这里原来返回 `payload.len() / 4` 的伪造值
-    /// （`docs/relay-surface-plan.md` §2.1），且那个数还在按 LLM 价格计费。
-    /// 理由与 [`crate::openai::OpenAiCompatibleProvider::count_tokens`] 逐字相同。
-    async fn count_tokens(
-        &self,
-        _auth: &AuthRecord,
-        _req: ProviderRequest,
-    ) -> Result<i64, ProviderError> {
-        Err(ProviderError::Other(anyhow::anyhow!(
-            "{PROVIDER_CODEX} upstream exposes no token-counting endpoint"
-        )))
     }
 }
 

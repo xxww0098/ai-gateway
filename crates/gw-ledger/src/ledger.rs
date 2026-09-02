@@ -8,16 +8,30 @@ use serde_json::json;
 use sqlx::{PgConnection, PgPool};
 
 use crate::keys::{balance_key, holds_key, holds_ts_key, shortfall_resolve_reference};
-use crate::scripts::{CACHE_MISS, GET_BALANCE_SCRIPT, HOLD_SCRIPT, INSUFFICIENT_BALANCE};
+use crate::lease::DEFAULT_MAX_HOLD_DURATION;
 use crate::settlement::Settlement;
 use crate::{LedgerError, log_type};
+
+mod reply;
+
+pub(crate) use reply::marks;
+use reply::{
+    is_cache_miss, is_insufficient_balance, parse_insufficient_available, run_get_balance, run_hold,
+};
 
 /// How long a cached balance stays in Redis before it is re-read from
 /// Postgres.
 pub const DEFAULT_BALANCE_TTL: Duration = Duration::from_secs(30);
 
-/// The maximum lifetime of a reservation. Also the expiry cutoff both Lua
-/// scripts use.
+/// 一片**租约**的长度，也是两个 Lua 脚本共用的过期截止线。
+///
+/// 它不是「一条流最长能跑多久」。一条活着的流由
+/// [`Ledger::renew_lease`] 周期性续租，所以 300 秒决定的是**另一件事**：
+/// 进程崩在结算之前时，租户的余额被冻多久。把它调大就是把崩溃恢复调慢，
+/// 所以它不该为了迁就长流而变大 —— 那是续租的职责
+/// （见 [`crate::DEFAULT_MAX_HOLD_DURATION`]）。
+///
+/// 一次正常的一元请求或短流在这 300 秒内跑完，根本不需要续租。
 pub const DEFAULT_HOLD_TTL: Duration = Duration::from_secs(300);
 
 /// Extra lifetime given to the hold sorted set and timestamp hash beyond the
@@ -79,6 +93,8 @@ pub struct Ledger {
     redis: Option<ConnectionManager>,
     balance_ttl: Duration,
     hold_ttl: Duration,
+    /// 一笔预留从首次预扣算起最长活多久。见 [`Ledger::renew_lease`]。
+    pub(crate) max_hold_duration: Duration,
 }
 
 /// Hand-written because `redis::aio::ConnectionManager` is not `Debug`. Only
@@ -90,6 +106,7 @@ impl std::fmt::Debug for Ledger {
             .field("redis", &self.redis.is_some())
             .field("balance_ttl", &self.balance_ttl)
             .field("hold_ttl", &self.hold_ttl)
+            .field("max_hold_duration", &self.max_hold_duration)
             .finish_non_exhaustive()
     }
 }
@@ -130,7 +147,21 @@ impl Ledger {
             } else {
                 hold_ttl
             },
+            max_hold_duration: DEFAULT_MAX_HOLD_DURATION,
         }
+    }
+
+    /// 覆盖一笔预留的最长存活时长。零回落到
+    /// [`DEFAULT_MAX_HOLD_DURATION`]（与两个 TTL 同样的口径：
+    /// 零是「用默认值」，不是「立刻过期」）。
+    #[must_use]
+    pub fn with_max_hold_duration(mut self, max: Duration) -> Self {
+        self.max_hold_duration = if max.is_zero() {
+            DEFAULT_MAX_HOLD_DURATION
+        } else {
+            max
+        };
+        self
     }
 
     /// The Postgres pool this ledger writes through, for callers that need to
@@ -891,48 +922,6 @@ SELECT EXISTS (
     }
 }
 
-/// Runs [`GET_BALANCE_SCRIPT`] and returns its raw string reply.
-async fn run_get_balance(
-    conn: &mut ConnectionManager,
-    user_id: i64,
-    now: i64,
-    hold_ttl_secs: i64,
-) -> Result<String, redis::RedisError> {
-    let mut inv = GET_BALANCE_SCRIPT.prepare_invoke();
-    inv.key(balance_key(user_id));
-    inv.key(holds_key(user_id));
-    inv.key(holds_ts_key(user_id));
-    inv.arg(now);
-    inv.arg(hold_ttl_secs);
-    inv.invoke_async(conn).await
-}
-
-/// Runs [`HOLD_SCRIPT`] and returns its raw string reply (`OK` on admission).
-#[allow(clippy::too_many_arguments)]
-async fn run_hold(
-    conn: &mut ConnectionManager,
-    user_id: i64,
-    amount: &str,
-    request_id: &str,
-    now: i64,
-    hold_ttl_secs: i64,
-    key_ttl_secs: i64,
-    min_available: &str,
-) -> Result<String, redis::RedisError> {
-    let mut inv = HOLD_SCRIPT.prepare_invoke();
-    inv.key(balance_key(user_id));
-    inv.key(holds_key(user_id));
-    inv.key(holds_ts_key(user_id));
-    inv.arg(amount);
-    inv.arg(request_id);
-    inv.arg(now);
-    inv.arg(hold_ttl_secs);
-    inv.arg(""); // idempotency key (unused for now, kept for parity)
-    inv.arg(key_ttl_secs);
-    inv.arg(min_available);
-    inv.invoke_async(conn).await
-}
-
 /// How long the hold sorted set and timestamp hash should live after a
 /// successful admission. Strictly longer than the Lua cutoff so a key
 /// never disappears while a live hold could still be in it.
@@ -953,41 +942,6 @@ fn audit_metadata(user_id: i64, extras: Option<serde_json::Value>) -> serde_json
         }
     }
     base
-}
-
-/// Whether a Lua reply was the `CACHE_MISS` marker, meaning the user's balance
-/// is not cached and must be loaded from Postgres first.
-///
-/// Checks the parsed error code *and* the rendered message, so a change in
-/// how redis-rs classifies a custom `error_reply` cannot silently turn a
-/// retryable miss into a hard failure.
-fn is_cache_miss(err: &redis::RedisError) -> bool {
-    marks(err, CACHE_MISS)
-}
-
-/// Whether a Lua reply was the `INSUFFICIENT_BALANCE:<available>` refusal.
-fn is_insufficient_balance(err: &redis::RedisError) -> bool {
-    marks(err, INSUFFICIENT_BALANCE)
-}
-
-/// Available-balance payload of `INSUFFICIENT_BALANCE:<n>`, if present.
-fn parse_insufficient_available(err: &redis::RedisError) -> Option<f64> {
-    err.code()
-        .and_then(available_after_marker)
-        .or_else(|| available_after_marker(&err.to_string()))
-}
-
-fn available_after_marker(s: &str) -> Option<f64> {
-    let rest = s.split_once(INSUFFICIENT_BALANCE)?.1;
-    let rest = rest.strip_prefix(':').unwrap_or(rest).trim();
-    let token = rest
-        .split(|c: char| c.is_whitespace() || c == ',' || c == ')' || c == '/')
-        .find(|part| !part.is_empty())?;
-    token.parse().ok()
-}
-
-fn marks(err: &redis::RedisError, marker: &str) -> bool {
-    err.code().is_some_and(|c| c.contains(marker)) || err.to_string().contains(marker)
 }
 
 #[cfg(test)]

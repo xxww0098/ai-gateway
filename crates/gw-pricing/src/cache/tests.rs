@@ -6,7 +6,7 @@ use std::time::Duration;
 use gw_model::ModelPrice;
 use sqlx::postgres::PgPoolOptions;
 
-use super::ModelPriceCache;
+use super::{ModelPriceCache, normalize_model_key};
 use crate::testsupport::priced;
 
 /// A row with only its identity set; the prices are irrelevant to the
@@ -22,6 +22,31 @@ fn unreachable_pool() -> sqlx::PgPool {
         .acquire_timeout(Duration::from_millis(100))
         .connect_lazy("postgres://gw:gw@127.0.0.1:1/gw")
         .expect("connection string parses")
+}
+
+/// Case and surrounding whitespace collapse to one key. The fixture ids are
+/// inputs, not the canonical spelling the function is required to emit.
+#[test]
+fn case_and_whitespace_variants_share_one_key() {
+    for sample in ["Claude-Opus", "MiXeD/id", "r1"] {
+        let key = normalize_model_key(sample);
+        assert_eq!(key, normalize_model_key(&sample.to_ascii_uppercase()));
+        assert_eq!(key, normalize_model_key(&sample.to_ascii_lowercase()));
+        assert_eq!(key, normalize_model_key(&format!(" \t{sample}\n ")));
+        assert_eq!(key, normalize_model_key(&key), "normalize is idempotent");
+    }
+}
+
+/// A caller that already normalized must hit the same row as the raw id.
+#[test]
+fn a_pre_normalized_key_hits_the_same_row() {
+    let raw = "  Gemini-Pro  ";
+    let cache = ModelPriceCache::from_rows([price(raw)]);
+    let key = normalize_model_key(raw);
+    assert_eq!(
+        cache.get(raw).map(|r| r.model_id.clone()),
+        cache.get(&key).map(|r| r.model_id.clone()),
+    );
 }
 
 /// A model id is looked up case- and whitespace-insensitively: whatever an

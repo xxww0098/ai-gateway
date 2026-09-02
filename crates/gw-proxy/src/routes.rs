@@ -10,22 +10,14 @@
 //! | 「所有入口都直通、错了让上游回 400」的隐式派发 | [`gw_relay::endpoint::matrix::route`] 的 15 格显式表 | 审计缺陷 #1（S1）的一半 —— 见下面的**已知缺口** |
 //! | `hold.rs` 与 `routes.rs` 各解析一次 body | 唯一一次解析的 [`RequestSpec`] 经请求扩展下发 | 审计缺陷 #15（S3） |
 //!
-//! # 已知缺口（本轮**未**根除，需要 `gw-provider` 配合）
+//! # 已根除的协议接缝
 //!
-//! 缺陷 #1 的另一半：`POST /v1/responses` 打到 openai / codex 时，
-//! [`gw_relay::endpoint::matrix::upstream_dialect`] 已经正确判定为
-//! [`gw_relay::UpstreamDialect::OpenAiResponses`]，**但 `gw-provider` 的
-//! executor 仍然只会构造 `{base}/v1/chat/completions`**
-//! （`gw-provider/src/openai.rs` 的 `chat_completions_endpoint`），
-//! 而 `ProviderRequest` 上没有承载入口方言的字段（`gw-provider/src/types.rs`
-//! 是协调者独占，本轮不动）。所以入口 B 打到 OpenAI 系上游时**仍然是坏的**。
+//! `/v1/responses` 的端点由入口元数据决定；7 个 Translate 格现在在 proxy
+//! 中显式调用对应 [`gw_relay::Translator`]。请求、普通响应和 SSE 都只翻译一次，
+//! translated stream 的 usage 直接取自同一个状态机，不再额外挂 probe 重复解析。
+//! 无法等价表达的 Responses→非 OpenAI 三格仍按矩阵明确返回 400。
 //!
-//! 需要的补丁在别人的文件里：`gw-provider` 新增 `responses_endpoint()`，
-//! 并让 `ProviderRequest` 带上方言（`docs/relay-surface-plan.md` §4.6）。
-//! 或者由 wave 4 用 [`gw_relay::engine::RelayEngine`] 整体取代本文件的转发段
-//! —— 那时端点由入口决定，provider 根本不参与拼 URL。
-//!
-//! Dispatch 选出上游候选，通过 [`crate::channel`] 挑账号，失败时换**另一个**账号
+//! //! Dispatch 选出上游候选，通过 [`crate::channel`] 挑账号，失败时换**另一个**账号
 //! 重试。结算**恰好一次**，在最后一次尝试之后 —— 跨账号重试只结算一次，
 //! 所以 failover 不会重复计费。
 
@@ -34,32 +26,38 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
-use axum::body::Bytes;
-use axum::extract::{Path, Request, State};
+use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use gw_authcore::{AuthRecord, AuthStore};
-use gw_provider::types::{Provider, ProviderError, ProviderRequest};
-use gw_relay::Surface;
+use gw_ledger::UpstreamAttemptId;
+use gw_provider::route::{RoutePlan, RoutePlanner};
+use gw_provider::types::{ProviderError, ProviderRequest};
 use gw_relay::endpoint::spec::RequestSpec;
 use gw_relay::endpoint::upstream::ChannelResolver;
+use gw_relay::engine::{RelayEngine, RelayOptions};
+use gw_relay::{
+    RelayBody, RelayRequest, RelayTransportError, Surface, TranslateError, UpstreamTarget,
+};
 
 use crate::ProxyState;
+use crate::body::{InboundBody, Outbound, read_inbound, rewritable};
 use crate::channel::ChannelPool;
 use crate::error::DispatchError;
-use crate::hold::PeekedBody;
 use crate::kernel::{Phase, RelayCtx};
 use crate::ports::{CircuitBreaker, ModelCatalog};
 use crate::settlectx::BillingHandle;
 use crate::usage::Settlement;
 
+mod catalogue;
 mod routing;
 mod stream;
+mod translation;
 
+pub use catalogue::{count_tokens, model_detail, models, usage};
 pub(crate) use routing::{dialect_error, partition_routable, rewrite_model, select_upstreams};
-#[cfg(test)]
-pub(crate) use stream::is_hop_by_hop;
-use stream::{schedule_release, stream_response, unary_response};
+use stream::{Relayed, is_retryable_status, relay_response, schedule_release};
+use translation::{UsageHandle, prepare_response, usage_probe};
 
 /// How many upstream accounts one client request may burn through.
 /// Bounded so a fully-broken pool fails fast instead of walking every account.
@@ -78,7 +76,13 @@ pub const AUTH_SNAPSHOT_TTL: Duration = Duration::from_secs(5);
 /// Collectively implements the auth manager + the conductor's retry
 /// loop.
 pub struct Dispatcher {
-    providers: Vec<Arc<dyn Provider>>,
+    planners: Vec<Arc<dyn RoutePlanner>>,
+    /// **The only inference HTTP exit in the workspace.**
+    ///
+    /// Behind the trait rather than the concrete engine so a test can inject
+    /// one whose transport is scripted — the engine itself (probe guard, frame
+    /// forwarding, idle watchdog) is then exercised for real.
+    relay: Arc<dyn gw_relay::Relay>,
     auth_store: Arc<dyn AuthStore>,
     /// 按 provider 预分组的可用凭证快照。见 [`AuthSnapshot`]。
     auths: ArcSwap<AuthSnapshot>,
@@ -136,13 +140,14 @@ impl Dispatcher {
     ///
     /// The manager plus the executor registration loop.
     pub fn new(
-        providers: Vec<Arc<dyn Provider>>,
+        planners: Vec<Arc<dyn RoutePlanner>>,
         auth_store: Arc<dyn AuthStore>,
         channels: Arc<ChannelPool>,
         settlement: Arc<Settlement>,
     ) -> Self {
         Self {
-            providers,
+            planners,
+            relay: Arc::new(RelayEngine::new(RelayOptions::default())),
             auth_store,
             auths: ArcSwap::from_pointee(AuthSnapshot::empty()),
             reloading: tokio::sync::Mutex::new(()),
@@ -152,6 +157,14 @@ impl Dispatcher {
             catalog: None,
             resolver: None,
         }
+    }
+
+    /// Swaps in a relay whose transport is scripted. Test-only wiring: the
+    /// production path always takes the default [`RelayEngine`].
+    #[must_use]
+    pub fn with_relay(mut self, relay: Arc<dyn gw_relay::Relay>) -> Self {
+        self.relay = relay;
+        self
     }
 
     /// Hands the same breaker to hold and dispatch.
@@ -198,8 +211,8 @@ impl Dispatcher {
         &self.channels
     }
 
-    fn provider(&self, name: &str) -> Option<&Arc<dyn Provider>> {
-        self.providers.iter().find(|p| p.name() == name)
+    fn planner(&self, name: &str) -> Option<&Arc<dyn RoutePlanner>> {
+        self.planners.iter().find(|p| p.name() == name)
     }
 
     /// Live credentials for one provider, newest state first.
@@ -277,43 +290,59 @@ impl Dispatcher {
 ///
 /// `billing` is `None` for the endpoints [`crate::hold::is_billable`] excludes
 /// (token counting, catalogue reads); those never reserve, never settle.
-async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) -> Response {
-    let stream = inbound.stream;
-    let billing = inbound.billing.clone();
-    let model = std::mem::take(&mut inbound.model);
+///
+/// # One HTTP exit
+///
+/// The provider decides *where* (a [`RoutePlan`]) and `gw_relay::RelayEngine`
+/// does the sending. That is why an upstream 429 keeps its `retry-after` here
+/// and a mid-stream failure reaches the client as a reset rather than as a
+/// clean EOF: there is no second copy of the response path to lose them in.
+async fn dispatch(state: &ProxyState, surface: Surface, inbound: Inbound) -> Response {
+    let Inbound {
+        model,
+        stream,
+        body,
+        headers,
+        query,
+        billing,
+        mut relay,
+    } = inbound;
     let dispatcher = &state.dispatch;
     let selection = select_upstreams(surface, &model, dispatcher.resolver.as_deref());
     if selection.candidates.is_empty() {
-        return finish_error(
-            state,
-            billing.as_ref(),
-            DispatchError::UnknownModel(model.clone()),
-        );
+        return finish_error(state, billing.as_ref(), DispatchError::UnknownModel(model));
     }
 
-    // L1 剥掉了渠道前缀时，**上游收到的模型名也必须跟着变**。
-    // 这条张力写在 `gw_relay::endpoint::upstream::Selection::upstream_model` 的
-    // doc 里但没有在那一层解决：中继层的合同是「唯一被授权的 body 变异是
-    // `stream_options` 定点注入」，所以剥前缀只算出名字、不改 body。
-    // 在这里解：`gw-proxy` 不受那条合同约束，而客户端写 `codex/gpt-5` 时
-    // `codex/` 明确是给网关看的 —— 把它原样转给上游只会拿一个「模型不存在」。
     let (model, body) = match &selection.upstream_model {
-        Some(stripped) => (stripped.clone(), rewrite_model(&inbound.body, stripped)),
-        None => (model, std::mem::take(&mut inbound.body)),
+        Some(stripped) => {
+            let Some(bytes) = rewritable(&body) else {
+                return finish_error(
+                    state,
+                    billing.as_ref(),
+                    DispatchError::BodyNotRewritable(model),
+                );
+            };
+            (
+                stripped.clone(),
+                RelayBody::Buffered(rewrite_model(bytes, stripped)),
+            )
+        }
+        None => (model, body),
     };
+    // Translation needs the whole source document. Keep one refcounted view
+    // before `Outbound` takes ownership; direct oversized bodies remain streamed.
+    let source_body = rewritable(&body).cloned();
+    let mut outbound = Outbound::new(body);
 
-    // 15 格显式表：直通 / 转义 / 400。挑第一个不是 `Reject` 的候选；
-    // 全部 `Reject` 时把第一个的错误信封原样回给客户端。
     let (candidates, reject) = partition_routable(surface, &selection, &model);
     if candidates.is_empty()
         && let Some((status, body)) = reject
     {
-        // 400 **不计费** —— 走释放路径而不是结算。
         schedule_release(state, billing.as_ref());
         return dialect_error(status, body);
     }
 
-    if let Some(ctx) = inbound.relay.as_mut() {
+    if let Some(ctx) = relay.as_mut() {
         ctx.advance(Phase::Routed);
     }
 
@@ -321,9 +350,11 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
     let preferred = dispatcher.channels.preferred(user_id, &model);
     let mut tried: Vec<String> = Vec::new();
     let mut last_error: Option<DispatchError> = None;
+    let mut fallback: Option<Attempt> = None;
 
-    for provider_name in candidates {
-        let Some(provider) = dispatcher.provider(provider_name) else {
+    'providers: for route in candidates {
+        let provider_name = route.name;
+        let Some(planner) = dispatcher.planner(provider_name) else {
             continue;
         };
         let auths = dispatcher.auths_for(provider_name).await;
@@ -332,100 +363,230 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
             continue;
         }
 
+        let translated_body = match route.translator {
+            Some(translator) => {
+                let Some(body) = source_body.as_ref() else {
+                    last_error = Some(DispatchError::BodyNotRewritable(model.clone()));
+                    continue 'providers;
+                };
+                match translator.translate_request(&model, body) {
+                    Ok(body) => Some(body),
+                    Err(err) => {
+                        return finish_translation_error(state, billing.as_ref(), surface, err);
+                    }
+                }
+            }
+            None => None,
+        };
+
         while tried.len() < MAX_UPSTREAM_ATTEMPTS {
-            if let Some(ctx) = inbound.relay.as_mut() {
+            if let Some(ctx) = relay.as_mut() {
                 ctx.advance(Phase::Attempting);
             }
             let Some(auth) = dispatcher
                 .channels
                 .pick_sticky(&auths, preferred.as_deref(), &tried)
             else {
-                break; // this provider's accounts are exhausted for this request
+                break;
             };
             let auth = auth.clone();
+            let attempt_id = billing
+                .as_ref()
+                .map(|b| UpstreamAttemptId::for_attempt(&b.ctx.operation, &auth.id, tried.len()));
             tried.push(auth.id.clone());
 
+            let request_payload = translated_body
+                .clone()
+                .unwrap_or_else(|| outbound.payload());
             let request = ProviderRequest {
                 model: model.clone(),
-                // `Bytes::clone` 是 refcount：三次 failover 重试零拷贝
-                // （审计缺陷 #13/#14 —— 一个 900 KB 的请求此前要 memcpy 约 5.4 MB）。
-                payload: body.clone(),
+                payload: request_payload.clone(),
                 stream,
-                metadata: request_metadata(surface, billing.as_ref()),
-                headers: inbound.headers.clone(),
-                query: inbound.query.clone(),
+                metadata: request_metadata(
+                    route.planner_surface(surface),
+                    billing.as_ref(),
+                    attempt_id.as_ref(),
+                ),
+                headers: headers.clone(),
+                // Production forwards the exact representation through
+                // `raw_query`; pairs remain only for internal fixtures.
+                query: Vec::new(),
+                raw_query: Some(query.clone()),
             };
-            let started = Instant::now();
-
-            if stream {
-                match provider.execute_stream(&auth, request).await {
-                    Ok(upstream) => {
-                        // The connection stood up, so the account is working;
-                        // a mid-stream failure is reported through the usage
-                        // outcome instead.
-                        record_success(state, provider_name, &auth.id, user_id, &model).await;
-                        if let Some(ctx) = inbound.relay.as_mut() {
-                            ctx.advance(Phase::Relaying);
-                        }
-                        return stream_response(
-                            state,
-                            upstream,
-                            billing,
-                            auth.id,
-                            provider_name,
-                            started,
-                        );
-                    }
-                    Err(err) => {
-                        record_failure(state, provider_name, &auth.id).await;
-                        if !is_retryable(&err) {
-                            return finish_error(state, billing.as_ref(), map_error(err));
-                        }
-                        last_error = Some(map_error(err));
-                    }
+            let plan = match planner.plan(&auth, &request).await {
+                Ok(plan) => plan,
+                Err(err) => {
+                    record_failure(state, provider_name, &auth.id, None).await;
+                    last_error = Some(map_error(err));
+                    continue;
                 }
+            };
+            if plan.dialect != route.upstream {
+                record_failure(state, provider_name, &auth.id, None).await;
+                last_error = Some(DispatchError::Internal(anyhow::anyhow!(
+                    "planner dialect {:?} disagrees with route dialect {:?}",
+                    plan.dialect,
+                    route.upstream,
+                )));
+                continue;
+            }
+
+            let outgoing = match route.translator {
+                Some(_) => Some(RelayBody::Buffered(
+                    plan.body.clone().unwrap_or(request_payload),
+                )),
+                None => outbound.next(plan.body.clone()),
+            };
+            let Some(outgoing) = outgoing else {
+                break 'providers;
+            };
+
+            let started = Instant::now();
+            let (probe, handle) = if route.translator.is_some() {
+                (None, None)
             } else {
-                match provider.execute(&auth, request).await {
-                    // An error status the provider relayed rather than raised
-                    // is still that account failing: fail over to the next one
-                    // instead of handing the client a 503 another credential
-                    // would have served.
-                    Ok(response) if is_retryable_status(response.status) => {
-                        record_failure(state, provider_name, &auth.id).await;
-                        last_error = Some(DispatchError::Upstream {
-                            status: StatusCode::from_u16(response.status)
-                                .unwrap_or(StatusCode::BAD_GATEWAY),
-                            body: String::from_utf8_lossy(&response.body).into_owned(),
-                        });
-                    }
-                    Ok(response) => {
-                        record_success(state, provider_name, &auth.id, user_id, &model).await;
-                        if let Some(ctx) = inbound.relay.as_mut() {
-                            ctx.advance(Phase::Relaying);
+                let (probe, handle) = usage_probe(plan.dialect);
+                (Some(probe), Some(handle))
+            };
+            match dispatcher.send(&plan, &request, outgoing, probe).await {
+                Ok(response) => {
+                    let retry_after = retry_after_hint(&response.headers);
+                    let (response, handle) = match prepare_response(
+                        response,
+                        handle,
+                        route.translator,
+                        stream,
+                        plan.dialect,
+                    )
+                    .await
+                    {
+                        Ok(prepared) => prepared,
+                        Err(err) => {
+                            record_failure(state, provider_name, &auth.id, None).await;
+                            return finish_translation_error(state, billing.as_ref(), surface, err);
                         }
-                        return unary_response(
-                            state,
+                    };
+
+                    if is_retryable_status(response.status) {
+                        record_failure(state, provider_name, &auth.id, retry_after).await;
+                        fallback = Some(Attempt {
                             response,
-                            billing,
-                            auth.id,
-                            provider_name,
+                            handle,
+                            auth_id: auth.id.clone(),
+                            provider: provider_name,
                             started,
-                        );
+                        });
+                        continue;
                     }
-                    Err(err) => {
-                        record_failure(state, provider_name, &auth.id).await;
-                        if !is_retryable(&err) {
-                            return finish_error(state, billing.as_ref(), map_error(err));
-                        }
-                        last_error = Some(map_error(err));
+
+                    if response.status.is_success() {
+                        record_success(state, provider_name, &auth.id, user_id, &model).await;
+                    } else {
+                        record_failure(state, provider_name, &auth.id, retry_after).await;
                     }
+                    if let Some(ctx) = relay.as_mut() {
+                        ctx.advance(Phase::Relaying);
+                    }
+                    return relay_response(
+                        state,
+                        Relayed {
+                            response,
+                            handle,
+                            billing,
+                            auth_id: auth.id,
+                            provider: provider_name,
+                            model,
+                            started,
+                        },
+                    );
+                }
+                Err(err) => {
+                    record_failure(state, provider_name, &auth.id, None).await;
+                    last_error = Some(transport_error(err));
                 }
             }
         }
     }
 
+    if let Some(attempt) = fallback {
+        if let Some(ctx) = relay.as_mut() {
+            ctx.advance(Phase::Relaying);
+        }
+        return relay_response(
+            state,
+            Relayed {
+                response: attempt.response,
+                handle: attempt.handle,
+                billing,
+                auth_id: attempt.auth_id,
+                provider: attempt.provider,
+                model,
+                started: attempt.started,
+            },
+        );
+    }
+
     let err = last_error.unwrap_or_else(|| DispatchError::NoUpstream(model));
     finish_error(state, billing.as_ref(), err)
+}
+
+/// One upstream answer held aside while the dispatcher tries another account.
+struct Attempt {
+    response: gw_relay::RelayResponse,
+    handle: UsageHandle,
+    auth_id: String,
+    provider: &'static str,
+    started: Instant,
+}
+
+impl Dispatcher {
+    /// Turns a [`RoutePlan`] into the one HTTP request the relay sends.
+    ///
+    /// The inbound headers ride along verbatim — `gw-relay` owns the
+    /// hop-by-hop denylist and the credential swap, so filtering them a second
+    /// time here would give the workspace two denylists to keep in step.
+    /// The plan's own headers are layered on top of them.
+    ///
+    /// `body` 由调用方决定（见 [`Outbound`]），**不是**在这里无条件包一层
+    /// `RelayBody::Buffered` —— 那会让一个本来边收边转的体在这里被重新缓冲。
+    async fn send(
+        &self,
+        plan: &RoutePlan,
+        req: &ProviderRequest,
+        body: RelayBody,
+        probe: Option<Box<dyn gw_relay::UsageProbe>>,
+    ) -> Result<gw_relay::RelayResponse, RelayTransportError> {
+        let (origin, target) = plan
+            .split()
+            .map_err(|err| RelayTransportError::BadTarget(err.to_string()))?;
+
+        let mut headers = req.headers.clone();
+        for name in plan.headers.keys() {
+            headers.remove(name);
+            for value in plan.headers.get_all(name) {
+                headers.append(name.clone(), value.clone());
+            }
+        }
+
+        self.relay
+            .relay(
+                RelayRequest {
+                    method: axum::http::Method::POST,
+                    target,
+                    headers,
+                    // 已缓冲就 refcount 一份，流式就把流整个交出去 —— **不再无条件缓冲**。
+                    body,
+                },
+                &UpstreamTarget {
+                    origin,
+                    credential: plan.credential.clone(),
+                    timeouts: plan.timeouts,
+                    dialect: plan.dialect,
+                },
+                probe,
+            )
+            .await
+    }
 }
 
 /// 终止一个还没到上游就被网关拒掉的请求的计费：**释放，不结算**。
@@ -436,23 +597,7 @@ fn finish_billing_failed(state: &ProxyState, billing: Option<&BillingHandle>) {
     schedule_release(state, billing);
 }
 
-/// Whether a failure is worth trying on a different account.
-///
-/// A 4xx other than 429 is the caller's fault and will fail identically
-/// everywhere, so it is surfaced immediately instead of burning the pool.
-fn is_retryable(err: &ProviderError) -> bool {
-    match err {
-        ProviderError::Upstream { status, .. } => is_retryable_status(*status),
-        ProviderError::Credential(_) | ProviderError::Transport(_) => true,
-        ProviderError::Other(_) => false,
-    }
-}
-
-/// Statuses that say "this account, right now" rather than "this request".
-fn is_retryable_status(status: u16) -> bool {
-    status >= 500 || status == 429
-}
-
+/// A planning failure: a broken credential, an unassemblable endpoint.
 fn map_error(err: ProviderError) -> DispatchError {
     match err {
         ProviderError::Upstream { status, body } => DispatchError::Upstream {
@@ -460,6 +605,15 @@ fn map_error(err: ProviderError) -> DispatchError {
             body,
         },
         other => DispatchError::Internal(anyhow::Error::new(other)),
+    }
+}
+
+/// "Never got a response head" — DNS, TCP, TLS, connect timeout, a target that
+/// will not parse. Always a 502: the request itself was fine.
+fn transport_error(err: RelayTransportError) -> DispatchError {
+    DispatchError::Upstream {
+        status: StatusCode::BAD_GATEWAY,
+        body: err.to_string(),
     }
 }
 
@@ -480,17 +634,86 @@ fn map_error(err: ProviderError) -> DispatchError {
 fn request_metadata(
     surface: Surface,
     billing: Option<&BillingHandle>,
+    attempt: Option<&UpstreamAttemptId>,
 ) -> std::collections::HashMap<String, String> {
-    let mut meta = std::collections::HashMap::with_capacity(3);
+    let mut meta = std::collections::HashMap::with_capacity(5);
     meta.insert(
         gw_provider::common::SURFACE_PATH_METADATA_KEY.to_owned(),
         surface.path().to_owned(),
     );
     if let Some(b) = billing {
-        meta.insert("request_id".to_owned(), b.ctx.request_id.clone());
+        meta.insert("request_id".to_owned(), b.ctx.client_trace.to_string());
+        // The money key, so an upstream log line joins back to the billing row.
+        meta.insert(
+            "billing_operation_id".to_owned(),
+            b.ctx.operation.to_string(),
+        );
         meta.insert("user_id".to_owned(), b.ctx.user_id.to_string());
     }
+    if let Some(attempt) = attempt {
+        // Failover produces several attempts per operation; billing settles
+        // once, per operation, never per attempt.
+        meta.insert("upstream_attempt_id".to_owned(), attempt.to_string());
+    }
     meta
+}
+
+fn finish_translation_error(
+    state: &ProxyState,
+    billing: Option<&BillingHandle>,
+    surface: Surface,
+    err: TranslateError,
+) -> Response {
+    schedule_release(state, billing);
+    let status = match &err {
+        TranslateError::Unsupported(_) | TranslateError::Malformed(_) => StatusCode::BAD_REQUEST,
+        TranslateError::UpstreamShape(_) => StatusCode::BAD_GATEWAY,
+    };
+    let message = err.to_string();
+    let body = match surface {
+        Surface::AnthropicMessages => serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": if status == StatusCode::BAD_REQUEST {
+                    "invalid_request_error"
+                } else {
+                    "api_error"
+                },
+                "message": message,
+            }
+        }),
+        Surface::OpenAiCompletions | Surface::OpenAiResponses => serde_json::json!({
+            "error": {
+                "message": message,
+                "type": if status == StatusCode::BAD_REQUEST {
+                    "invalid_request_error"
+                } else {
+                    "upstream_error"
+                },
+                "param": null,
+                "code": null,
+            }
+        }),
+    };
+    (status, axum::Json(body)).into_response()
+}
+
+fn retry_after_hint(headers: &HeaderMap) -> Option<Duration> {
+    const MAX_RETRY_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+    let raw = headers
+        .get(axum::http::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    let delay = if let Ok(seconds) = raw.parse::<u64>() {
+        Duration::from_secs(seconds)
+    } else {
+        let at = chrono::DateTime::parse_from_rfc2822(raw)
+            .ok()?
+            .with_timezone(&chrono::Utc);
+        (at - chrono::Utc::now()).to_std().ok()?
+    };
+    Some(delay.min(MAX_RETRY_AFTER))
 }
 
 async fn record_success(
@@ -511,12 +734,17 @@ async fn record_success(
     }
 }
 
-async fn record_failure(state: &ProxyState, provider: &str, auth_id: &str) {
+async fn record_failure(
+    state: &ProxyState,
+    provider: &str,
+    auth_id: &str,
+    retry_after: Option<Duration>,
+) {
     state
         .dispatch
         .channels
         .health()
-        .record_result(auth_id, false, None);
+        .record_result(auth_id, false, retry_after);
     if let Some(cb) = &state.dispatch.circuit_breaker {
         cb.record(provider, false).await;
     }
@@ -538,19 +766,20 @@ fn finish_error(
 struct Inbound {
     model: String,
     stream: bool,
-    body: Bytes,
+    /// 入站体的两态。**看不见不等于转不出去** —— 超
+    /// [`crate::body::BILLING_PEEK_LIMIT`] 的体是一条流，照样发给上游。
+    body: RelayBody,
     /// Inbound headers, forwarded upstream through
     /// `gw_provider::types::copy_outbound_headers` by each provider.
     headers: HeaderMap,
-    /// Inbound query pairs, appended to the provider endpoint. Order and
-    /// duplicates are both significant, hence a `Vec`.
-    query: Vec<(String, String)>,
+    /// Query exactly as it appeared after `?`.
+    query: String,
     billing: Option<BillingHandle>,
     relay: Option<RelayCtx>,
 }
 
-/// Reuses the body the hold layer already buffered, or reads it directly when
-/// no pre-flight ran.
+/// Takes the body the hold layer already read, or reads it here when no
+/// pre-flight ran. **两条路都只读前缀**，超阈值的部分边收边转。
 ///
 /// # 全链路唯一一次 body 解析（根除缺陷 #15）
 ///
@@ -574,20 +803,19 @@ async fn inbound(req: Request, surface: Surface) -> Result<Inbound, Response> {
     let (mut parts, body) = req.into_parts();
     let billing = parts.extensions.remove::<BillingHandle>();
     let relay = parts.extensions.remove::<RelayCtx>();
-    let peeked = parts.extensions.remove::<PeekedBody>();
+    let peeked = parts.extensions.remove::<InboundBody>();
     let spec = parts.extensions.remove::<RequestSpec>();
     let headers = parts.headers;
-    let query = parse_query(parts.uri.query().unwrap_or_default());
+    let query = parts.uri.query().unwrap_or_default().to_owned();
 
-    let body = match peeked {
-        Some(PeekedBody(bytes)) => bytes,
-        None => match axum::body::to_bytes(body, crate::hold::HOLD_REQUEST_BODY_LIMIT).await {
-            Ok(bytes) => bytes,
-            Err(_) => return Err(StatusCode::PAYLOAD_TOO_LARGE.into_response()),
-        },
+    let body = match peeked.and_then(InboundBody::take) {
+        Some(body) => body,
+        // 扩展缺席只有一种成因：这条路径**不计费**，hold 层整个被跳过。
+        // 这里同样只读前缀 —— 超阈值不是 413，是「计费看不见」。
+        None => read_inbound(body).await?,
     };
 
-    let spec = spec.unwrap_or_else(|| RequestSpec::parse(surface, Some(&body)));
+    let spec = spec.unwrap_or_else(|| RequestSpec::parse(surface, body.peek()));
     Ok(Inbound {
         model: billing
             .as_ref()
@@ -601,18 +829,6 @@ async fn inbound(req: Request, surface: Surface) -> Result<Inbound, Response> {
         billing,
         relay,
     })
-}
-
-/// Splits a raw query string into ordered `(key, value)` pairs, percent-decoding
-/// nothing: the providers re-encode when they build the outbound URL.
-fn parse_query(raw: &str) -> Vec<(String, String)> {
-    raw.split('&')
-        .filter(|pair| !pair.is_empty())
-        .map(|pair| match pair.split_once('=') {
-            Some((k, v)) => (k.to_owned(), v.to_owned()),
-            None => (pair.to_owned(), String::new()),
-        })
-        .collect()
 }
 
 macro_rules! endpoint {
@@ -635,9 +851,8 @@ endpoint!(
 endpoint!(
     /// 入口 B · `POST /v1/responses` —— OpenAI Responses 方言。
     ///
-    /// ⚠️ **打到 openai / codex 时今天仍然是坏的**：矩阵已经把它判成
-    /// [`gw_relay::UpstreamDialect::OpenAiResponses`]，但 `gw-provider` 的
-    /// executor 只会构造 `{base}/v1/chat/completions`。见模块 doc 的「已知缺口」。
+    /// OpenAI / Codex 原生直通；Claude / Google 三格因有状态 item 语义无法
+    /// 等价表达，按 15 格矩阵明确返回入口方言的 400。
     responses,
     Surface::OpenAiResponses
 );
@@ -646,123 +861,6 @@ endpoint!(
     messages,
     Surface::AnthropicMessages
 );
-
-/// `POST /v1/messages/count_tokens` —— Anthropic 的 token 计数，入口 C 的附属端点。
-///
-/// **不计费**（`hold::is_billable` 排除 `/count_tokens`）：Anthropic 自己对它
-/// 收 0，而收敛前网关按那个模型的 LLM 费率收钱。见 [`crate::hold::is_billable`]。
-///
-/// 它也**不进 dispatch 的重试链**：只挑一个账号，不 failover。
-pub async fn count_tokens(State(state): State<ProxyState>, req: Request) -> Response {
-    let inbound = match inbound(req, Surface::AnthropicMessages).await {
-        Ok(i) => i,
-        Err(response) => return response,
-    };
-    let selection = select_upstreams(
-        Surface::AnthropicMessages,
-        &inbound.model,
-        state.dispatch.resolver.as_deref(),
-    );
-    for candidate in &selection.candidates {
-        let name = candidate.as_str();
-        let Some(provider) = state.dispatch.provider(name) else {
-            continue;
-        };
-        let auths = state.dispatch.auths_for(name).await;
-        let Some(auth) = state.dispatch.channels.pick(&auths) else {
-            continue;
-        };
-        let request = ProviderRequest {
-            model: inbound.model.clone(),
-            payload: inbound.body.clone(),
-            stream: false,
-            metadata: std::collections::HashMap::new(),
-            headers: inbound.headers.clone(),
-            query: inbound.query.clone(),
-        };
-        return match provider.count_tokens(auth, request).await {
-            Ok(count) => axum::Json(serde_json::json!({ "input_tokens": count })).into_response(),
-            Err(err) => map_error(err).into_response(),
-        };
-    }
-    DispatchError::NoUpstream(inbound.model).into_response()
-}
-
-/// `GET /v1/models` —— OpenAI 形状的模型目录。
-///
-/// **必须保留**，理由不是「前端在调」（前端对 `/v1` 的 HTTP 调用数是 0），
-/// 而是面板 `QuickIntegrationPanel.tsx:79` 把 `${origin}/v1` 作为 Base URL
-/// 印给用户 —— 所有 OpenAI 兼容客户端（Cursor / Cline / aider / OpenWebUI /
-/// LobeChat）拿到 base 之后的第一个请求就是 `GET {base}/models`，
-/// 用它渲染模型下拉框。删了它，照面板指引配置的客户端在连接测试阶段就失败。
-///
-/// **不计费**：纯 DB 读，不出网。收敛前它按 fallback estimate 收租户约 $0.004
-/// —— 见 [`crate::hold::is_billable`]。
-pub async fn models(State(state): State<ProxyState>) -> Response {
-    let Some(catalog) = &state.dispatch.catalog else {
-        return axum::Json(serde_json::json!({ "object": "list", "data": [] })).into_response();
-    };
-    match catalog.list_models().await {
-        Ok(models) => axum::Json(serde_json::json!({
-            "object": "list",
-            "data": models.iter().map(model_json).collect::<Vec<_>>(),
-        }))
-        .into_response(),
-        Err(err) => {
-            tracing::warn!(%err, "model catalog lookup failed");
-            DispatchError::Internal(err).into_response()
-        }
-    }
-}
-
-/// `GET /v1/models/{model}` — one catalogue entry.
-pub async fn model_detail(State(state): State<ProxyState>, Path(model): Path<String>) -> Response {
-    let Some(catalog) = &state.dispatch.catalog else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    match catalog.list_models().await {
-        Ok(models) => match models.iter().find(|m| m.id == model) {
-            Some(m) => axum::Json(model_json(m)).into_response(),
-            None => StatusCode::NOT_FOUND.into_response(),
-        },
-        Err(err) => DispatchError::Internal(err).into_response(),
-    }
-}
-
-/// OpenAI listing object plus the catalog fields Harness needs.
-pub(crate) fn model_json(model: &crate::ports::ModelEntry) -> serde_json::Value {
-    let mut value = serde_json::json!({
-        "id": model.id,
-        "object": "model",
-        "created": model.created,
-        "owned_by": model.owned_by,
-    });
-    if let Some(n) = model.context_length {
-        value["context_length"] = serde_json::json!(n);
-    }
-    if let Some(n) = model.max_output_tokens {
-        value["max_output_tokens"] = serde_json::json!(n);
-    }
-    if !model.input_modalities.is_empty() {
-        value["input_modalities"] = serde_json::json!(model.input_modalities);
-    }
-    if let Some(reasoning) = &model.reasoning
-        && !reasoning.efforts.is_empty()
-    {
-        let mut body = serde_json::json!({
-            "efforts": reasoning
-                .efforts
-                .iter()
-                .map(|e| serde_json::json!({ "id": e.id, "name": e.name }))
-                .collect::<Vec<_>>(),
-        });
-        if let Some(default_effort) = &reasoning.default_effort {
-            body["default_effort"] = serde_json::json!(default_effort);
-        }
-        value["reasoning"] = body;
-    }
-    value
-}
 
 #[cfg(test)]
 mod tests;

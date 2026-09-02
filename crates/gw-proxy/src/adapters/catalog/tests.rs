@@ -58,10 +58,8 @@ async fn the_catalogue_hides_invisible_models_and_deduplicates_by_id() {
     .await
     .expect("seeding catalogue entries");
 
-    let models = SqlModelCatalog::new(pool)
-        .list_models()
-        .await
-        .expect("listing models");
+    let catalog = SqlModelCatalog::new(pool);
+    let models = catalog.list_models().await.expect("listing models");
 
     let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
     assert_eq!(
@@ -71,6 +69,28 @@ async fn the_catalogue_hides_invisible_models_and_deduplicates_by_id() {
          invisible one is not a model at all",
     );
     assert_eq!(models[0].owned_by, "azure", "ordered by channel_key");
+
+    let found = catalog.get_model("gpt-4o").await.expect("lookup");
+    assert_eq!(
+        found.as_ref().map(|m| m.owned_by.as_str()),
+        Some("azure"),
+        "detail must pick the same channel as the listing",
+    );
+    assert!(
+        catalog
+            .get_model("secret-preview")
+            .await
+            .expect("hidden lookup")
+            .is_none(),
+        "an invisible model is not a catalogue entry",
+    );
+    assert!(
+        catalog
+            .get_model("does-not-exist")
+            .await
+            .expect("missing lookup")
+            .is_none(),
+    );
 }
 
 #[tokio::test]
@@ -100,6 +120,14 @@ async fn the_sentinel_row_is_never_a_model() {
         .map(|m| m.id)
         .collect();
     assert_eq!(ids, ["gpt-4o"]);
+    assert!(
+        catalog
+            .get_model(MODELS_URL_SENTINEL)
+            .await
+            .expect("sentinel lookup")
+            .is_none(),
+        "detail must not surface the reserved row either",
+    );
     assert!(
         catalog
             .resolve_channels(MODELS_URL_SENTINEL)
@@ -153,9 +181,153 @@ impl ModelCatalog for StubCatalog {
         Ok(Vec::new())
     }
 
+    async fn get_model(&self, _id: &str) -> anyhow::Result<Option<ModelEntry>> {
+        Ok(None)
+    }
+
     async fn model_routes(&self) -> anyhow::Result<Vec<(String, Vec<String>)>> {
         Ok(self.0.clone())
     }
+}
+
+/// Counts listing walks so a cache miss/hit is an observable property.
+struct CountingCatalog {
+    models: parking_lot::Mutex<Vec<ModelEntry>>,
+    routes: Vec<(String, Vec<String>)>,
+    list_calls: std::sync::atomic::AtomicUsize,
+    fail_list: std::sync::atomic::AtomicBool,
+}
+
+impl CountingCatalog {
+    fn with(models: Vec<ModelEntry>) -> Arc<Self> {
+        Arc::new(Self {
+            models: parking_lot::Mutex::new(models),
+            routes: Vec::new(),
+            list_calls: std::sync::atomic::AtomicUsize::new(0),
+            fail_list: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    fn list_calls(&self) -> usize {
+        self.list_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl ModelCatalog for CountingCatalog {
+    async fn list_models(&self) -> anyhow::Result<Vec<ModelEntry>> {
+        self.list_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.fail_list.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("catalog unavailable");
+        }
+        Ok(self.models.lock().clone())
+    }
+
+    async fn get_model(&self, id: &str) -> anyhow::Result<Option<ModelEntry>> {
+        Ok(self.models.lock().iter().find(|m| m.id == id).cloned())
+    }
+
+    async fn resolve_channels(&self, model_id: &str) -> anyhow::Result<Vec<String>> {
+        Ok(self
+            .routes
+            .iter()
+            .find(|(id, _)| id == model_id)
+            .map(|(_, keys)| keys.clone())
+            .unwrap_or_default())
+    }
+
+    async fn model_routes(&self) -> anyhow::Result<Vec<(String, Vec<String>)>> {
+        Ok(self.routes.clone())
+    }
+}
+
+#[tokio::test]
+async fn a_warm_snapshot_answers_list_and_detail_without_rereading() {
+    let inner = CountingCatalog::with(vec![ModelEntry {
+        id: "gpt-4o".into(),
+        owned_by: "openai".into(),
+        ..ModelEntry::default()
+    }]);
+    let cache = CachedModelCatalog::new(inner.clone());
+    cache.refresh().await.expect("refresh");
+    let listed_after_refresh = inner.list_calls();
+
+    let listed = cache.list_models().await.expect("list");
+    let found = cache.get_model("gpt-4o").await.expect("get");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(found.as_ref().map(|m| m.id.as_str()), Some("gpt-4o"));
+    assert_eq!(
+        inner.list_calls(),
+        listed_after_refresh,
+        "a ready snapshot must not walk the inner listing again",
+    );
+    assert!(
+        cache.get_model("missing").await.expect("miss").is_none(),
+        "an id absent from the snapshot is not a catalogue entry",
+    );
+}
+
+#[tokio::test]
+async fn the_first_read_loads_the_snapshot_once() {
+    let inner = CountingCatalog::with(vec![ModelEntry {
+        id: "only".into(),
+        ..ModelEntry::default()
+    }]);
+    let cache = CachedModelCatalog::new(inner.clone());
+    assert_eq!(inner.list_calls(), 0);
+
+    let first = cache.get_model("only").await.expect("first get");
+    let second = cache.list_models().await.expect("list");
+    assert_eq!(first.as_ref().map(|m| m.id.as_str()), Some("only"));
+    assert_eq!(second.len(), 1);
+    assert_eq!(
+        inner.list_calls(),
+        1,
+        "list and detail share the load that warms the snapshot",
+    );
+}
+
+#[tokio::test]
+async fn a_failed_refresh_keeps_the_previous_snapshot() {
+    let inner = CountingCatalog::with(vec![ModelEntry {
+        id: "kept".into(),
+        ..ModelEntry::default()
+    }]);
+    let cache = CachedModelCatalog::new(inner.clone());
+    cache.refresh().await.expect("warm");
+    inner
+        .fail_list
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    assert!(cache.refresh().await.is_err());
+    assert_eq!(
+        cache
+            .get_model("kept")
+            .await
+            .expect("stale get")
+            .map(|m| m.id)
+            .as_deref(),
+        Some("kept"),
+        "a failed refresh must not wipe a good snapshot",
+    );
+}
+
+#[tokio::test]
+async fn the_listing_snapshot_does_not_cache_routing() {
+    let inner = Arc::new(CountingCatalog {
+        models: parking_lot::Mutex::new(Vec::new()),
+        routes: vec![("hidden".into(), vec!["house".into()])],
+        list_calls: std::sync::atomic::AtomicUsize::new(0),
+        fail_list: std::sync::atomic::AtomicBool::new(false),
+    });
+    let cache = CachedModelCatalog::new(inner);
+    cache.refresh().await.expect("refresh");
+    assert_eq!(
+        cache.resolve_channels("hidden").await.expect("routing"),
+        ["house"],
+        "routing must still see models the listing snapshot hides",
+    );
 }
 
 #[tokio::test]
@@ -263,7 +435,9 @@ fn reasoning_is_copied_from_the_catalog_and_not_invented() {
             }
         })),
     );
-    let reasoning = thinking.reasoning.expect("thinking model must expose efforts");
+    let reasoning = thinking
+        .reasoning
+        .expect("thinking model must expose efforts");
     assert_eq!(
         reasoning
             .efforts

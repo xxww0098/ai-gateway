@@ -17,7 +17,10 @@ use gw_infra::Db;
 use gw_relay::endpoint::matrix::Provider;
 use gw_relay::endpoint::upstream::ChannelResolver;
 
-use crate::ports::{ChannelPolicy, ChannelPolicyStore, ModelCatalog, ModelEntry, ModelReasoning, ModelReasoningEffort};
+use crate::ports::{
+    ChannelPolicy, ChannelPolicyStore, ModelCatalog, ModelEntry, ModelReasoning,
+    ModelReasoningEffort,
+};
 
 /// Source of the per-account routing policy snapshot.
 #[derive(Debug, Clone)]
@@ -71,6 +74,24 @@ impl SqlModelCatalog {
     }
 }
 
+type CatalogRow = (
+    String,
+    String,
+    chrono::DateTime<chrono::Utc>,
+    Option<serde_json::Value>,
+);
+
+fn entry_from_row((model_id, channel_key, created_at, capabilities): CatalogRow) -> ModelEntry {
+    let mut entry = ModelEntry {
+        id: model_id,
+        created: created_at.timestamp(),
+        owned_by: channel_key,
+        ..ModelEntry::default()
+    };
+    apply_capabilities(&mut entry, capabilities.as_ref());
+    entry
+}
+
 #[async_trait]
 impl ModelCatalog for SqlModelCatalog {
     async fn list_models(&self) -> anyhow::Result<Vec<ModelEntry>> {
@@ -81,12 +102,7 @@ impl ModelCatalog for SqlModelCatalog {
         // One row per (channel_key, model_id) pair upstream, but the OpenAI
         // payload is keyed by model id alone; `DISTINCT ON` keeps the first
         // channel that offers each model instead of emitting duplicate ids.
-        let rows: Vec<(
-            String,
-            String,
-            chrono::DateTime<chrono::Utc>,
-            Option<serde_json::Value>,
-        )> = sqlx::query_as(
+        let rows: Vec<CatalogRow> = sqlx::query_as(
             "SELECT DISTINCT ON (model_id) model_id, channel_key, created_at, capabilities \
              FROM model_catalog_entries \
              WHERE visible = TRUE AND model_id <> $1 \
@@ -96,19 +112,25 @@ impl ModelCatalog for SqlModelCatalog {
         .fetch_all(&self.db)
         .await?;
 
-        Ok(rows
-            .into_iter()
-            .map(|(model_id, channel_key, created_at, capabilities)| {
-                let mut entry = ModelEntry {
-                    id: model_id,
-                    created: created_at.timestamp(),
-                    owned_by: channel_key,
-                    ..ModelEntry::default()
-                };
-                apply_capabilities(&mut entry, capabilities.as_ref());
-                entry
-            })
-            .collect())
+        Ok(rows.into_iter().map(entry_from_row).collect())
+    }
+
+    async fn get_model(&self, id: &str) -> anyhow::Result<Option<ModelEntry>> {
+        // Same projection as [`Self::list_models`], but one `model_id` so the
+        // detail route does not walk the listing. `visible` and the sentinel
+        // stay on: a hidden or reserved id is not a catalogue entry.
+        let row: Option<CatalogRow> = sqlx::query_as(
+            "SELECT model_id, channel_key, created_at, capabilities \
+             FROM model_catalog_entries \
+             WHERE visible = TRUE AND model_id = $1 AND model_id <> $2 \
+             ORDER BY channel_key \
+             LIMIT 1",
+        )
+        .bind(id)
+        .bind(MODELS_URL_SENTINEL)
+        .fetch_optional(&self.db)
+        .await?;
+        Ok(row.map(entry_from_row))
     }
 
     async fn resolve_channels(&self, model_id: &str) -> anyhow::Result<Vec<String>> {
@@ -147,6 +169,141 @@ impl ModelCatalog for SqlModelCatalog {
     }
 }
 
+/// In-memory snapshot of the **listing** view (`visible = TRUE`).
+///
+/// `GET /v1/models` is the first hop every OpenAI client makes. Serving it
+/// from a snapshot keeps that hop off the full-table listing query.
+/// [`Self::get_model`] reads the same map, so list and detail share one cache.
+///
+/// Routing ([`ModelCatalog::resolve_channels`] / [`ModelCatalog::model_routes`])
+/// is passed through unchanged — `visible` is a display switch, not a call
+/// switch, and those queries must not inherit this snapshot.
+pub struct CachedModelCatalog {
+    inner: Arc<dyn ModelCatalog>,
+    snapshot: ArcSwap<CatalogSnapshot>,
+    refreshing: tokio::sync::Mutex<()>,
+}
+
+struct CatalogSnapshot {
+    list: Vec<ModelEntry>,
+    by_id: HashMap<String, ModelEntry>,
+    ready: bool,
+}
+
+impl CatalogSnapshot {
+    fn empty() -> Self {
+        Self {
+            list: Vec::new(),
+            by_id: HashMap::new(),
+            ready: false,
+        }
+    }
+
+    fn from_models(models: Vec<ModelEntry>) -> Self {
+        let by_id = models
+            .iter()
+            .cloned()
+            .map(|entry| (entry.id.clone(), entry))
+            .collect();
+        Self {
+            list: models,
+            by_id,
+            ready: true,
+        }
+    }
+}
+
+impl std::fmt::Debug for CachedModelCatalog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let snap = self.snapshot.load();
+        f.debug_struct("CachedModelCatalog")
+            .field("ready", &snap.ready)
+            .field("models", &snap.list.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CachedModelCatalog {
+    /// Empty until [`Self::refresh`] or the first listing/detail request.
+    #[must_use]
+    pub fn new(inner: Arc<dyn ModelCatalog>) -> Self {
+        Self {
+            inner,
+            snapshot: ArcSwap::from_pointee(CatalogSnapshot::empty()),
+            refreshing: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    /// Replace the snapshot from the inner catalogue.
+    ///
+    /// # Errors
+    ///
+    /// Inner listing failure is returned and the previous snapshot is kept.
+    pub async fn refresh(&self) -> anyhow::Result<()> {
+        let _guard = self.refreshing.lock().await;
+        self.reload().await
+    }
+
+    async fn reload(&self) -> anyhow::Result<()> {
+        let models = self.inner.list_models().await?;
+        self.snapshot
+            .store(Arc::new(CatalogSnapshot::from_models(models)));
+        Ok(())
+    }
+
+    async fn ensure_loaded(&self) -> anyhow::Result<arc_swap::Guard<Arc<CatalogSnapshot>>> {
+        {
+            let snap = self.snapshot.load();
+            if snap.ready {
+                return Ok(snap);
+            }
+        }
+        let _guard = self.refreshing.lock().await;
+        {
+            let snap = self.snapshot.load();
+            if snap.ready {
+                return Ok(snap);
+            }
+        }
+        self.reload().await?;
+        Ok(self.snapshot.load())
+    }
+
+    /// Periodic reload until the task is dropped. Same lifecycle as
+    /// [`crate::channel::ChannelPolicyCache::spawn_refresh`].
+    pub fn spawn_refresh(self: Arc<Self>, interval: Duration) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                if let Err(err) = self.refresh().await {
+                    tracing::warn!(%err, "模型目录快照刷新失败，继续用旧快照");
+                }
+            }
+        })
+    }
+}
+
+#[async_trait]
+impl ModelCatalog for CachedModelCatalog {
+    async fn list_models(&self) -> anyhow::Result<Vec<ModelEntry>> {
+        Ok(self.ensure_loaded().await?.list.clone())
+    }
+
+    async fn get_model(&self, id: &str) -> anyhow::Result<Option<ModelEntry>> {
+        Ok(self.ensure_loaded().await?.by_id.get(id).cloned())
+    }
+
+    async fn resolve_channels(&self, model_id: &str) -> anyhow::Result<Vec<String>> {
+        self.inner.resolve_channels(model_id).await
+    }
+
+    async fn model_routes(&self) -> anyhow::Result<Vec<(String, Vec<String>)>> {
+        self.inner.model_routes().await
+    }
+}
+
 /// Copy catalog-owned capability fields onto a listing entry.
 ///
 /// Unknown modality names are dropped. An empty reasoning list is treated as
@@ -165,7 +322,10 @@ pub(crate) fn apply_capabilities(entry: &mut ModelEntry, raw: Option<&serde_json
     {
         entry.max_output_tokens = Some(n);
     }
-    if let Some(arr) = value.get("input_modalities").and_then(serde_json::Value::as_array) {
+    if let Some(arr) = value
+        .get("input_modalities")
+        .and_then(serde_json::Value::as_array)
+    {
         entry.input_modalities = arr
             .iter()
             .filter_map(serde_json::Value::as_str)
@@ -176,7 +336,10 @@ pub(crate) fn apply_capabilities(entry: &mut ModelEntry, raw: Option<&serde_json
     let Some(reasoning) = value.get("reasoning") else {
         return;
     };
-    let Some(efforts) = reasoning.get("efforts").and_then(serde_json::Value::as_array) else {
+    let Some(efforts) = reasoning
+        .get("efforts")
+        .and_then(serde_json::Value::as_array)
+    else {
         return;
     };
     let efforts: Vec<ModelReasoningEffort> = efforts

@@ -122,3 +122,40 @@ pub struct UsageLog {
     #[sqlx(try_from = "compat::Ts")]
     pub created_at: DateTime<Utc>,
 }
+
+/// `billing_operations` 的实体 —— 一次计费操作的持久状态。
+///
+/// 这是**非终态操作的唯一真相**：对账扫的是这张表，不是 Redis 的 TTL。
+/// Redis 里的 hold 只是预留缓存，掉了就重建，掉了也不改变这一行说的话。
+///
+/// `billing_operation_id` 由服务端生成，与观测用的 `client_trace_id`
+/// （入站 `X-Trace-ID`）是**两个不同的东西**：前者是钱的键，客户端碰不到；
+/// 后者只进日志与响应头。
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct BillingOperation {
+    pub id: Id,
+    #[sqlx(try_from = "compat::Text")]
+    pub billing_operation_id: String,
+    pub user_id: Id,
+    /// `held` | `settled` | `released`。状态机在 `gw-ledger`，这里只存字面量。
+    #[sqlx(try_from = "compat::Text")]
+    pub state: String,
+    /// 实际预留住的上限。预付模式下等于 `admitted_liability`。
+    #[sqlx(try_from = "compat::Money")]
+    pub reserved_amount: f64,
+    /// 准入时认可的责任上限。
+    #[sqlx(try_from = "compat::Money")]
+    pub admitted_liability: f64,
+    /// 请求指纹。同 id 不同指纹再预扣 = 冲突。
+    #[sqlx(try_from = "compat::Text")]
+    pub request_fingerprint: String,
+    /// 观测用，不参与任何判定。
+    #[sqlx(try_from = "compat::Text")]
+    pub client_trace_id: String,
+    #[sqlx(try_from = "compat::Ts")]
+    pub created_at: DateTime<Utc>,
+    #[sqlx(try_from = "compat::Ts")]
+    pub updated_at: DateTime<Utc>,
+    /// 进入终态的时刻。`None` = 仍然非终态，对账要扫它。
+    pub terminal_at: Option<DateTime<Utc>>,
+}

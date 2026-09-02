@@ -108,26 +108,6 @@ fn a_missing_or_non_string_model_reads_as_absent() {
     }
 }
 
-#[test]
-fn the_billing_model_falls_back_to_the_router_hint() {
-    let mut req = ProviderRequest {
-        payload: Bytes::from_static(br#"{"model":"gpt-5-codex"}"#),
-        model: "ignored-when-body-has-one".to_owned(),
-        ..Default::default()
-    };
-    assert_eq!(codex_billing_model(&req), "gpt-5-codex");
-
-    req.payload = Bytes::from_static(br#"{"messages":[]}"#);
-    assert_eq!(codex_billing_model(&req), "ignored-when-body-has-one");
-
-    req.model = String::new();
-    req.metadata.insert(
-        crate::common::REQUESTED_MODEL_METADATA_KEY.to_owned(),
-        "alias".to_owned(),
-    );
-    assert_eq!(codex_billing_model(&req), "alias");
-}
-
 // --- construction & credentials ----------------------------------------------
 
 #[test]
@@ -216,52 +196,43 @@ fn the_refresh_token_is_read_from_either_nesting_level() {
     );
 }
 
-// --- outbound request ---------------------------------------------------------
+// --- route plan ---------------------------------------------------------------
 
 #[test]
-fn a_request_without_a_token_is_refused_before_it_reaches_the_wire() {
+fn a_request_without_a_token_is_refused_before_anything_is_planned() {
     let provider = provider();
     let err = provider
-        .build_request(
-            &ProviderRequest::default(),
-            false,
-            "",
-            CODEX_DEFAULT_BASE_URL,
-        )
-        .expect_err("an empty access token must not produce a request");
+        .plan_request(&ProviderRequest::default(), "", CODEX_DEFAULT_BASE_URL)
+        .expect_err("an empty access token must not produce a plan");
     assert!(matches!(err, ProviderError::Credential(_)), "{err:?}");
 }
 
 #[test]
-fn streaming_requests_force_include_usage_like_the_openai_executor() {
+fn streaming_requests_force_include_usage_like_the_openai_planner() {
     let provider = provider();
     let req = ProviderRequest {
         payload: Bytes::from_static(br#"{"model":"gpt-5-codex","stream":true}"#),
         stream: true,
         ..Default::default()
     };
-    let request = provider
-        .build_request(&req, true, "tok", CODEX_DEFAULT_BASE_URL)
-        .unwrap()
-        .build()
-        .unwrap();
+    let plan = provider
+        .plan_request(&req, "tok", CODEX_DEFAULT_BASE_URL)
+        .expect("plans");
 
     assert_eq!(
-        request.url().as_str(),
+        plan.endpoint.as_str(),
         "https://api.openai.com/v1/chat/completions"
     );
-    assert_eq!(request.headers()[AUTHORIZATION], "Bearer tok");
-    assert_eq!(request.headers()[ACCEPT], "text/event-stream");
-    // 与 openai executor 同理：插入后的 body 是两帧零拷贝流，上游看到的长度契约
-    // 是显式声明的 content-length。插入内容本身由 `common_tests` 覆盖。
-    let declared: usize = request.headers()[http::header::CONTENT_LENGTH]
-        .to_str()
-        .unwrap()
-        .parse()
-        .unwrap();
-    assert!(declared > req.payload.len());
+    assert!(matches!(&plan.credential, gw_relay::Credential::Bearer(t) if t == "tok"));
+    assert_eq!(plan.headers[ACCEPT], "text/event-stream");
+    // 插入内容本身由 `common_tests` 覆盖；这里只证明 planner 接上了那条路。
+    let body = plan
+        .body
+        .as_ref()
+        .expect("a streaming plan rewrites the body");
+    assert!(body.len() > req.payload.len());
     assert_eq!(
-        declared,
+        body.len(),
         crate::common::ensure_include_usage(&req.payload, Surface::OpenAiCompletions)
             .expect("fixture must be spliceable")
             .len()

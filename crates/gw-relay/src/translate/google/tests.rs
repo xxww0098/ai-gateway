@@ -888,8 +888,11 @@ fn billing_usage_is_dialect_independent() {
 /// 缺失是上游根本没说 —— 后者要走 fallback 结算，前者不能。
 #[test]
 fn a_missing_count_is_not_a_zero_count() {
-    let zero = r#"data: {"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0}}"#;
-    let absent = r#"data: {"usageMetadata":{"promptTokenCount":0}}"#;
+    let zero = concat!(
+        r#"data: {"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0}}"#,
+        "\n\n"
+    );
+    let absent = concat!(r#"data: {"usageMetadata":{"promptTokenCount":0}}"#, "\n\n");
 
     let mut st = OpenAiToGoogle.stream_translator();
     st.push(zero.as_bytes()).expect("push");
@@ -932,3 +935,5 @@ fn the_frame_reader_handles_multiline_and_multiframe_input() {
         .collect();
     assert_eq!(text, "ab");
 }
+
+mod stream_framing;

@@ -222,7 +222,20 @@ pub struct UpstreamTarget {
 
 /// 换掉入站凭证用的出站凭证。**本层读过的凭证载体，本层负责剥掉**
 /// （观察 #17：`/v1/*` 上客户端的 `x-api-key` 今天会被原样转给 OpenAI）。
-#[derive(Debug, Clone)]
+///
+/// # 为什么不 `derive(Debug)`
+///
+/// 派生出来的 `Debug` 会把**活密钥**原样写进 `{cred:?}`、`tracing` 的字段和
+/// panic 信息里 —— 而这三处的落盘位置、保留期与可见范围都不在本进程手里。
+/// `headers.rs` 给出站 `HeaderValue` 标的 `sensitive` 只挡得住 hyper 自己的
+/// debug 日志，挡不住任何一处 `{:?}`。所以这里手写 `Debug`，载荷换成
+/// [`redact_secret`] 的稳定掩码。
+///
+/// 变体名留着可见：日志要能回答「这次用的是哪种载体」，那不是密文。
+///
+/// **任何包含凭证的类型继续 `derive(Debug)` 即可** —— [`UpstreamTarget`]、
+/// `gw_provider::route::RoutePlan` 的泄漏点都只是这个嵌套字段，收在这一层就够了。
+#[derive(Clone)]
 pub enum Credential {
     /// `authorization: Bearer <token>`
     Bearer(String),
@@ -230,6 +243,32 @@ pub enum Credential {
     XApiKey(String),
     /// `x-goog-api-key: <key>`（Google）
     GoogleApiKey(String),
+}
+
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (variant, secret) = match self {
+            Self::Bearer(token) => ("Bearer", token),
+            Self::XApiKey(key) => ("XApiKey", key),
+            Self::GoogleApiKey(key) => ("GoogleApiKey", key),
+        };
+        write!(f, "{variant}({})", redact_secret(secret))
+    }
+}
+
+/// 密文 → **稳定**掩码：同一个输入永远得到同一个字符串，且不含原文的任何一个字节。
+///
+/// 不留 head/tail：日志里一段 `sk-ant-api03-…9f3a` 已经足够把一把 key 和它的
+/// 持有者对上号，而「日志会被谁看到、留多久」恰恰是本进程管不着的事。
+/// 也不做哈希：一个稳定的指纹同样能把两条日志串成一条线，还会让人误以为它安全。
+///
+/// 长度是唯一既能排错又不泄漏内容的量 —— `<empty>` 与 `<redacted:N bytes>` 的
+/// 区别正是「压根没拿到凭证」与「拿到了但这里不给看」，而这两件事的排查方向相反。
+fn redact_secret(secret: &str) -> String {
+    if secret.is_empty() {
+        return "<empty>".to_owned();
+    }
+    format!("<redacted:{} bytes>", secret.len())
 }
 
 #[derive(Debug, Clone, Copy)]

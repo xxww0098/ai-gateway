@@ -2,7 +2,11 @@
 //! cross-account failover, the streaming relay, and the middleware order the
 //! whole billing pipeline depends on.
 
+use axum::body::Bytes;
+
 use super::*;
+use crate::ports::{BillingLedger, UsageLogEntry, UsageStore, fold_model_usage};
+use crate::testsupport::TEST_USER_ID;
 
 // ---------------------------------------------------------------- routing
 
@@ -100,6 +104,41 @@ fn a_body_that_is_not_a_json_object_is_left_exactly_as_it_arrived() {
     assert_eq!(rewrite_model(&raw, "whatever"), raw);
 }
 
+// ------------------------------------------------------- 超 peek 上限的直通体
+
+/// 缺陷 #2 的另一半：**上游收到的是完整的原始 body，而且是边收边转的**。
+///
+/// 计费看不见它（模型名为空、预扣走保守估算），转发却不降级 ——
+/// 超阈值的请求在网关里**不会被再完整缓冲一遍**，字节一个不少地流到上游。
+/// 收敛前这条请求在 hold 层就是 413，永远走不到这里。
+#[tokio::test]
+async fn an_oversized_direct_body_reaches_the_upstream_whole_and_streamed() {
+    let harness = Harness::build();
+    // 4 MiB 提示词按 fixture 费率是几百美元；余额抬高，让断言只关于转发。
+    *harness.ledger.balance.lock() = 1_000_000.0;
+
+    // 可辨认载荷：全 `x` 会让「前缀与剩余部分拼错顺序」看不出来。
+    let payload = Bytes::from(
+        (0..crate::body::BILLING_PEEK_LIMIT + 1)
+            .map(|i| (i % 251) as u8)
+            .collect::<Vec<u8>>(),
+    );
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {TEST_API_KEY}"))
+        .body(axum::body::Body::from(payload.clone()))
+        .expect("request builds");
+
+    let (status, _) = send_settled(&harness, request).await;
+    assert_eq!(status, StatusCode::OK, "超 peek 上限不再是 413");
+
+    let (body, streamed) = harness.transport.only_body();
+    assert_eq!(body, payload, "上游必须收到完整的原始字节");
+    assert!(streamed, "超阈值的 body 不许在网关里被重新缓冲一遍");
+}
+
 // ---------------------------------------------------------------- 15 格矩阵
 
 /// 一个把测试自造的渠道钉死到 gemini 的目录。
@@ -139,14 +178,18 @@ fn the_prefix_only_chain_always_keeps_a_passthrough_escape_hatch() {
 }
 
 #[tokio::test]
-async fn a_cell_the_gateway_cannot_serve_is_a_gateway_400_not_an_upstream_one() {
-    // 收敛前这一格「直通 → 上游必 400」：OpenAI 形状的 body 被原样打到
-    // Google 的 generateContent 端点。转发过去只会拿一个上游错误，
-    // 而客户端从上游的错误里**读不出**「这是网关的路由问题、该改用哪个入口」。
+async fn an_openai_request_is_translated_to_google_and_back() {
     let harness = Harness::build_routed(
         vec![auth_record("acct-1", "gemini")],
         Some(gemini_only_resolver()),
     );
+    harness.transport.queue(Ok(CannedResponse {
+        status: 200,
+        headers: http::HeaderMap::new(),
+        frames: vec![Bytes::from_static(
+            br#"{"candidates":[{"content":{"parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":5}}"#,
+        )],
+    }));
 
     let (status, body) = send_settled(
         &harness,
@@ -154,47 +197,43 @@ async fn a_cell_the_gateway_cannot_serve_is_a_gateway_400_not_an_upstream_one() 
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        harness.gemini.call_count(),
-        0,
-        "拒绝要发生在出网之前，不该烧一次上游调用",
+        body["choices"][0]["message"]["content"].as_str(),
+        Some("hello")
     );
-    // 入口方言的错误信封：OpenAI 入口回 `{"error":{"message":...}}`。
-    // 客户端 SDK 只会解析它自己那套结构，回一个陌生结构会被渲染成无字的红叉。
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .is_some_and(|m| !m.is_empty()),
-        "错误信封不是 OpenAI 形状：{body}",
-    );
+    let request = harness.gemini.only_request();
+    let translated: serde_json::Value =
+        serde_json::from_slice(&request.payload).expect("translated Google JSON");
+    assert!(translated.get("contents").is_some());
+    assert!(translated.get("messages").is_none());
+
+    let logs = harness.usage_store.logs.lock();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].input_tokens, 12);
+    assert_eq!(logs[0].output_tokens, 5);
 }
 
 #[tokio::test]
-async fn a_rejected_cell_releases_the_reservation_instead_of_settling_it() {
-    // 400 **不计费**：走释放路径而不是结算。
+async fn a_translation_request_error_releases_the_reservation_before_outbound_io() {
     let harness = Harness::build_routed(
         vec![auth_record("acct-1", "gemini")],
         Some(gemini_only_resolver()),
     );
-    send_settled(
-        &harness,
-        signed_request("/v1/chat/completions", chat_body("house-model")),
-    )
-    .await;
+    let mut body = chat_body("house-model");
+    body["n"] = serde_json::json!(2);
 
-    assert!(
-        harness.usage_store.settled_costs().is_empty(),
-        "被网关拒掉的请求不该结算出任何金额",
-    );
+    let (status, _) = send_settled(&harness, signed_request("/v1/chat/completions", body)).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(harness.transport.call_count(), 0);
+    assert!(harness.usage_store.settled_costs().is_empty());
     assert!(
         harness
             .ledger
             .calls()
             .iter()
-            .any(|c| matches!(c, LedgerCall::Release { .. })),
-        "预扣必须被释放：{:?}",
-        harness.ledger.calls(),
+            .any(|call| matches!(call, LedgerCall::Release { .. }))
     );
 }
 
@@ -202,7 +241,7 @@ async fn a_rejected_cell_releases_the_reservation_instead_of_settling_it() {
 async fn a_passthrough_cell_still_reaches_its_upstream() {
     // 矩阵不是一道全拒的闸：P0 的 5 个直通格必须原样通过。
     let harness = Harness::build();
-    harness.provider.queue(Ok(ok_response(10, 20)));
+    harness.transport.queue(Ok(CannedResponse::ok(10, 20)));
 
     let (status, _) = send_settled(
         &harness,
@@ -231,7 +270,7 @@ async fn the_credential_table_is_not_reloaded_once_per_request() {
     let harness = Harness::build();
     const REQUESTS: usize = 12;
     for _ in 0..REQUESTS {
-        harness.provider.queue(Ok(ok_response(1, 1)));
+        harness.transport.queue(Ok(CannedResponse::ok(1, 1)));
         send_settled(
             &harness,
             signed_request("/v1/chat/completions", chat_body("gpt-4o")),
@@ -247,42 +286,52 @@ async fn the_credential_table_is_not_reloaded_once_per_request() {
     );
 }
 
-#[test]
-fn query_pairs_keep_their_order_and_duplicates() {
-    // Both are significant upstream, which is why this is a Vec and not a map.
-    assert_eq!(
-        parse_query("alt=sse&key=a&key=b"),
-        vec![
-            ("alt".to_owned(), "sse".to_owned()),
-            ("key".to_owned(), "a".to_owned()),
-            ("key".to_owned(), "b".to_owned()),
-        ],
-    );
-    assert_eq!(
-        parse_query("flag"),
-        vec![("flag".to_owned(), String::new())]
-    );
-    assert!(parse_query("").is_empty());
+#[tokio::test]
+async fn raw_query_bytes_reach_the_planner_without_round_tripping() {
+    let harness = Harness::build();
+    harness.transport.queue(Ok(CannedResponse::ok(1, 1)));
+    let raw = "tag=a%20b&plus=a+b&pct=%25&empty=&flag&key=a&key=b";
+    let path = format!("/v1/chat/completions?{raw}");
+    let (status, _) = send_settled(&harness, signed_request(&path, chat_body("gpt-4o"))).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let request = harness.provider.only_request();
+    assert_eq!(request.raw_query.as_deref(), Some(raw));
+    assert!(request.query.is_empty());
 }
 
 #[test]
-fn only_failures_another_account_could_survive_are_retried() {
-    assert!(is_retryable(&ProviderError::Upstream {
-        status: 503,
-        body: String::new()
-    }));
-    assert!(is_retryable(&ProviderError::Upstream {
-        status: 429,
-        body: String::new()
-    }));
-    assert!(is_retryable(&ProviderError::Credential("expired".into())));
+fn retry_after_seconds_are_bounded_and_forwarded_to_health() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::RETRY_AFTER,
+        http::HeaderValue::from_static("17"),
+    );
+    assert_eq!(
+        retry_after_hint(&headers),
+        Some(std::time::Duration::from_secs(17))
+    );
+
+    headers.insert(
+        http::header::RETRY_AFTER,
+        http::HeaderValue::from_static("999999999"),
+    );
+    assert_eq!(
+        retry_after_hint(&headers),
+        Some(std::time::Duration::from_secs(24 * 60 * 60)),
+    );
+}
+
+#[test]
+fn only_account_level_statuses_are_worth_another_credential() {
+    assert!(is_retryable_status(StatusCode::SERVICE_UNAVAILABLE));
+    assert!(is_retryable_status(StatusCode::TOO_MANY_REQUESTS));
+    assert!(is_retryable_status(StatusCode::INTERNAL_SERVER_ERROR));
     assert!(
-        !is_retryable(&ProviderError::Upstream {
-            status: 400,
-            body: String::new()
-        }),
+        !is_retryable_status(StatusCode::BAD_REQUEST),
         "a malformed request fails identically on every account",
     );
+    assert!(!is_retryable_status(StatusCode::OK));
 }
 
 // ---------------------------------------------------------------- ordering
@@ -313,7 +362,7 @@ async fn authentication_runs_before_billing_so_an_anonymous_call_costs_nothing()
 #[tokio::test]
 async fn an_authenticated_call_reserves_dispatches_and_settles_in_that_order() {
     let harness = Harness::build();
-    harness.provider.queue(Ok(ok_response(100, 250)));
+    harness.transport.queue(Ok(CannedResponse::ok(100, 250)));
 
     let (status, _) = send_settled(
         &harness,
@@ -337,7 +386,7 @@ async fn an_authenticated_call_reserves_dispatches_and_settles_in_that_order() {
 #[tokio::test]
 async fn the_reported_usage_is_what_gets_billed() {
     let harness = Harness::build();
-    harness.provider.queue(Ok(ok_response(100, 250)));
+    harness.transport.queue(Ok(CannedResponse::ok(100, 250)));
     send_settled(
         &harness,
         signed_request("/v1/chat/completions", chat_body("gpt-4o")),
@@ -353,7 +402,9 @@ async fn the_reported_usage_is_what_gets_billed() {
 #[tokio::test]
 async fn an_upstream_without_a_usage_envelope_falls_back_instead_of_billing_zero() {
     let harness = Harness::build();
-    harness.provider.queue(Ok(ok_response_without_usage()));
+    harness
+        .transport
+        .queue(Ok(CannedResponse::ok_without_usage()));
     send_settled(
         &harness,
         signed_request("/v1/chat/completions", chat_body("gpt-4o")),
@@ -375,11 +426,8 @@ async fn a_failing_account_is_retried_on_a_different_one_and_billed_once() {
         auth_record("acct-1", "openai"),
         auth_record("acct-2", "openai"),
     ]);
-    harness.provider.queue(Err(ProviderError::Upstream {
-        status: 503,
-        body: "overloaded".to_owned(),
-    }));
-    harness.provider.queue(Ok(ok_response(10, 20)));
+    harness.transport.queue(Ok(CannedResponse::status(503)));
+    harness.transport.queue(Ok(CannedResponse::ok(10, 20)));
 
     let (status, _) = send_settled(
         &harness,
@@ -389,7 +437,7 @@ async fn a_failing_account_is_retried_on_a_different_one_and_billed_once() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        harness.provider.call_count(),
+        harness.transport.call_count(),
         2,
         "the retry must have happened"
     );
@@ -408,10 +456,7 @@ async fn a_client_error_is_surfaced_immediately_instead_of_burning_the_pool() {
         auth_record("acct-1", "openai"),
         auth_record("acct-2", "openai"),
     ]);
-    harness.provider.queue(Err(ProviderError::Upstream {
-        status: 400,
-        body: r#"{"error":"bad request"}"#.to_owned(),
-    }));
+    harness.transport.queue(Ok(CannedResponse::status(400)));
 
     let (status, _) = send_settled(
         &harness,
@@ -420,16 +465,13 @@ async fn a_client_error_is_surfaced_immediately_instead_of_burning_the_pool() {
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(harness.provider.call_count(), 1);
+    assert_eq!(harness.transport.call_count(), 1);
 }
 
 #[tokio::test]
 async fn a_failed_dispatch_releases_the_reservation() {
     let harness = Harness::build();
-    harness.provider.queue(Err(ProviderError::Upstream {
-        status: 400,
-        body: String::new(),
-    }));
+    harness.transport.queue(Ok(CannedResponse::status(400)));
 
     send_settled(
         &harness,
@@ -474,10 +516,7 @@ async fn an_account_that_keeps_failing_across_requests_is_benched_from_the_pool(
     // only ever tries a given account once.
     let harness = Harness::build_with(vec![auth_record("acct-1", "openai")]);
     for _ in 0..crate::channel::DEFAULT_FAILURE_THRESHOLD {
-        harness.provider.queue(Err(ProviderError::Upstream {
-            status: 503,
-            body: String::new(),
-        }));
+        harness.transport.queue(Ok(CannedResponse::status(503)));
         let (status, _) = send_settled(
             &harness,
             signed_request("/v1/chat/completions", chat_body("gpt-4o")),
@@ -604,239 +643,54 @@ async fn the_six_converged_routes_are_gone_not_merely_unbilled() {
     );
 }
 
-// ---------------------------------------------------------------- 零成本端点
+mod catalogue;
 
+/// When a translated provider returns a non-JSON infrastructure page, the
+/// gateway cannot change its dialect. It must preserve the useful status, bytes
+/// and content type rather than claiming the HTML body is JSON.
 #[tokio::test]
-async fn listing_models_costs_the_tenant_nothing() {
-    let harness = Harness::build();
-    let (status, body) = send_settled(&harness, signed_get("/v1/models")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["object"].as_str(), Some("list"));
-    let listed: Vec<&str> = body["data"]
-        .as_array()
-        .expect("a data array")
-        .iter()
-        .filter_map(|m| m["id"].as_str())
-        .collect();
-    let catalogued: Vec<String> = harness
-        .catalog
-        .models
-        .lock()
-        .iter()
-        .map(|m| m.id.clone())
-        .collect();
-    assert_eq!(listed, catalogued, "the catalogue is served verbatim");
-    // 收敛前这里会先预扣、再因为「响应没有 usage 信封」落 fallback 结算，
-    // 于是一次**纯 DB 读**按 LLM 价格收钱。已移出计费范围。
-    assert!(
-        harness.ledger.calls().is_empty(),
-        "一次目录读取不该碰账本：{:?}",
-        harness.ledger.calls(),
+async fn an_untranslatable_upstream_error_keeps_its_original_entity_headers() {
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _;
+
+    let harness = Harness::build_routed(
+        vec![auth_record("acct-1", "gemini")],
+        Some(gemini_only_resolver()),
     );
-    assert!(
-        harness.usage_store.settled_costs().is_empty(),
-        "更不该结算出一个金额",
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("text/html; charset=utf-8"),
     );
-}
-
-#[tokio::test]
-async fn counting_tokens_costs_the_tenant_nothing() {
-    let harness = Harness::build_with(vec![auth_record("acct-1", "claude")]);
-    let request = axum::http::Request::builder()
-        .method("POST")
-        .uri("/v1/messages/count_tokens")
-        .header("content-type", "application/json")
-        .header("authorization", format!("Bearer {TEST_API_KEY}"))
-        .body(axum::body::Body::from(
-            chat_body("claude-sonnet-5").to_string(),
-        ))
-        .expect("request builds");
-
-    let (status, _) = send_settled(&harness, request).await;
-    assert_eq!(status, StatusCode::OK);
-
-    // Anthropic 自己对 token 计数收 0；它的回复是裸 `{"input_tokens": N}`，
-    // 没有 `usage` 包装，所以收敛前 usage 解析器报 absent、fallback 结算按
-    // **那个模型的真实费率**收钱 —— 一次免费调用被按 LLM 价格计价。
-    assert!(
-        harness.ledger.calls().is_empty(),
-        "count_tokens 不该碰账本：{:?}",
-        harness.ledger.calls(),
-    );
-    assert!(harness.usage_store.settled_costs().is_empty());
-}
-
-#[tokio::test]
-async fn the_endpoints_moved_out_of_billing_are_still_behind_authentication() {
-    // 「不计费」不等于「不鉴权」。两道门共用 `is_proxy_path`，
-    // 但计费那道额外排除了 GET 与 count_tokens —— 排除的是**收钱**，不是**认人**。
-    let harness = Harness::build();
-    for (method, path) in [("GET", "/v1/models"), ("POST", "/v1/messages/count_tokens")] {
-        let request = axum::http::Request::builder()
-            .method(method)
-            .uri(path)
-            .header("content-type", "application/json")
-            .body(axum::body::Body::from(
-                chat_body("claude-sonnet-5").to_string(),
-            ))
-            .expect("request builds");
-        let (status, _) = send_settled(&harness, request).await;
-        assert_eq!(
-            status,
-            StatusCode::UNAUTHORIZED,
-            "{method} {path} 放行了匿名请求"
-        );
-    }
-}
-
-#[tokio::test]
-async fn this_router_can_be_merged_with_one_that_owns_the_metrics_endpoint() {
-    // `/metrics/prometheus` belongs to the composition root. Registering it
-    // here too makes `Router::merge` panic on the duplicate and
-    // the process never finishes booting — so the guard is that the merge is
-    // simply possible.
-    let harness = Harness::build();
-    let host: axum::Router = axum::Router::new().route(
-        "/metrics/prometheus",
-        axum::routing::get(|| async { "agw_v1_requests_total 0" }),
-    );
-
-    let merged = host.merge(harness.router());
-
-    let request = axum::http::Request::builder()
-        .uri("/metrics/prometheus")
-        .body(axum::body::Body::empty())
-        .expect("request builds");
-    use tower::ServiceExt;
-    let response = merged.oneshot(request).await.expect("responds");
-    assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "the host's metrics route must survive the merge",
-    );
-}
-
-#[tokio::test]
-async fn the_gauges_this_crate_observes_are_pushed_to_the_host_not_exported_here() {
-    // The benched count is read at scrape time; the scrape lives in another
-    // crate now, so the value travels through the sink instead.
-    let harness = Harness::build();
-    harness.health.record_result("acct-1", false, None);
-    harness.health.record_result("acct-1", false, None);
-    harness.health.record_result("acct-1", false, None);
-
-    harness.state.publish_gauges();
-
-    assert_eq!(
-        harness.metrics.benched(),
-        harness.health.benched_count(),
-        "the gauge must reflect what the pool actually benched",
-    );
-}
-
-#[tokio::test]
-async fn an_error_status_relayed_in_band_fails_over_like_a_raised_one() {
-    // Some providers surface upstream 5xx as a normal response; the client
-    // should not get a 503 that a different credential would have served.
-    let harness = Harness::build_with(vec![
-        auth_record("acct-1", "openai"),
-        auth_record("acct-2", "openai"),
-    ]);
-    harness.provider.queue(Ok(ProviderResponse {
+    let original = Bytes::from_static(b"<html><body>temporarily unavailable</body></html>");
+    harness.transport.queue(Ok(CannedResponse {
         status: 503,
-        headers: http::HeaderMap::new(),
-        body: bytes::Bytes::from_static(b"overloaded"),
-        usage: None,
+        headers,
+        frames: vec![original.clone()],
     }));
-    harness.provider.queue(Ok(ok_response(10, 20)));
 
-    let (status, _) = send_settled(
-        &harness,
-        signed_request("/v1/chat/completions", chat_body("gpt-4o")),
-    )
-    .await;
+    let response = harness
+        .router()
+        .oneshot(signed_request(
+            "/v1/chat/completions",
+            chat_body("house-model"),
+        ))
+        .await
+        .expect("router responds");
 
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(harness.provider.call_count(), 2);
-    assert_eq!(harness.usage_store.settled_costs().len(), 1);
-}
-
-#[test]
-fn only_account_level_statuses_are_worth_another_credential() {
-    assert!(is_retryable_status(500));
-    assert!(is_retryable_status(429));
-    assert!(!is_retryable_status(400));
-    assert!(!is_retryable_status(200));
-}
-
-#[tokio::test]
-async fn listing_models_exposes_catalog_capabilities_verbatim() {
-    use crate::ports::{ModelEntry, ModelReasoning, ModelReasoningEffort};
-
-    let harness = Harness::build();
-    {
-        let mut models = harness.catalog.models.lock();
-        models.clear();
-        models.push(ModelEntry {
-            id: "vision-thinker".to_owned(),
-            created: 1,
-            owned_by: "openai".to_owned(),
-            context_length: Some(128_000),
-            max_output_tokens: Some(16_384),
-            input_modalities: vec!["text".into(), "image".into()],
-            reasoning: Some(ModelReasoning {
-                efforts: vec![
-                    ModelReasoningEffort {
-                        id: "low".into(),
-                        name: "Low".into(),
-                    },
-                    ModelReasoningEffort {
-                        id: "high".into(),
-                        name: "High".into(),
-                    },
-                ],
-                default_effort: Some("high".into()),
-            }),
-        });
-        models.push(ModelEntry {
-            id: "text-only".to_owned(),
-            created: 2,
-            owned_by: "openai".to_owned(),
-            context_length: Some(8_192),
-            max_output_tokens: Some(2_048),
-            input_modalities: vec!["text".into()],
-            reasoning: None,
-        });
-    }
-
-    let (status, body) = send(harness.router(), signed_get("/v1/models")).await;
-    assert_eq!(status, StatusCode::OK);
-    let data = body["data"].as_array().expect("data array");
-    let vision = data.iter().find(|m| m["id"] == "vision-thinker").unwrap();
-    let text = data.iter().find(|m| m["id"] == "text-only").unwrap();
-
-    assert_eq!(vision["context_length"], 128_000);
-    assert_eq!(vision["max_output_tokens"], 16_384);
-    assert_eq!(vision["input_modalities"], serde_json::json!(["text", "image"]));
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
-        vision["reasoning"]["efforts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|e| e["id"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        ["low", "high"]
+        response
+            .headers()
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/html; charset=utf-8")
     );
-
-    assert_eq!(text["context_length"], 8_192);
-    assert_eq!(text["max_output_tokens"], 2_048);
-    assert_eq!(text["input_modalities"], serde_json::json!(["text"]));
-    assert!(text.get("reasoning").is_none());
-    assert!(
-        text["input_modalities"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|m| m != "image")
-    );
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    assert_eq!(body, original);
 }

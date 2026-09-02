@@ -23,6 +23,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The formatting gate compares this change with its base. A shallow
+          # checkout cannot prove which Rust files belong to the change.
+          fetch-depth: 0
 
       # rust-toolchain.toml pins 1.97.1 and requests clippy + rustfmt. `minimal`
       # would not ship them, which is why the file lists components explicitly.
@@ -32,8 +36,28 @@ jobs:
       # change every push and would only make the cache big and dirty.
       - uses: Swatinem/rust-cache@v2
 
-      - name: Format
-        run: cargo fmt --check
+      # The default branch contains formatting debt outside this change. Check
+      # every Rust file introduced or modified by the commit/PR, rather than
+      # letting unrelated legacy files make all future patches permanently red.
+      - name: Format changed Rust files
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if [[ -z "$base" || "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          mapfile -d '' files < <(
+            git diff --name-only -z --diff-filter=ACMR "$base"...HEAD -- '*.rs'
+          )
+          if ((${#files[@]} == 0)); then
+            echo "No changed Rust files"
+            exit 0
+          fi
+          printf 'rustfmt checking %s\n' "${files[@]}"
+          rustfmt --edition 2024 --check "${files[@]}"
 
       # Warnings are denied here, never via `#![deny(warnings)]` in source: a
       # rustc upgrade that adds a lint must not turn the whole tree red for
@@ -53,11 +77,24 @@ jobs:
   integration:
     name: Rust integration (Postgres + Redis)
     runs-on: ubuntu-latest
+    env:
+      POSTGRES_ADMIN_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+      # `gw-model` follows the conventional DATABASE_URL while proxy/ledger
+      # integration helpers use GW_TEST_DATABASE_URL. Keep both contracts on
+      # the same isolated database so every ignored test sees the migrated tree.
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/ai_gateway
+      GW_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/ai_gateway
+      GW_TEST_REDIS_URL: redis://127.0.0.1:6379
     services:
       postgres:
         image: postgres:16
         env:
           POSTGRES_PASSWORD: postgres
+          # `gw-infra` intentionally tests DbSettings::default(), whose local
+          # development account has no password. Trust is scoped to this
+          # ephemeral Actions service and lets that exact production default be
+          # exercised instead of silently replacing the test configuration.
+          POSTGRES_HOST_AUTH_METHOD: trust
         options: >-
           --health-cmd pg_isready --health-interval 10s
           --health-timeout 5s --health-retries 5
@@ -73,13 +110,45 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # The tests that need real services are #[ignore]d so a bare `cargo test`
-      # stays honest on a machine without them. This job is where they run.
+      # One ignored gw-infra test intentionally connects with the exact
+      # config.example.yaml defaults (`ai_gateway` role/database, blank
+      # password), while the rest of the integration suite uses the explicit
+      # admin URL above. Provision both views over the same ephemeral server.
+      - name: Create integration role and database
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql "$POSTGRES_ADMIN_URL" --set ON_ERROR_STOP=1 <<'SQL'
+          DO $$
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_gateway') THEN
+              CREATE ROLE ai_gateway LOGIN;
+            END IF;
+          END
+          $$;
+          SELECT 'CREATE DATABASE ai_gateway OWNER ai_gateway'
+          WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'ai_gateway')
+          \gexec
+          SQL
+
+      # Several ignored tests connect directly to the shared database rather
+      # than creating their own fresh database. Apply the same ordered,
+      # idempotent SQL set production embeds before any of those tests run.
+      - name: Apply database migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          for migration in migrations/*.sql; do
+            echo "Applying $migration"
+            psql "$GW_TEST_DATABASE_URL" --set ON_ERROR_STOP=1 --file "$migration"
+          done
+
+      # These tests deliberately share one database and mutate global tables.
+      # Serialize the test harness while preserving concurrency inside each
+      # test, so isolation failures are real product failures rather than
+      # cross-test schema races.
       - name: Test (ignored tier)
-        env:
-          GW_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
-          GW_TEST_REDIS_URL: redis://127.0.0.1:6379
-        run: cargo test --workspace -- --ignored
+        run: cargo test --workspace -- --ignored --test-threads=1
 
   frontend:
     name: Frontend

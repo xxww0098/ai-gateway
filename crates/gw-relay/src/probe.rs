@@ -51,13 +51,10 @@ const MAX_JSON: usize = 8 * 1024 * 1024;
 /// 共用 [`UsageShape::Google`]；`openai` 与 `codex` 共用 [`UsageShape::OpenAi`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageShape {
-    /// OpenAI：usage 在**末帧** `data: {...,"usage":{...}}`。
-    ///
-    /// 同时认 Chat Completions 的 `prompt_tokens` / `completion_tokens` 与
-    /// Responses API 的 `input_tokens` / `output_tokens` —— `/v1/responses`
-    /// 是三个保留入口之一（缺陷 #1），它的 usage 键名与 chat 不同名。
+    /// OpenAI：Chat Completions 的 usage 在末帧顶层；Responses API 的
+    /// `response.completed` 则把 usage 放在 `response.usage`。
     OpenAi,
-    /// Anthropic：`input_tokens` 在**首帧** `message_start`，
+    /// Anthropic：输入与缓存明细在**首帧** `message_start`，
     /// `output_tokens` 在**末帧** `message_delta`。
     Anthropic,
     /// Google GenerateContent：`usageMetadata` 在末帧，且是**累计值**。
@@ -67,7 +64,7 @@ pub enum UsageShape {
 /// 旁路 usage probe：增量行解析，稳态零字节拷贝。
 ///
 /// 同一个类型同时吃流式（SSE 行）与非流式（完整 JSON body）——
-/// 非流式时中继把整个 body 作为一帧交进来，`observe` 会直接整体解析。
+/// 非流式时中继把 body 的数据帧依次交给 `observe`，probe 在旁路有界累积。
 pub struct SseUsageProbe {
     shape: UsageShape,
     /// 跨帧的半行。稳态长度 = `O(单行)`。
@@ -77,8 +74,8 @@ pub struct SseUsageProbe {
     discarding: bool,
     /// 非流式 JSON body 的旁路累积。`None` = 还没认定是 JSON。
     json: Option<Vec<u8>>,
-    /// 认定 JSON 只看第一帧，之后不再改判。
-    seen_any_frame: bool,
+    /// 是否已经看到第一个非空白帧并完成 JSON/SSE 判型。
+    classified: bool,
     tally: RelayUsage,
     /// 有没有看到过**任何**一个 usage 字段。`false` → `finish()` 返回 `None`。
     seen: bool,
@@ -99,7 +96,7 @@ impl SseUsageProbe {
             pending: Vec::new(),
             discarding: false,
             json: None,
-            seen_any_frame: false,
+            classified: false,
             tally: RelayUsage::default(),
             seen: false,
             sink: sink.clone(),
@@ -110,33 +107,26 @@ impl SseUsageProbe {
     /// 当前跨帧缓冲的字节数。
     ///
     /// 这是缺陷 #16 的**可观测量**：不管流过多少字节，它都只在一行的量级上。
-    /// 对比今天的 `StreamUsageBuffer` —— 那个数会一路涨到 96 KiB 并常驻。
     #[must_use]
     pub fn buffered_len(&self) -> usize {
         self.pending.len()
     }
 
-    /// 非流式 JSON 的累积。超过 [`MAX_JSON`] 就放弃 —— usage 在文档末尾，
-    /// 截断的前缀解析不出任何东西，攒下去只是白占内存。放弃后
-    /// [`UsageProbe::finish`] 返回 `None`，计费落 fallback（诚实降级）。
-    ///
-    /// 注意这个上限**只影响计费精度，不影响转发** —— 中继早就把这些字节
-    /// 逐帧发给客户端了，probe 是旁路。
+    /// 非流式 JSON 的有界累积。超过 [`MAX_JSON`] 就放弃，计费落 fallback；
+    /// 客户端回写不受影响。
     fn accumulate_json(&mut self, chunk: &[u8]) {
-        let Some(buf) = self.json.as_mut() else {
-            let mut buf = Vec::with_capacity(chunk.len());
-            buf.extend_from_slice(chunk);
-            self.json = Some(buf);
+        if self.discarding {
             return;
-        };
-        if buf.len().saturating_add(chunk.len()) > MAX_JSON {
+        }
+        let current = self.json.as_ref().map_or(0, Vec::len);
+        if current.saturating_add(chunk.len()) > MAX_JSON {
             self.json = Some(Vec::new());
             self.discarding = true;
             return;
         }
-        if !self.discarding {
-            buf.extend_from_slice(chunk);
-        }
+        self.json
+            .get_or_insert_with(|| Vec::with_capacity(chunk.len()))
+            .extend_from_slice(chunk);
     }
 
     /// 一行走完了（遇到 `\n`）。
@@ -173,7 +163,7 @@ impl SseUsageProbe {
     }
 
     /// SSE 语义：只有 `data:` 行带载荷。`event:` / `id:` / `retry:` / 注释行
-    /// （`:` 开头）/ 空行一律跳过 —— 中继**只读**这些字节，从不改写。
+    /// （`:` 开头）/ 空行一律跳过。
     fn take_line(&mut self, line: &[u8]) {
         let line = trim(line);
         let Some(rest) = line.strip_prefix(b"data:") else {
@@ -195,9 +185,7 @@ impl SseUsageProbe {
         };
         let Some(found) = parsed else { return };
         self.seen = true;
-        // 后到的帧是权威的：OpenAI 只有末帧带 usage，Anthropic 的
-        // `message_delta` 覆盖 `message_start` 的 output，Google 的
-        // `usageMetadata` 是累计值 —— 三种形状下「后者胜」都等价于「取最终值」。
+        // 后到的帧是权威的。Anthropic 首尾分账时，后帧缺失的列由旧值保留。
         overwrite(&mut self.tally.input_tokens, found.input_tokens);
         overwrite(&mut self.tally.output_tokens, found.output_tokens);
         overwrite(&mut self.tally.cached_tokens, found.cached_tokens);
@@ -206,29 +194,31 @@ impl SseUsageProbe {
 }
 
 impl UsageProbe for SseUsageProbe {
-    /// 只有 [`UsageShape::Anthropic`] 返回 `true`：它的 `input_tokens` 在首帧。
-    ///
-    /// 增量行解析下这只是**说明**，不产生任何头窗口拷贝 —— 见模块文档。
     fn needs_head(&self) -> bool {
         matches!(self.shape, UsageShape::Anthropic)
     }
 
     fn observe(&mut self, frame: &Bytes) {
-        let bytes: &[u8] = frame.as_ref();
+        let bytes = frame.as_ref();
 
-        // 非流式：body 是一个 JSON object 而不是 SSE，usage 在**整份文档的末尾**，
-        // 所以必须攒齐才能解析。攒在**这里**（旁路），不是在回写路径上 ——
-        // 中继逐帧转发，客户端边收边拿，probe 自己慢慢攒。
-        //
-        // 判据：SSE 的行永远以字段名开头（`data:` / `event:` / `:`），不会以 `{`
-        // 开头，所以这一发探测对流式路径是零成本的；一旦认定是 JSON，
-        // 后续帧全部走累积，不再做行解析。
-        if self.json.is_some() || (!self.seen_any_frame && trim(bytes).first() == Some(&b'{')) {
-            self.seen_any_frame = true;
+        if self.json.is_some() {
             self.accumulate_json(bytes);
             return;
         }
-        self.seen_any_frame = true;
+
+        // 空白-only 的首帧不参与判型：某些代理会先吐 CRLF。此前它会把随后真正
+        // 以 `{` 开头的 JSON 错判成 SSE，导致每个非流式请求都落 fallback。
+        if !self.classified {
+            let first = trim(bytes);
+            if first.is_empty() {
+                return;
+            }
+            self.classified = true;
+            if first.first() == Some(&b'{') {
+                self.accumulate_json(bytes);
+                return;
+            }
+        }
 
         let mut rest = bytes;
         while let Some(idx) = rest.iter().position(|&b| b == b'\n') {
@@ -241,8 +231,11 @@ impl UsageProbe for SseUsageProbe {
 
     fn finish(self: Box<Self>) -> Option<RelayUsage> {
         let mut me = *self;
-        // 非流式：整份 JSON 攒齐了才解析得动。
-        if let Some(buf) = me.json.take() {
+        // 非流式：整份 JSON 攒齐了才解析得动。超限时 `discarding` 为 true，
+        // 不再尝试解析空缓冲。
+        if !me.discarding
+            && let Some(buf) = me.json.take()
+        {
             me.absorb(&buf);
         }
         let Self {
@@ -262,9 +255,8 @@ impl UsageHandle {
     /// 三态，**「缺失」与「零」必须能分开**：
     ///
     /// - `None` —— 流还没结束，`finish()` 没被调过；
-    /// - `Some(None)` —— 结束了，**上游没给** usage（计费走 fallback / strict）；
-    /// - `Some(Some(u))` —— 结束了，上游给了。`u` 里某一列是 `Some(0)` 表示
-    ///   上游明确报了 0，是 `None` 表示上游省略了这一列。
+    /// - `Some(None)` —— 结束了，上游没给 usage；
+    /// - `Some(Some(u))` —— 结束了，上游给了。
     #[must_use]
     pub fn get(&self) -> Option<Option<RelayUsage>> {
         self.0
@@ -311,6 +303,13 @@ fn trim(mut s: &[u8]) -> &[u8] {
 #[derive(Deserialize)]
 struct OpenAiEnvelope {
     usage: Option<OpenAiUsage>,
+    /// Responses API 的终局 SSE：`response.completed.response.usage`。
+    response: Option<OpenAiResponse>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiResponse {
+    usage: Option<OpenAiUsage>,
 }
 
 #[derive(Deserialize)]
@@ -320,7 +319,7 @@ struct OpenAiUsage {
     completion_tokens: Option<i64>,
     prompt_tokens_details: Option<CachedDetails>,
     completion_tokens_details: Option<ReasoningDetails>,
-    // Responses API（`/v1/responses`，缺陷 #1 修好之后这条路才真的通）
+    // Responses API
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
     input_tokens_details: Option<CachedDetails>,
@@ -338,7 +337,8 @@ struct ReasoningDetails {
 }
 
 fn parse_openai(json: &[u8]) -> Option<RelayUsage> {
-    let usage = serde_json::from_slice::<OpenAiEnvelope>(json).ok()?.usage?;
+    let env = serde_json::from_slice::<OpenAiEnvelope>(json).ok()?;
+    let usage = env.usage.or_else(|| env.response.and_then(|r| r.usage))?;
     let found = RelayUsage {
         input_tokens: usage.prompt_tokens.or(usage.input_tokens),
         output_tokens: usage.completion_tokens.or(usage.output_tokens),
@@ -360,7 +360,7 @@ struct AnthropicEnvelope {
     usage: Option<AnthropicUsage>,
     /// `message_start` 把它放在 `message` 里。
     message: Option<AnthropicNested>,
-    /// 部分版本把 `output_tokens` 放在 `delta` 里。
+    /// 部分兼容实现把 usage 放在 `delta` 里。
     delta: Option<AnthropicNested>,
 }
 
@@ -371,10 +371,31 @@ struct AnthropicNested {
 
 #[derive(Deserialize)]
 struct AnthropicUsage {
+    /// Anthropic 的这一列是**未缓存输入**，不是含缓存的总输入。
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
     cache_creation_input_tokens: Option<i64>,
     cache_read_input_tokens: Option<i64>,
+}
+
+/// 把 Anthropic 的三列输入折成网关内部不变量：
+/// `input_tokens` = 全部输入，`cached_tokens` = 其中命中读取缓存的子集。
+/// cache creation 仍按普通输入价进入 uncached 部分；当前价格模型没有独立的
+/// cache-write 单价，至少不能把它误当 cache-read 或从总输入里再减一次。
+fn anthropic_input(usage: &AnthropicUsage) -> Option<Option<i64>> {
+    let columns = [
+        usage.input_tokens,
+        usage.cache_creation_input_tokens,
+        usage.cache_read_input_tokens,
+    ];
+    if columns.iter().all(Option::is_none) {
+        return Some(None);
+    }
+    let total = columns
+        .into_iter()
+        .flatten()
+        .try_fold(0_i64, i64::checked_add)?;
+    Some(Some(total))
 }
 
 fn parse_anthropic(json: &[u8]) -> Option<RelayUsage> {
@@ -388,15 +409,9 @@ fn parse_anthropic(json: &[u8]) -> Option<RelayUsage> {
     .into_iter()
     .flatten()
     {
-        overwrite(&mut found.input_tokens, usage.input_tokens);
+        overwrite(&mut found.input_tokens, anthropic_input(&usage)?);
         overwrite(&mut found.output_tokens, usage.output_tokens);
-        // 两个 cache 列都算「缓存命中」，任一存在即视为上游报了这一列。
-        if usage.cache_creation_input_tokens.is_some() || usage.cache_read_input_tokens.is_some() {
-            found.cached_tokens = Some(
-                usage.cache_creation_input_tokens.unwrap_or(0)
-                    + usage.cache_read_input_tokens.unwrap_or(0),
-            );
-        }
+        overwrite(&mut found.cached_tokens, usage.cache_read_input_tokens);
     }
     (!found.is_empty()).then_some(found)
 }

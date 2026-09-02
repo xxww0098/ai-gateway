@@ -30,7 +30,7 @@ ai-gateway/
 │   ├── gw-authcore/        #   JWT、API Key、AES-GCM 凭证加密、AuthStore
 │   ├── gw-pricing/         #   ModelPriceCache + 四列单价 Calculator
 │   ├── gw-ledger/          #   Hold/Settle/Release 账本（Redis Lua + PG）
-│   ├── gw-provider/        #   5 个上游 executor + 协议翻译 + usage 解析
+│   ├── gw-provider/        #   上游路由规划（RoutePlan）+ 凭证刷新 + usage 解析（不发推理 HTTP）
 │   ├── gw-proxy/           #   /v1/* 代理内核（无 /v1beta）
 │   ├── gw-panel/           #   /api/panel/** 运营面板，按业务域切分
 │   ├── gw-relay/           #   纯字节中继内核

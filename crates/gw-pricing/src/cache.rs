@@ -1,6 +1,7 @@
 //! In-memory snapshot of the `model_prices` table.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -48,6 +49,8 @@ const SELECT_PRICES: &str = "SELECT id, \
 #[derive(Debug)]
 pub struct ModelPriceCache {
     items: ArcSwap<HashMap<String, Arc<ModelPrice>>>,
+    /// 已发布过多少份快照。见 [`generation`](Self::generation)。
+    generation: AtomicU64,
 }
 
 impl Default for ModelPriceCache {
@@ -65,6 +68,7 @@ impl ModelPriceCache {
     pub fn empty() -> Self {
         Self {
             items: ArcSwap::from_pointee(HashMap::new()),
+            generation: AtomicU64::new(0),
         }
     }
 
@@ -117,8 +121,14 @@ impl ModelPriceCache {
     /// Looks up a price. The key is trimmed and lower-cased, matching the
     /// normalization applied when the snapshot was built, so callers need not
     /// care about the casing an upstream used for the model id.
+    ///
+    /// A caller that already holds a [`normalize_model_key`] result skips the
+    /// allocation: the hot hold path peeks once and reuses that key.
     #[must_use]
     pub fn get(&self, model_id: &str) -> Option<Arc<ModelPrice>> {
+        if is_canonical_price_key(model_id) {
+            return self.items.load().get(model_id).cloned();
+        }
         let key = normalize_model_key(model_id);
         if key.is_empty() {
             return None;
@@ -130,6 +140,19 @@ impl ModelPriceCache {
     #[must_use]
     pub fn list(&self) -> Vec<Arc<ModelPrice>> {
         self.items.load().values().cloned().collect()
+    }
+
+    /// 当前快照的**代次**：这个缓存发布过多少份快照。
+    ///
+    /// 每次 [`store_rows`](Self::store_rows) / [`invalidate`](Self::invalidate)
+    /// 加一。空缓存是 0。
+    ///
+    /// 这是 [`PricingQuote::version`](crate::PricingQuote::version) 的来源:
+    /// 一笔已结算的账因此能回答「它冻的是第几版价目表」，而管理员改价改的是
+    /// 下一版 —— 在途请求看不到。
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     /// Number of distinct model ids in the current snapshot.
@@ -200,13 +223,27 @@ impl ModelPriceCache {
             next.insert(key, Arc::new(row));
         }
         self.items.store(Arc::new(next));
+        // 代次在快照发布**之后**加一，于是任何读到新代次的人一定也能读到新快照。
+        self.generation.fetch_add(1, Ordering::Release);
     }
 }
 
 /// Canonical cache-key form for a model id. Keeping it in one place is what
 /// lets [`ModelPriceCache::get`] and the snapshot builder agree.
-fn normalize_model_key(model_id: &str) -> String {
+///
+/// Proxy billing calls this once per request and reuses the result across
+/// the three estimators, so lookup does not `trim` + `to_lowercase` again.
+#[must_use]
+pub fn normalize_model_key(model_id: &str) -> String {
     model_id.trim().to_lowercase()
+}
+
+/// Already in [`normalize_model_key`] form: no leading/trailing whitespace
+/// and no uppercase, so [`ModelPriceCache::get`] can hash the slice as-is.
+fn is_canonical_price_key(model_id: &str) -> bool {
+    !model_id.is_empty()
+        && model_id.trim().len() == model_id.len()
+        && !model_id.chars().any(char::is_uppercase)
 }
 
 #[cfg(test)]

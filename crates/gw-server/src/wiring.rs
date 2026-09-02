@@ -50,15 +50,14 @@ use gw_provider::common::ProviderConfig;
 use gw_provider::gemini::GeminiProvider;
 use gw_provider::kiro::KiroProvider;
 use gw_provider::openai::OpenAiCompatibleProvider;
-use gw_provider::types::Provider;
+use gw_provider::route::RoutePlanner;
 use gw_provider::vertex::VertexProvider;
 use gw_provider::xai::XaiProvider;
 use gw_proxy::adapters::{
-    AuthcoreCrypto, RedisIdempotencyStore, SharedCalculator, SharedCircuitBreaker, SharedLedger,
-    SharedRateLimiter, SqlChannelPolicyStore, SqlModelCatalog, SqlSubscriptionQuotaStore,
-    SqlTenantDirectory, SqlUsageStore,
+    AuthcoreCrypto, CachedModelCatalog, RedisIdempotencyStore, SharedCalculator,
+    SharedCircuitBreaker, SharedLedger, SharedRateLimiter, SqlChannelPolicyStore, SqlModelCatalog,
+    SqlSubscriptionQuotaStore, SqlTenantDirectory, SqlUsageStore,
 };
-use gw_proxy::budget_token::BudgetTokenStore;
 use gw_proxy::channel::{ChannelHealth, ChannelPolicyCache, ChannelPool};
 use gw_proxy::idempotency::IdempotencyManager;
 use gw_proxy::{AccessProvider, Dispatcher, HoldMiddleware, ProxyState, Settlement, reconcile};
@@ -73,6 +72,9 @@ pub const CACHE_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// How often `channel_policies` is reloaded.
 pub const CHANNEL_POLICY_REFRESH: Duration = Duration::from_secs(60);
+
+/// How often the visible model catalogue snapshot is reloaded.
+pub const CATALOG_REFRESH: Duration = Duration::from_secs(60);
 
 /// The wired gateway: what [`crate::serve`] needs, plus the handles that must
 /// outlive this function.
@@ -102,6 +104,8 @@ pub struct Guards {
     pub price_refresh: Option<tokio::task::JoinHandle<()>>,
     /// Periodic `channel_policies` reload.
     pub channel_policy_refresh: tokio::task::JoinHandle<()>,
+    /// Periodic visible-catalogue snapshot reload.
+    pub catalog_refresh: tokio::task::JoinHandle<()>,
     /// Startup + 5-minute orphaned-hold scan.
     pub orphan_scanner: tokio::task::JoinHandle<()>,
 }
@@ -112,6 +116,7 @@ impl Drop for Guards {
             handle.abort();
         }
         self.channel_policy_refresh.abort();
+        self.catalog_refresh.abort();
         self.orphan_scanner.abort();
     }
 }
@@ -222,15 +227,17 @@ pub async fn wire(
 
     let shared_ledger = Arc::new(SharedLedger::new(Arc::clone(&ledger)));
     let shared_calc = Arc::new(SharedCalculator::new(Arc::clone(&calc)));
-    let budget_tokens = Arc::new(BudgetTokenStore::new());
+
+    // 配额存储是**同一个实例**：预扣在它的锁里落预留，Release 在它这里还回去。
+    // （结算那一支的「预留 → 实际」在 `SqlUsageStore` 的扣款事务里做，不经过它。）
+    let quota_store = Arc::new(SqlSubscriptionQuotaStore::new(pg.clone()));
 
     let settlement = Arc::new(
         Settlement::new(
             Arc::clone(&shared_ledger) as Arc<_>,
-            Arc::clone(&shared_calc) as Arc<_>,
             Arc::new(SqlUsageStore::new(pg.clone(), Arc::clone(&ledger))),
         )
-        .with_budget_tokens(Arc::clone(&budget_tokens))
+        .with_quota_store(Arc::clone(&quota_store) as Arc<_>)
         .with_low_balance_threshold(config.billing.low_balance_threshold_usd),
     );
     settlement.set_strict_usage_metadata(config.billing.strict_usage_metadata_mode);
@@ -258,11 +265,10 @@ pub async fn wire(
             Arc::clone(&settlement),
             config.billing.hold_ttl(),
         )
-        .with_quota_store(Arc::new(SqlSubscriptionQuotaStore::new(pg.clone())))
+        .with_quota_store(Arc::clone(&quota_store) as Arc<_>)
         .with_rate_limiter(Arc::new(SharedRateLimiter::new(Arc::clone(&rate_limiter))))
         .with_circuit_breaker(Arc::clone(&shared_breaker) as Arc<_>)
-        .with_idempotency(Arc::clone(&idempotency))
-        .with_budget_tokens(Arc::clone(&budget_tokens)),
+        .with_idempotency(Arc::clone(&idempotency)),
     );
 
     // Defaults (3 failures / 30s cooldown).
@@ -279,6 +285,18 @@ pub async fn wire(
         ChannelPool::new(Arc::clone(&channel_health)).with_policies(Arc::clone(&channel_policies)),
     );
 
+    // Listing snapshot for GET /v1/models and GET /v1/models/{id}.
+    // Do NOT attach CatalogChannelResolver here: that is an explicit opt-in
+    // (`Dispatcher::with_channel_resolver`) because L1 prefix-stripping
+    // breaks OpenRouter-style model names such as `openai/gpt-4o`.
+    let catalog = Arc::new(CachedModelCatalog::new(Arc::new(SqlModelCatalog::new(
+        pg.clone(),
+    ))));
+    if let Err(err) = catalog.refresh().await {
+        warn!(%err, "failed to load model catalog; serving an empty list until refresh succeeds");
+    }
+    let catalog_refresh = Arc::clone(&catalog).spawn_refresh(CATALOG_REFRESH);
+
     let dispatch = Arc::new(
         Dispatcher::new(
             build_providers(&config.sdk)?,
@@ -287,7 +305,7 @@ pub async fn wire(
             Arc::clone(&settlement),
         )
         .with_circuit_breaker(Arc::clone(&shared_breaker) as Arc<_>)
-        .with_catalog(Arc::new(SqlModelCatalog::new(pg.clone()))),
+        .with_catalog(catalog),
     );
 
     let proxy_state = ProxyState::new(access, hold, dispatch, drain.clone())
@@ -340,6 +358,7 @@ pub async fn wire(
             user_status_sweeper,
             price_refresh,
             channel_policy_refresh,
+            catalog_refresh,
             orphan_scanner,
         },
     })
@@ -419,7 +438,7 @@ fn sdk_seed_config(config: &Config) -> SdkSeedConfig {
 /// # Errors
 /// An unparseable `base_url` is rejected at wiring time rather than on the
 /// first request.
-fn build_providers(sdk: &gw_config::SdkConfig) -> anyhow::Result<Vec<Arc<dyn Provider>>> {
+fn build_providers(sdk: &gw_config::SdkConfig) -> anyhow::Result<Vec<Arc<dyn RoutePlanner>>> {
     let timeout = i64::from(sdk.timeout_seconds);
     let cfg = |p: &gw_config::SdkProviderConfig| ProviderConfig {
         base_url: p.base_url.clone(),
@@ -427,7 +446,7 @@ fn build_providers(sdk: &gw_config::SdkConfig) -> anyhow::Result<Vec<Arc<dyn Pro
         enabled: p.enabled,
     };
 
-    let mut providers: Vec<Arc<dyn Provider>> = Vec::with_capacity(7);
+    let mut providers: Vec<Arc<dyn RoutePlanner>> = Vec::with_capacity(7);
 
     let openai = sdk.openai_provider_config();
     if openai.complete() {

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none" role="img" aria-label="AI-GateWay portal snail">
+  <defs>
+    <clipPath id="ip10-clip"><rect width="512" height="512" rx="114"/></clipPath>
+    <linearGradient id="ip10-bg" x1="18%" y1="0%" x2="84%" y2="100%">
+      <stop offset="0%" stop-color="#1C1C1C"/>
+      <stop offset="100%" stop-color="#0A0A0A"/>
+    </linearGradient>
+    <radialGradient id="ip10-skin" cx="40%" cy="30%" r="72%">
+      <stop offset="0%" stop-color="#FFFBF4"/>
+      <stop offset="58%" stop-color="#F0E0CE"/>
+      <stop offset="100%" stop-color="#D8C0A8"/>
+    </radialGradient>
+    <radialGradient id="ip10-shell" cx="38%" cy="28%" r="74%">
+      <stop offset="0%" stop-color="#14B887"/>
+      <stop offset="100%" stop-color="#0B8F68"/>
+    </radialGradient>
+    <filter id="ip10-blur" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="16"/>
+    </filter>
+  </defs>
+  <g clip-path="url(#ip10-clip)">
+    <rect width="512" height="512" fill="url(#ip10-bg)"/>
+    <ellipse cx="256" cy="504" rx="176" ry="38" fill="#000000" opacity="0.45" filter="url(#ip10-blur)"/>
+    <ellipse cx="168" cy="430" rx="150" ry="128" fill="url(#ip10-skin)"/>
+    <ellipse cx="332" cy="348" rx="142" ry="142" fill="url(#ip10-shell)"/>
+    <path d="M 404 400 A 92 92 0 1 1 404 272" stroke="#F7FFFB" stroke-width="26" stroke-linecap="round"/>
+    <path d="M 376 372 A 52 52 0 1 1 376 300" stroke="#F7FFFB" stroke-width="18" stroke-linecap="round"/>
+    <circle cx="392" cy="336" r="11" fill="#F7FFFB"/>
+    <ellipse cx="148" cy="360" rx="48" ry="22" fill="#FFFFFF" opacity="0.2"/>
+    <circle cx="128" cy="408" r="12.5" fill="#2A2118"/>
+    <circle cx="188" cy="400" r="12.5" fill="#2A2118"/>
+    <circle cx="132" cy="403" r="3.6" fill="#FFF8F0" opacity="0.85"/>
+    <circle cx="192" cy="395" r="3.6" fill="#FFF8F0" opacity="0.85"/>
+    <ellipse cx="108" cy="448" rx="16" ry="9" fill="#E8A090" opacity="0.4"/>
+    <path d="M148 436 C156 450 172 450 182 438" stroke="#2A2118" stroke-width="4.5" stroke-linecap="round"/>
+    <path d="M92 318 C86 268 104 228 118 248" stroke="url(#ip10-skin)" stroke-width="16" stroke-linecap="round"/>
+    <path d="M128 312 C126 262 150 224 164 246" stroke="url(#ip10-skin)" stroke-width="16" stroke-linecap="round"/>
+    <circle cx="118" cy="242" r="11" fill="url(#ip10-skin)"/>
+    <circle cx="164" cy="240" r="11" fill="url(#ip10-skin)"/>
+    <circle cx="118" cy="238" r="4.5" fill="#2A2118"/>
+    <circle cx="164" cy="236" r="4.5" fill="#2A2118"/>
+  </g>
+</svg>

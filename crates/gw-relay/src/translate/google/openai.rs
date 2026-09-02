@@ -584,11 +584,13 @@ fn usage_value(usage: &RelayUsage) -> Option<Value> {
 /// 且必须最后 —— 这两条都是跨帧的性质，无状态翻不出来。
 #[derive(Default)]
 struct OpenAiStream {
+    sse: wire::SseDecoder,
     id: Option<String>,
     created: i64,
     model: Option<String>,
     role_sent: bool,
     finished: bool,
+    done: bool,
     usage: RelayUsage,
 }
 
@@ -625,7 +627,7 @@ impl OpenAiStream {
 impl StreamTranslator for OpenAiStream {
     fn push(&mut self, upstream_frame: &[u8]) -> Result<Vec<Bytes>, TranslateError> {
         let mut frames = Vec::new();
-        for payload in wire::data_payloads(upstream_frame) {
+        for payload in self.sse.push(upstream_frame)? {
             if !wire::is_parseable(&payload) {
                 continue;
             }
@@ -715,7 +717,13 @@ impl StreamTranslator for OpenAiStream {
     }
 
     fn finish(&mut self) -> Result<Vec<Bytes>, TranslateError> {
-        let mut frames = Vec::new();
+        if self.done {
+            return Ok(Vec::new());
+        }
+        // A compliant SSE event ends with a blank line. Appending one at EOF
+        // also turns a truncated final JSON event into a visible parse error
+        // instead of synthesising a clean stop for an incomplete answer.
+        let mut frames = self.push(b"\n\n")?;
         if !self.finished {
             // 上游流结束却没给过 finishReason。OpenAI 客户端在等一个非 null 的
             // `finish_reason` 才会认为本轮结束，不补就是缺陷 #6 那种「干净的
@@ -728,6 +736,7 @@ impl StreamTranslator for OpenAiStream {
             );
             frames.push(wire::openai_frame(&Value::Object(chunk))?);
         }
+        self.done = true;
         frames.push(Bytes::from_static(b"data: [DONE]\n\n"));
         Ok(frames)
     }

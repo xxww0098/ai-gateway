@@ -88,9 +88,11 @@ fn target(base_url: &str, location: &str) -> VertexEndpoint {
 fn streaming_changes_only_the_action_verb() {
     let target = target("https://vx.example.com", "us-central1");
     let plain =
-        VertexProvider::generate_content_endpoint(&[], &target, "gemini-2.5-pro", false).unwrap();
+        VertexProvider::generate_content_endpoint(None, &[], &target, "gemini-2.5-pro", false)
+            .unwrap();
     let streamed =
-        VertexProvider::generate_content_endpoint(&[], &target, "gemini-2.5-pro", true).unwrap();
+        VertexProvider::generate_content_endpoint(None, &[], &target, "gemini-2.5-pro", true)
+            .unwrap();
     assert_ne!(plain.path(), streamed.path());
     assert_eq!(
         plain.path().rsplit_once(':').map(|(head, _)| head),
@@ -103,11 +105,17 @@ fn streaming_changes_only_the_action_verb() {
 #[test]
 fn the_provider_prefix_is_stripped_from_the_model() {
     let target = target("https://vx.example.com", "us-central1");
-    let prefixed =
-        VertexProvider::generate_content_endpoint(&[], &target, "vertex/gemini-2.5-pro", false)
-            .unwrap();
+    let prefixed = VertexProvider::generate_content_endpoint(
+        None,
+        &[],
+        &target,
+        "vertex/gemini-2.5-pro",
+        false,
+    )
+    .unwrap();
     let bare =
-        VertexProvider::generate_content_endpoint(&[], &target, "gemini-2.5-pro", false).unwrap();
+        VertexProvider::generate_content_endpoint(None, &[], &target, "gemini-2.5-pro", false)
+            .unwrap();
     assert_eq!(prefixed, bare);
 }
 
@@ -115,9 +123,10 @@ fn the_provider_prefix_is_stripped_from_the_model() {
 fn a_slash_in_the_model_name_cannot_add_a_path_segment() {
     let target = target("https://vx.example.com", "us-central1");
     let benign =
-        VertexProvider::generate_content_endpoint(&[], &target, "gemini-2.5-pro", false).unwrap();
+        VertexProvider::generate_content_endpoint(None, &[], &target, "gemini-2.5-pro", false)
+            .unwrap();
     let hostile =
-        VertexProvider::generate_content_endpoint(&[], &target, "a/b/c/evil", false).unwrap();
+        VertexProvider::generate_content_endpoint(None, &[], &target, "a/b/c/evil", false).unwrap();
     assert_eq!(
         benign.path_segments().map(Iterator::count),
         hostile.path_segments().map(Iterator::count),
@@ -128,12 +137,22 @@ fn a_slash_in_the_model_name_cannot_add_a_path_segment() {
 /// location, or the request lands in the wrong region.
 #[test]
 fn an_absent_base_url_is_derived_from_the_location() {
-    let west =
-        VertexProvider::generate_content_endpoint(&[], &target("", "europe-west4"), "m", false)
-            .unwrap();
-    let central =
-        VertexProvider::generate_content_endpoint(&[], &target("", "us-central1"), "m", false)
-            .unwrap();
+    let west = VertexProvider::generate_content_endpoint(
+        None,
+        &[],
+        &target("", "europe-west4"),
+        "m",
+        false,
+    )
+    .unwrap();
+    let central = VertexProvider::generate_content_endpoint(
+        None,
+        &[],
+        &target("", "us-central1"),
+        "m",
+        false,
+    )
+    .unwrap();
     assert_ne!(west.host_str(), central.host_str());
     assert!(west.host_str().unwrap().starts_with("europe-west4"));
 }
@@ -141,6 +160,7 @@ fn an_absent_base_url_is_derived_from_the_location() {
 #[test]
 fn caller_query_parameters_reach_the_endpoint() {
     let url = VertexProvider::generate_content_endpoint(
+        None,
         &[("trace".to_owned(), "1".to_owned())],
         &target("https://vx.example.com", "us-central1"),
         "m",

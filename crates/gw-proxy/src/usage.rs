@@ -112,7 +112,7 @@ pub struct SettlementInputs {
     /// `ActiveHoldAmount`: `None` means the lookup itself failed.
     pub active_hold: Option<f64>,
     /// 冻结报价上的 `estimate(stream = true)`。
-    pub streaming_estimate: f64,
+    pub fallback_estimate: f64,
 }
 
 /// 上游 provider 名 → usage 信封的语义族。
@@ -162,7 +162,7 @@ pub fn plan_settlement(inputs: &SettlementInputs) -> SettlementPlan {
     match inputs.active_hold {
         None => SettlementPlan::HoldLookupFailed,
         Some(held) => SettlementPlan::Settle {
-            cost: held.max(inputs.streaming_estimate),
+            cost: held.max(inputs.fallback_estimate),
             fallback: Some(REASON_MISSING_USAGE),
         },
     }
@@ -319,7 +319,7 @@ impl Settlement {
             strict_mode: self.strict_usage_metadata(),
             active_hold,
             // 兜底估算也来自**冻结的报价**，不是上游那个模型名的现价。
-            streaming_estimate: ctx.quote.estimate(true),
+            fallback_estimate: ctx.quote.estimate(ctx.stream),
         });
 
         match plan {

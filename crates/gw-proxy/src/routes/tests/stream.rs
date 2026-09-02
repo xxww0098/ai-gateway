@@ -1,5 +1,7 @@
 //! Streaming relay: framing, settle-on-end, settle-on-drop, usage fallback.
 
+use axum::body::Bytes;
+
 use super::*;
 
 /// 逐跳头留在这一跳 —— 包括这条响应自己 `Connection` **点名**的那些。
@@ -299,4 +301,61 @@ async fn a_stream_that_runs_to_completion_settles_exactly_once() {
         0,
         "a finished settlement must not leave a second task behind",
     );
+}
+
+/// Production wiring must feed arbitrary HTTP chunks into the incremental SSE
+/// decoder. Splitting one Google JSON object in the middle must neither lose
+/// visible text nor force fallback billing.
+#[tokio::test]
+async fn a_translated_google_stream_survives_transport_fragmentation_and_bills_once() {
+    let resolver: std::sync::Arc<dyn gw_relay::endpoint::upstream::ChannelResolver> =
+        std::sync::Arc::new(
+            gw_relay::endpoint::upstream::InMemoryChannelResolver::new()
+                .with_model("house-model", ["house"])
+                .with_channel("house", gw_relay::endpoint::matrix::Provider::Gemini),
+        );
+    let harness = Harness::build_routed(vec![auth_record("acct-google", "gemini")], Some(resolver));
+
+    let wire = concat!(
+        r#"data: {"responseId":"google-stream-1","modelVersion":"gemini-test","#,
+        r#""candidates":[{"content":{"parts":[{"text":"hello"}]},"finishReason":"STOP"}],"#,
+        r#""usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":4}}"#,
+        "\n\n"
+    )
+    .as_bytes();
+    let hello = wire
+        .windows(b"hello".len())
+        .position(|window| window == b"hello")
+        .expect("fixture contains text");
+    let cut = hello + 2;
+
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("text/event-stream"),
+    );
+    harness.transport.queue(Ok(CannedResponse {
+        status: 200,
+        headers,
+        frames: vec![
+            Bytes::copy_from_slice(&wire[..cut]),
+            Bytes::copy_from_slice(&wire[cut..]),
+        ],
+    }));
+
+    let (status, content_type, body) = collect_stream(&harness, stream_body("house-model")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(content_type.contains("event-stream"));
+    assert!(
+        body.contains("hello"),
+        "translated output lost text: {body}"
+    );
+    assert!(body.ends_with("data: [DONE]\n\n"));
+
+    harness.wait_idle().await;
+    let logs = harness.usage_store.logs.lock();
+    assert_eq!(logs.len(), 1, "translated stream must settle exactly once");
+    assert_eq!(logs[0].input_tokens, 9);
+    assert_eq!(logs[0].output_tokens, 4);
+    assert!(!logs[0].failed);
 }

@@ -26,7 +26,7 @@ fn provider(base_url: &str, api_key: &str) -> GeminiProvider {
 }
 
 fn endpoint(query: &[(String, String)], model: &str, stream: bool) -> Url {
-    GeminiProvider::generate_content_endpoint(query, "https://gl.example.com", model, stream)
+    GeminiProvider::generate_content_endpoint(None, query, "https://gl.example.com", model, stream)
         .expect("endpoint")
 }
 
@@ -98,9 +98,11 @@ fn a_slash_in_the_model_name_cannot_add_a_path_segment() {
 
 #[test]
 fn a_base_url_without_a_host_is_rejected() {
-    assert!(GeminiProvider::generate_content_endpoint(&[], "gl.example.com", "m", false).is_err());
     assert!(
-        GeminiProvider::generate_content_endpoint(&[], "https://", "m", false).is_err(),
+        GeminiProvider::generate_content_endpoint(None, &[], "gl.example.com", "m", false).is_err()
+    );
+    assert!(
+        GeminiProvider::generate_content_endpoint(None, &[], "https://", "m", false).is_err(),
         "a hostless URL must not re-parse with a path segment as the host"
     );
     assert!(

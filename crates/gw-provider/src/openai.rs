@@ -3,8 +3,8 @@
 //! OWNER: worker `provider-openai`.
 
 use crate::common::{
-    PROVIDER_OPENAI, ProviderConfig, Redacted, chat_completions_endpoint, ensure_include_usage,
-    nested_string, relay_timeouts, request_surface, resolve_timeout, responses_endpoint,
+    PROVIDER_OPENAI, ProviderConfig, Redacted, chat_completions_endpoint_for, ensure_include_usage,
+    nested_string, relay_timeouts, request_surface, resolve_timeout, responses_endpoint_for,
     string_from_map, upstream_dialect,
 };
 use crate::route::{RoutePlan, RoutePlanner};
@@ -113,9 +113,9 @@ impl OpenAiCompatibleProvider {
         // chat/completions 端点，上游必 400。
         let surface = request_surface(req);
         let endpoint = match surface {
-            Surface::OpenAiResponses => responses_endpoint(base_url, &req.query)?,
+            Surface::OpenAiResponses => responses_endpoint_for(base_url, req)?,
             Surface::OpenAiCompletions | Surface::AnthropicMessages => {
-                chat_completions_endpoint(base_url, &req.query)?
+                chat_completions_endpoint_for(base_url, req)?
             }
         };
         let endpoint = url::Url::parse(&endpoint).map_err(|err| {

@@ -16,7 +16,8 @@ use axum::response::{IntoResponse as _, Response};
 use gw_provider::types::ProviderRequest;
 use gw_relay::Surface;
 
-use super::stream::{Relayed, relay_response, usage_probe};
+use super::stream::{Relayed, relay_response};
+use super::translation::usage_probe;
 use super::{Inbound, inbound, map_error, request_metadata, select_upstreams, transport_error};
 use crate::ProxyState;
 use crate::body::Outbound;
@@ -68,7 +69,8 @@ pub async fn count_tokens(State(state): State<ProxyState>, req: Request) -> Resp
             stream: false,
             metadata: request_metadata(Surface::AnthropicMessages, None, None),
             headers: headers.clone(),
-            query: query.clone(),
+            query: Vec::new(),
+            raw_query: Some(query.clone()),
         };
         let plan = match planner.plan_count_tokens(auth, &request).await {
             Ok(plan) => plan,
@@ -80,7 +82,11 @@ pub async fn count_tokens(State(state): State<ProxyState>, req: Request) -> Resp
             break;
         };
         let (probe, handle) = usage_probe(plan.dialect);
-        return match state.dispatch.send(&plan, &request, outgoing, probe).await {
+        return match state
+            .dispatch
+            .send(&plan, &request, outgoing, Some(probe))
+            .await
+        {
             Ok(response) => relay_response(
                 &state,
                 Relayed {

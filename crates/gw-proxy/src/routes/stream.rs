@@ -5,13 +5,12 @@
 //!
 //! # One response path
 //!
-//! There is no streaming/unary fork here any more. `gw_relay::RelayEngine`
-//! hands back frames for both, the client's body is those frames verbatim, and
-//! usage is read on a **side band** — `gw-relay`'s [`UsageProbe`] sees a
-//! read-only view of every frame and never sits in the write path. A 4xx from
-//! the upstream travels this same way, with its headers intact.
+//! Passthrough frames remain byte-for-byte identical. Translate cells wrap the
+//! same upstream body with one request-scoped state machine before this module
+//! sees it; that state machine also owns usage extraction. Both paths still
+//! share this single header-copy, disconnect and settlement implementation.
 //!
-//! # Settling
+//! //! # Settling
 //!
 //! [`StreamSettler`] carries the obligation. It settles when the body ends
 //! and, through `Drop`, when the client hangs up mid-stream — the case a plain
@@ -44,11 +43,11 @@ use axum::http::{StatusCode, header};
 use axum::response::Response;
 use futures_util::Stream;
 use gw_provider::types::UsageRecord;
-use gw_relay::probe::{SseUsageProbe, UsageHandle, UsageShape};
-use gw_relay::{RelayError, RelayResponse, RelayResponseBody, RelayUsage, UpstreamDialect};
+use gw_relay::{RelayError, RelayResponse, RelayResponseBody, RelayUsage};
 use http_body_util::BodyExt as _;
 use tokio_util::task::TaskTracker;
 
+use super::translation::UsageHandle;
 use crate::ProxyState;
 use crate::settlectx::{BillingHandle, SettleCtx};
 use crate::usage::{Settlement, UsageOutcome};
@@ -61,24 +60,6 @@ use crate::usage::{Settlement, UsageOutcome};
 /// 由那个 TTL **算出来**而不是抄一个数字，所以 TTL 改了这里跟着改；
 /// 但它不读配置 —— 它是这条回路的阻尼系数，不是运维旋钮。
 const LEASE_RENEW_PERIOD: Duration = Duration::from_secs(gw_ledger::DEFAULT_HOLD_TTL.as_secs() / 2);
-
-/// The side-band probe for one attempt, plus the handle its result lands in.
-///
-/// Built before the relay call because the engine takes ownership of the probe
-/// and guarantees exactly one `finish()` — including on a client hang-up.
-pub(super) fn usage_probe(dialect: UpstreamDialect) -> (Box<SseUsageProbe>, UsageHandle) {
-    let (probe, handle) = SseUsageProbe::new(usage_shape(dialect));
-    (Box::new(probe), handle)
-}
-
-/// Upstream wire protocol → the shape its usage envelope takes.
-fn usage_shape(dialect: UpstreamDialect) -> UsageShape {
-    match dialect {
-        UpstreamDialect::OpenAiChat | UpstreamDialect::OpenAiResponses => UsageShape::OpenAi,
-        UpstreamDialect::AnthropicMessages => UsageShape::Anthropic,
-        UpstreamDialect::GoogleGenerateContent => UsageShape::Google,
-    }
-}
 
 /// Everything one relayed attempt needs to become a client response.
 ///

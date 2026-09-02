@@ -178,14 +178,18 @@ fn the_prefix_only_chain_always_keeps_a_passthrough_escape_hatch() {
 }
 
 #[tokio::test]
-async fn a_cell_the_gateway_cannot_serve_is_a_gateway_400_not_an_upstream_one() {
-    // 收敛前这一格「直通 → 上游必 400」：OpenAI 形状的 body 被原样打到
-    // Google 的 generateContent 端点。转发过去只会拿一个上游错误，
-    // 而客户端从上游的错误里**读不出**「这是网关的路由问题、该改用哪个入口」。
+async fn an_openai_request_is_translated_to_google_and_back() {
     let harness = Harness::build_routed(
         vec![auth_record("acct-1", "gemini")],
         Some(gemini_only_resolver()),
     );
+    harness.transport.queue(Ok(CannedResponse {
+        status: 200,
+        headers: http::HeaderMap::new(),
+        frames: vec![Bytes::from_static(
+            br#"{"candidates":[{"content":{"parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":5}}"#,
+        )],
+    }));
 
     let (status, body) = send_settled(
         &harness,
@@ -193,47 +197,43 @@ async fn a_cell_the_gateway_cannot_serve_is_a_gateway_400_not_an_upstream_one() 
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        harness.gemini.call_count(),
-        0,
-        "拒绝要发生在出网之前，不该烧一次上游调用",
+        body["choices"][0]["message"]["content"].as_str(),
+        Some("hello")
     );
-    // 入口方言的错误信封：OpenAI 入口回 `{"error":{"message":...}}`。
-    // 客户端 SDK 只会解析它自己那套结构，回一个陌生结构会被渲染成无字的红叉。
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .is_some_and(|m| !m.is_empty()),
-        "错误信封不是 OpenAI 形状：{body}",
-    );
+    let request = harness.gemini.only_request();
+    let translated: serde_json::Value =
+        serde_json::from_slice(&request.payload).expect("translated Google JSON");
+    assert!(translated.get("contents").is_some());
+    assert!(translated.get("messages").is_none());
+
+    let logs = harness.usage_store.logs.lock();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].input_tokens, 12);
+    assert_eq!(logs[0].output_tokens, 5);
 }
 
 #[tokio::test]
-async fn a_rejected_cell_releases_the_reservation_instead_of_settling_it() {
-    // 400 **不计费**：走释放路径而不是结算。
+async fn a_translation_request_error_releases_the_reservation_before_outbound_io() {
     let harness = Harness::build_routed(
         vec![auth_record("acct-1", "gemini")],
         Some(gemini_only_resolver()),
     );
-    send_settled(
-        &harness,
-        signed_request("/v1/chat/completions", chat_body("house-model")),
-    )
-    .await;
+    let mut body = chat_body("house-model");
+    body["n"] = serde_json::json!(2);
 
-    assert!(
-        harness.usage_store.settled_costs().is_empty(),
-        "被网关拒掉的请求不该结算出任何金额",
-    );
+    let (status, _) = send_settled(&harness, signed_request("/v1/chat/completions", body)).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(harness.transport.call_count(), 0);
+    assert!(harness.usage_store.settled_costs().is_empty());
     assert!(
         harness
             .ledger
             .calls()
             .iter()
-            .any(|c| matches!(c, LedgerCall::Release { .. })),
-        "预扣必须被释放：{:?}",
-        harness.ledger.calls(),
+            .any(|call| matches!(call, LedgerCall::Release { .. }))
     );
 }
 
@@ -286,22 +286,40 @@ async fn the_credential_table_is_not_reloaded_once_per_request() {
     );
 }
 
+#[tokio::test]
+async fn raw_query_bytes_reach_the_planner_without_round_tripping() {
+    let harness = Harness::build();
+    harness.transport.queue(Ok(CannedResponse::ok(1, 1)));
+    let raw = "tag=a%20b&plus=a+b&pct=%25&empty=&flag&key=a&key=b";
+    let path = format!("/v1/chat/completions?{raw}");
+    let (status, _) = send_settled(&harness, signed_request(&path, chat_body("gpt-4o"))).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let request = harness.provider.only_request();
+    assert_eq!(request.raw_query.as_deref(), Some(raw));
+    assert!(request.query.is_empty());
+}
+
 #[test]
-fn query_pairs_keep_their_order_and_duplicates() {
-    // Both are significant upstream, which is why this is a Vec and not a map.
-    assert_eq!(
-        parse_query("alt=sse&key=a&key=b"),
-        vec![
-            ("alt".to_owned(), "sse".to_owned()),
-            ("key".to_owned(), "a".to_owned()),
-            ("key".to_owned(), "b".to_owned()),
-        ],
+fn retry_after_seconds_are_bounded_and_forwarded_to_health() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::RETRY_AFTER,
+        http::HeaderValue::from_static("17"),
     );
     assert_eq!(
-        parse_query("flag"),
-        vec![("flag".to_owned(), String::new())]
+        retry_after_hint(&headers),
+        Some(std::time::Duration::from_secs(17))
     );
-    assert!(parse_query("").is_empty());
+
+    headers.insert(
+        http::header::RETRY_AFTER,
+        http::HeaderValue::from_static("999999999"),
+    );
+    assert_eq!(
+        retry_after_hint(&headers),
+        Some(std::time::Duration::from_secs(24 * 60 * 60)),
+    );
 }
 
 #[test]
@@ -626,3 +644,53 @@ async fn the_six_converged_routes_are_gone_not_merely_unbilled() {
 }
 
 mod catalogue;
+
+/// When a translated provider returns a non-JSON infrastructure page, the
+/// gateway cannot change its dialect. It must preserve the useful status, bytes
+/// and content type rather than claiming the HTML body is JSON.
+#[tokio::test]
+async fn an_untranslatable_upstream_error_keeps_its_original_entity_headers() {
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _;
+
+    let harness = Harness::build_routed(
+        vec![auth_record("acct-1", "gemini")],
+        Some(gemini_only_resolver()),
+    );
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    let original = Bytes::from_static(b"<html><body>temporarily unavailable</body></html>");
+    harness.transport.queue(Ok(CannedResponse {
+        status: 503,
+        headers,
+        frames: vec![original.clone()],
+    }));
+
+    let response = harness
+        .router()
+        .oneshot(signed_request(
+            "/v1/chat/completions",
+            chat_body("house-model"),
+        ))
+        .await
+        .expect("router responds");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/html; charset=utf-8")
+    );
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    assert_eq!(body, original);
+}

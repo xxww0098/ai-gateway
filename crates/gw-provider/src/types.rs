@@ -29,12 +29,13 @@ pub struct ProviderRequest {
     /// second time, or the two lists drift.
     pub headers: http::HeaderMap,
 
-    /// Inbound query parameters, **appended** to the provider's endpoint. A
-    /// `Vec` of pairs rather than a map because order and duplicate keys are
-    /// both significant.
-    /// A provider may still `set` a key it owns afterwards — Gemini and Vertex
-    /// force `alt=sse` on streaming that way.
+    /// Legacy structured query used by internal fixtures.
     pub query: Vec<(String, String)>,
+
+    /// The inbound query exactly as it appeared after `?`, without decoding or
+    /// re-encoding. Production always sets this field; `None` lets old internal
+    /// fixtures keep constructing requests from [`Self::query`].
+    pub raw_query: Option<String>,
 }
 
 /// Token accounting extracted from an upstream response. `None` fields mean the

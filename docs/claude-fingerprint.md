@@ -1,6 +1,8 @@
 # Claude Code fingerprint（OAuth / 订阅）
 
-Claude Code 的 access token **只授权给 Claude Code 客户端**。网关用这类 token 打 `/v1/messages` 时，请求必须走 `gw-provider` 的 `claude::fingerprint` cloak，不能只换 Bearer。
+Claude Code 的 access token **只授权给 Claude Code 客户端**。网关用这类 token 打 Anthropic（`/v1/messages`、`/v1/models`、count_tokens）时，请求必须先走 `gw-provider` 的 `claude::fingerprint` cloak，不能只换 Bearer。
+
+参考插件 [dsh-plugin-oauth-subs](https://github.com/xxww0098/dsh-plugin-oauth-subs) **没有** Claude / Anthropic agent（只有 Codex / Grok / GLM / Kiro / …）。它跑在 Node 里，TLS 就是 Node/OpenSSL，没有单独的 JA3 伪装层。本仓库的对应物是：OAuth 路径强制走 cloak；`gw-relay` 仍是 rustls。
 
 Console API key **不走**这套伪装。
 

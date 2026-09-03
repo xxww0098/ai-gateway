@@ -424,6 +424,61 @@ fn beta_features_follow_the_credential_source() {
     assert!(!key.headers.contains_key(http::header::USER_AGENT));
 }
 
+/// An OAuth Messages plan with a user turn must carry the billing block
+/// before any bytes leave `gw-relay`. API-key plans must not.
+#[test]
+fn oauth_messages_plans_are_cloaked_before_they_can_be_sent() {
+    let provider = provider("https://api.anthropic.com", "sk-config");
+    let payload = serde_json::json!({
+        "system": "stable prefix",
+        "messages": [{"role": "user", "content": "hey"}]
+    })
+    .to_string();
+    let oauth = provider
+        .plan_messages(
+            &ProviderRequest {
+                payload: bytes::Bytes::from(payload.clone()),
+                ..Default::default()
+            },
+            &ClaudeCredential {
+                value: "oat".to_owned(),
+                source: CredentialSource::OauthToken,
+            },
+            "https://api.anthropic.com",
+        )
+        .expect("plans");
+    let body = oauth.body.expect("OAuth cloak rewrites the body");
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let first = value["system"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        first.starts_with("x-anthropic-billing-header:"),
+        "OAuth Messages body skipped the fingerprint cloak: {first}"
+    );
+    assert!(value["system"][0].get("cache_control").is_none());
+
+    let key = provider
+        .plan_messages(
+            &ProviderRequest {
+                payload: bytes::Bytes::from(payload),
+                ..Default::default()
+            },
+            &ClaudeCredential {
+                value: "sk".to_owned(),
+                source: CredentialSource::ApiKey,
+            },
+            "https://api.anthropic.com",
+        )
+        .expect("plans");
+    if let Some(body) = key.body {
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let first = value["system"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            !first.starts_with("x-anthropic-billing-header:"),
+            "console keys must not wear the Claude Code billing cloak"
+        );
+    }
+}
+
 #[test]
 fn a_caller_supplied_beta_list_is_left_alone() {
     let provider = provider("https://api.anthropic.com", "sk-config");

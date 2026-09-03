@@ -7,6 +7,11 @@ use crate::types::ProviderRequest;
 /// Published NTT123 gist vector. The salt and truncation widths live in
 /// the implementation; this only checks the publicly documented output.
 #[test]
+fn probe_headers_are_a_complete_oauth_fingerprint() {
+    assert_oauth_http_fingerprint(&probe_headers());
+}
+
+#[test]
 fn published_hey_vector_matches_community_capture() {
     let header = billing_header("hey", "2.1.37");
     assert!(header.contains("cc_version=2.1.37.0d9"), "{header}");
@@ -73,6 +78,16 @@ fn oauth_cloak_puts_billing_first_without_cache_control() {
     );
     assert!(headers.contains_key("x-stainless-runtime"));
     assert!(!headers.contains_key("x-stainless-helper-method"));
+    let pairs: Vec<(String, String)> = headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|v| (name.as_str().to_owned(), v.to_owned()))
+        })
+        .collect();
+    assert_oauth_http_fingerprint(&pairs);
 }
 
 #[test]

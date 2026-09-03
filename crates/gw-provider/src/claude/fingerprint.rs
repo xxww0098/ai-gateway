@@ -48,6 +48,9 @@ pub(super) fn cloak(req: &ProviderRequest, headers: &mut HeaderMap) -> Option<By
 }
 
 /// Headers for identity probes (GET `/v1/models`). Not a Messages body.
+///
+/// Call [`assert_oauth_http_fingerprint`] on this map **before** any
+/// Anthropic HTTP — a probe that skips the cloak is a ban-shaped request.
 #[cfg(test)]
 #[must_use]
 pub(crate) fn probe_headers() -> Vec<(String, String)> {
@@ -62,6 +65,45 @@ pub(crate) fn probe_headers() -> Vec<(String, String)> {
                 .map(|v| (name.as_str().to_owned(), v.to_owned()))
         })
         .collect()
+}
+
+/// Fail before a Claude OAuth HTTP goes out without the cloak.
+#[cfg(test)]
+pub(crate) fn assert_oauth_http_fingerprint(headers: &[(impl AsRef<str>, impl AsRef<str>)]) {
+    let get = |name: &str| -> Option<&str> {
+        headers.iter().find_map(|(key, value)| {
+            key.as_ref()
+                .eq_ignore_ascii_case(name)
+                .then_some(value.as_ref())
+        })
+    };
+    let ua = get("user-agent").unwrap_or("");
+    assert!(
+        ua.starts_with("claude-cli/") && ua.contains("external, cli"),
+        "Claude OAuth HTTP is missing the CLI User-Agent: {ua}"
+    );
+    assert_eq!(
+        get("x-app"),
+        Some("cli"),
+        "Claude OAuth HTTP is missing x-app=cli"
+    );
+    assert!(
+        get("x-stainless-runtime").is_some_and(|v| v.eq_ignore_ascii_case("node")),
+        "Claude OAuth HTTP must claim the Node stainless runtime"
+    );
+    assert!(
+        get("anthropic-version").is_some(),
+        "Claude OAuth HTTP is missing anthropic-version"
+    );
+    let beta = get("anthropic-beta").unwrap_or("");
+    assert!(
+        beta.contains("oauth"),
+        "Claude OAuth HTTP is missing the oauth beta: {beta}"
+    );
+    assert!(
+        get("x-stainless-helper-method").is_none(),
+        "real Claude Code does not send X-Stainless-Helper-Method"
+    );
 }
 
 /// Version string used on the wire (`2.1.233`, no `v` prefix).
@@ -143,6 +185,18 @@ fn strip_v_prefix(raw: &str) -> String {
 }
 
 fn fill_headers(headers: &mut HeaderMap, inbound: &HeaderMap, version: &str) {
+    insert_gap(
+        headers,
+        inbound,
+        HeaderName::from_static("anthropic-version"),
+        "2023-06-01",
+    );
+    insert_gap(
+        headers,
+        inbound,
+        HeaderName::from_static("anthropic-beta"),
+        "oauth-2025-04-20,prompt-caching-2024-07-31",
+    );
     insert_gap(
         headers,
         inbound,

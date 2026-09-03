@@ -292,12 +292,11 @@ async fn real_claude_models_lists_when_local_oauth_exists() {
     require_real_api();
     let cred = cred_or_panic("claude");
     let mut headers = crate::claude::fingerprint::probe_headers();
+    crate::claude::fingerprint::assert_oauth_http_fingerprint(&headers);
     headers.push((
         "authorization".to_owned(),
         format!("Bearer {}", cred.access_token),
     ));
-    headers.push(("anthropic-version".to_owned(), "2023-06-01".to_owned()));
-    headers.push(("anthropic-beta".to_owned(), "oauth-2025-04-20".to_owned()));
     let (status, body) = crate::oauth::get_text("https://api.anthropic.com/v1/models", &headers)
         .await
         .unwrap_or_else(|err| panic!("claude models request failed: {err}"));

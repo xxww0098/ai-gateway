@@ -23,6 +23,8 @@ REAL_API=1 cargo test -p gw-provider --lib -- --ignored --nocapture real_
 | `real_codex_models_lists_when_local_oauth_exists` | `GET https://api.openai.com/v1/models` | Codex CLI `~/.codex/auth.json` |
 | `real_claude_models_lists_when_local_oauth_exists` | `GET https://api.anthropic.com/v1/models`（带 fingerprint 头） | Claude Code `~/.claude/.credentials.json` |
 
+Claude 这条在 `get_text` **之前**会跑 `assert_oauth_http_fingerprint`（UA / `x-app` / Stainless / oauth beta）。缺 cloak 头直接 panic，不会出网。
+
 **没有** `POST /v1/messages` 真实测试：`gw-relay` 仍是 rustls，和 Claude Code 的 Chrome/Node ClientHello 对不齐，半套伪装会烧订阅号。见 `docs/claude-fingerprint.md`。
 
 可选：`export AGW_CLAUDE_CODE_VERSION=2.1.233`（或本机 `claude --version`）后再跑，User-Agent 才和安装钉在一起。

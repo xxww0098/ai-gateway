@@ -12,6 +12,36 @@ fn probe_headers_are_a_complete_oauth_fingerprint() {
 }
 
 #[test]
+fn oauth_send_is_refused_while_tls_is_rustls() {
+    assert!(!chrome_tls_ready());
+    assert_eq!(tls_profile(), TlsProfile::RustlsUnverified);
+    let err = refuse_unverified_send().expect_err("must stay closed");
+    let dump = err.to_string();
+    assert!(dump.contains("rustls"), "{dump}");
+}
+
+#[test]
+fn a_well_formed_capture_matches_cloak_invariants() {
+    let dump = serde_json::json!({
+        "user_agent": "claude-cli/2.1.233 (external, cli)",
+        "system0": "x-anthropic-billing-header: cc_version=2.1.233.abc; cc_entrypoint=cli; cch=abcde;",
+        "headers": { "x-app": "cli" }
+    })
+    .to_string();
+    compare_capture(dump.as_bytes()).expect("shape");
+}
+
+#[test]
+fn a_capture_without_billing_is_rejected() {
+    let dump = serde_json::json!({
+        "user_agent": "claude-cli/2.1.233 (external, cli)",
+        "system0": "You are a helpful assistant"
+    })
+    .to_string();
+    assert!(compare_capture(dump.as_bytes()).is_err());
+}
+
+#[test]
 fn published_hey_vector_matches_community_capture() {
     let header = billing_header("hey", "2.1.37");
     assert!(header.contains("cc_version=2.1.37.0d9"), "{header}");

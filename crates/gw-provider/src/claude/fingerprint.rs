@@ -6,17 +6,21 @@
 //! only — a real `claude` client already sent the right shape, and rewriting
 //! its billing block would invalidate `cch`.
 //!
-//! # What this module does not do
+//! # Fail closed
 //!
-//! * **TLS / JA3.** `gw-relay` speaks rustls. Chrome-like ClientHello needs a
-//!   different HTTP stack (uTLS). That is documented, not faked. See
+//! Headers that claim `X-Stainless-Runtime: node` over rustls are a
+//! ban-shaped mismatch. `gw-relay` has no Chrome ClientHello. Until it does,
+//! [`refuse_unverified_send`] is the only legal outcome for OAuth inference.
+//! The cloak stays so a capture can be compared, and so the gate can open
+//! in one place when a verified TLS profile exists.
+//!
+//! * **TLS / JA3.** rustls ≠ Chrome / Node. Not faked. See
 //!   `docs/claude-fingerprint.md`.
-//! * **Bun xxHash64 `cch`.** Current Claude Code signs the serialized body
-//!   with a native hash after a `cch=00000` placeholder. This crate uses the
-//!   published JS-side SHA-256 construction (NTT123 gist vectors) until a
-//!   live capture on the operator's box says otherwise. Do not invent a
-//!   second algorithm without that capture.
+//! * **Bun xxHash64 `cch`.** Unpublished here until a live `claude` capture
+//!   on the operator's box disagrees with the JS SHA-256 vectors.
 
+#[cfg(test)]
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use bytes::Bytes;
@@ -39,6 +43,57 @@ const BILLING_SALT: &str = "59cf53e54c78";
 
 const BILLING_PREFIX: &str = "x-anthropic-billing-header:";
 const CC_IDENTIFIER: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+#[cfg(test)]
+const CAPTURE_ENV: &str = "AGW_CLAUDE_CAPTURE";
+
+/// Why Claude OAuth Messages / count_tokens / models probes must not leave
+/// this process. Token refresh is identity traffic and is not this gate.
+pub(crate) const UNVERIFIED_SEND: &str = "Claude OAuth inference is refused: \
+    gw-relay speaks rustls, not a Chrome/Node ClientHello. Claiming \
+    X-Stainless-Runtime: node on rustls is a ban-shaped mismatch. Import and \
+    refresh stay available; Messages stay closed until a Chrome uTLS \
+    transport exists. See docs/claude-fingerprint.md";
+
+/// TLS profile this process can actually present. `Chrome` is not wired —
+/// flipping this without a Chrome ClientHello in `gw-relay` is forbidden.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TlsProfile {
+    RustlsUnverified,
+}
+
+#[must_use]
+pub(crate) fn tls_profile() -> TlsProfile {
+    TlsProfile::RustlsUnverified
+}
+
+#[must_use]
+pub(crate) fn chrome_tls_ready() -> bool {
+    // There is no Chrome ClientHello in gw-relay. Do not add a Chrome
+    // variant and return true without a ClientHello in the relay.
+    !matches!(tls_profile(), TlsProfile::RustlsUnverified)
+}
+
+/// `Err` until [`chrome_tls_ready`] is true.
+pub(crate) fn refuse_unverified_send() -> Result<(), crate::types::ProviderError> {
+    if chrome_tls_ready() {
+        return Ok(());
+    }
+    Err(crate::types::ProviderError::Credential(
+        UNVERIFIED_SEND.to_owned(),
+    ))
+}
+
+/// Optional capture dumped from a real `claude` process.
+#[cfg(test)]
+pub(crate) fn capture_path() -> Option<PathBuf> {
+    if let Ok(raw) = std::env::var(CAPTURE_ENV) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+    crate::local_oauth::process_home().map(|home| home.join(".claude/agw-capture.json"))
+}
 
 /// Fills Claude Code headers and, when the body is JSON, the billing system
 /// block. Returns `None` when the inbound bytes stay untouched.
@@ -449,6 +504,52 @@ fn json_contains_key(value: &Value, key: &str) -> bool {
         Value::Array(items) => items.iter().any(|child| json_contains_key(child, key)),
         _ => false,
     }
+}
+
+/// Compare a JSON dump from a real `claude` process to cloak invariants.
+///
+/// Expected shape (any extra keys ignored):
+/// `{ "user_agent": "claude-cli/…", "system0": "x-anthropic-billing-header: …",
+///    "headers": { … } }`
+#[cfg(test)]
+pub(crate) fn compare_capture(raw: &[u8]) -> Result<(), String> {
+    let value: Value =
+        serde_json::from_slice(raw).map_err(|err| format!("capture is not JSON: {err}"))?;
+    let ua = header_from_capture(&value, "user-agent")
+        .or_else(|| {
+            value
+                .get("user_agent")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
+    if !ua.starts_with("claude-cli/") || !ua.contains("external, cli") {
+        return Err(format!("capture User-Agent is not Claude Code CLI: {ua}"));
+    }
+    let system0 = value
+        .get("system0")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/body/system/0/text").and_then(Value::as_str))
+        .unwrap_or("");
+    if !system0.starts_with(BILLING_PREFIX) {
+        return Err(format!(
+            "capture system[0] is not the billing header: {system0}"
+        ));
+    }
+    if header_from_capture(&value, "x-stainless-helper-method").is_some() {
+        return Err("capture sent X-Stainless-Helper-Method; cloak must not".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn header_from_capture(value: &Value, name: &str) -> Option<String> {
+    let headers = value.get("headers")?.as_object()?;
+    headers.iter().find_map(|(key, val)| {
+        key.eq_ignore_ascii_case(name)
+            .then(|| val.as_str().map(str::to_owned))
+            .flatten()
+    })
 }
 
 #[cfg(test)]

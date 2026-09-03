@@ -344,9 +344,9 @@ fn a_caller_supplied_api_version_survives_but_a_missing_one_is_filled_in() {
 }
 
 #[test]
-fn oauth_tokens_travel_as_bearer_and_api_keys_as_x_api_key() {
+fn oauth_tokens_would_be_bearer_but_are_not_sent_over_rustls() {
     let provider = provider("https://api.anthropic.com", "sk-config");
-    let oauth = provider
+    let err = provider
         .plan_messages(
             &ProviderRequest::default(),
             &ClaudeCredential {
@@ -355,8 +355,12 @@ fn oauth_tokens_travel_as_bearer_and_api_keys_as_x_api_key() {
             },
             "https://api.anthropic.com",
         )
-        .expect("plans");
-    assert!(matches!(&oauth.credential, gw_relay::Credential::Bearer(k) if k == "oat"));
+        .expect_err("OAuth inference must fail closed without Chrome TLS");
+    let dump = err.to_string();
+    assert!(
+        dump.contains("rustls") && dump.contains("refused"),
+        "{dump}"
+    );
 
     let key = provider
         .plan_messages(
@@ -376,23 +380,7 @@ fn oauth_tokens_travel_as_bearer_and_api_keys_as_x_api_key() {
 #[test]
 fn beta_features_follow_the_credential_source() {
     let provider = provider("https://api.anthropic.com", "sk-config");
-    let oauth = provider
-        .plan_messages(
-            &ProviderRequest::default(),
-            &ClaudeCredential {
-                value: "oat".to_owned(),
-                source: CredentialSource::OauthToken,
-            },
-            "https://api.anthropic.com",
-        )
-        .expect("plans");
-    let oauth_beta = oauth
-        .headers
-        .get("anthropic-beta")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(oauth_beta.contains("oauth"), "{oauth_beta}");
-    assert!(oauth_beta.contains("prompt-caching"), "{oauth_beta}");
+    fingerprint::assert_oauth_http_fingerprint(&fingerprint::probe_headers());
 
     let key = provider
         .plan_messages(
@@ -411,50 +399,44 @@ fn beta_features_follow_the_credential_source() {
         .unwrap_or("");
     assert!(key_beta.contains("prompt-caching"), "{key_beta}");
     assert!(!key_beta.contains("oauth"), "{key_beta}");
-
-    let oauth_ua = oauth
-        .headers
-        .get(http::header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(
-        oauth_ua.starts_with("claude-cli/"),
-        "OAuth plans must go through the Claude Code cloak: {oauth_ua}"
-    );
     assert!(!key.headers.contains_key(http::header::USER_AGENT));
 }
 
-/// An OAuth Messages plan with a user turn must carry the billing block
-/// before any bytes leave `gw-relay`. API-key plans must not.
+/// Cloak still builds a CC-shaped body; the planner must not hand that
+/// body to `gw-relay` while TLS is rustls.
 #[test]
-fn oauth_messages_plans_are_cloaked_before_they_can_be_sent() {
+fn oauth_messages_are_cloaked_and_then_refused() {
     let provider = provider("https://api.anthropic.com", "sk-config");
     let payload = serde_json::json!({
         "system": "stable prefix",
         "messages": [{"role": "user", "content": "hey"}]
     })
     .to_string();
-    let oauth = provider
+    let req = ProviderRequest {
+        payload: bytes::Bytes::from(payload.clone()),
+        ..Default::default()
+    };
+    let mut headers = HeaderMap::new();
+    let cloaked = fingerprint::cloak(&req, &mut headers).expect("cloak");
+    let value: serde_json::Value = serde_json::from_slice(&cloaked).expect("json");
+    let first = value["system"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        first.starts_with("x-anthropic-billing-header:"),
+        "cloak skipped the billing block: {first}"
+    );
+    assert!(value["system"][0].get("cache_control").is_none());
+
+    let err = provider
         .plan_messages(
-            &ProviderRequest {
-                payload: bytes::Bytes::from(payload.clone()),
-                ..Default::default()
-            },
+            &req,
             &ClaudeCredential {
                 value: "oat".to_owned(),
                 source: CredentialSource::OauthToken,
             },
             "https://api.anthropic.com",
         )
-        .expect("plans");
-    let body = oauth.body.expect("OAuth cloak rewrites the body");
-    let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
-    let first = value["system"][0]["text"].as_str().unwrap_or("");
-    assert!(
-        first.starts_with("x-anthropic-billing-header:"),
-        "OAuth Messages body skipped the fingerprint cloak: {first}"
-    );
-    assert!(value["system"][0].get("cache_control").is_none());
+        .expect_err("must not send the cloaked body over rustls");
+    assert!(err.to_string().contains("refused"), "{err}");
 
     let key = provider
         .plan_messages(

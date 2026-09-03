@@ -320,6 +320,9 @@ impl ClaudeProvider {
                 "claude credential is required".to_owned(),
             ));
         }
+        if credential.source == CredentialSource::OauthToken {
+            fingerprint::refuse_unverified_send()?;
+        }
         let (headers, body) = Self::planned_wire(req, req.stream, credential.source);
         Ok(RoutePlan {
             provider: PROVIDER_CLAUDE,
@@ -513,6 +516,9 @@ impl RoutePlanner for ClaudeProvider {
             return Err(ProviderError::Credential(
                 "claude credential is required".to_owned(),
             ));
+        }
+        if credential.source == CredentialSource::OauthToken {
+            fingerprint::refuse_unverified_send()?;
         }
         let (headers, body) = Self::planned_wire(req, false, credential.source);
         Ok(RoutePlan {

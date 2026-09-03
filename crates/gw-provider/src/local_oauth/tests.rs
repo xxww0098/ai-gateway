@@ -288,25 +288,37 @@ async fn real_codex_models_lists_when_local_oauth_exists() {
 
 #[tokio::test]
 #[ignore = "REAL_API=1 plus ~/.claude/.credentials.json"]
-async fn real_claude_models_lists_when_local_oauth_exists() {
+async fn real_claude_oauth_stays_fail_closed_without_chrome_tls() {
     require_real_api();
     let cred = cred_or_panic("claude");
-    let mut headers = crate::claude::fingerprint::probe_headers();
-    crate::claude::fingerprint::assert_oauth_http_fingerprint(&headers);
-    headers.push((
-        "authorization".to_owned(),
-        format!("Bearer {}", cred.access_token),
-    ));
-    let (status, body) = crate::oauth::get_text("https://api.anthropic.com/v1/models", &headers)
-        .await
-        .unwrap_or_else(|err| panic!("claude models request failed: {err}"));
-    assert!(
-        (200..300).contains(&status),
-        "claude GET /v1/models returned {status}: {body}. \
-         If 401, run `claude` to refresh ~/.claude/.credentials.json."
+    crate::claude::fingerprint::assert_oauth_http_fingerprint(
+        &crate::claude::fingerprint::probe_headers(),
     );
     assert!(
-        body.contains("\"data\"") || body.contains("\"id\""),
-        "claude models response had no catalog: {body}"
+        !crate::claude::fingerprint::chrome_tls_ready(),
+        "Chrome TLS flipped on without a ClientHello"
     );
+    let err = crate::claude::fingerprint::refuse_unverified_send()
+        .expect_err("must not call Anthropic over rustls");
+    assert!(
+        err.to_string().contains("refused"),
+        "OAuth send gate opened: {err}"
+    );
+    let _ = cred.access_token.len();
+    if let Some(path) = crate::claude::fingerprint::capture_path()
+        && path.is_file()
+    {
+        let raw = std::fs::read(&path).unwrap_or_else(|err| {
+            panic!(
+                "reading {}: {err}. See docs/claude-fingerprint.md",
+                path.display()
+            )
+        });
+        crate::claude::fingerprint::compare_capture(&raw).unwrap_or_else(|err| {
+            panic!(
+                "capture {} does not match cloak invariants: {err}",
+                path.display()
+            )
+        });
+    }
 }

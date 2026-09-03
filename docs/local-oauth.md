@@ -56,6 +56,7 @@
 - Claude：缺省补 `anthropic-beta`（OAuth 带 `oauth-…` + `prompt-caching-…`；API key 只带 prompt-caching）。客户端已发该头则不覆盖。
 - Claude：请求体没有 `cache_control` 时，给最后一个 system 块和最后一个 tool 打 `ephemeral` 断点。已有断点则整份 body 不改写。
 - Claude OAuth 凭证改为 `Authorization: Bearer`（不再误放 `x-api-key`）。
+- Claude OAuth 的 Messages / count_tokens **必须**走 `claude::fingerprint`（头 + billing system[0]）。细则与 TLS 不做清单：`docs/claude-fingerprint.md`。
 - 渠道亲和：`(user, model)` 的 model 与价目表同一套 `normalize_model_key`，避免 `GPT-4o` / `gpt-4o` 拆成两个粘性槽、换账号打爆前缀缓存。
 
 预期：同一租户、同一模型、稳定 system/tools 前缀的多轮对话，Anthropic 侧应能看到 `cache_read_input_tokens`；大小写不同的模型名不再换号。没有真实流量基线，不报百分比。

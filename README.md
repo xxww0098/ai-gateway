@@ -94,7 +94,7 @@ make lint          # clippy --all-targets -- -D warnings
 cd frontend && npm test       # 前端 vitest
 ```
 
-本机 CLI OAuth（Codex / Claude Code 等）导入与和 dsh-plugin-oauth-subs 的差距：[`docs/local-oauth.md`](docs/local-oauth.md)。
+本机 CLI OAuth（Codex / Claude Code 等）导入与和 dsh-plugin-oauth-subs 的差距：[`docs/local-oauth.md`](docs/local-oauth.md)。Claude OAuth 请求必须走 fingerprint cloak：[`docs/claude-fingerprint.md`](docs/claude-fingerprint.md)。
 
 ```bash
 make build         # cargo build --release → ./ai-gateway

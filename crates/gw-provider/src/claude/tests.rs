@@ -411,6 +411,17 @@ fn beta_features_follow_the_credential_source() {
         .unwrap_or("");
     assert!(key_beta.contains("prompt-caching"), "{key_beta}");
     assert!(!key_beta.contains("oauth"), "{key_beta}");
+
+    let oauth_ua = oauth
+        .headers
+        .get(http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        oauth_ua.starts_with("claude-cli/"),
+        "OAuth plans must go through the Claude Code cloak: {oauth_ua}"
+    );
+    assert!(!key.headers.contains_key(http::header::USER_AGENT));
 }
 
 #[test]

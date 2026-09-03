@@ -27,6 +27,8 @@ use gw_relay::{Credential, UpstreamDialect};
 
 use shared::{append_query, default_content_negotiation};
 
+pub(crate) mod fingerprint;
+
 const CLAUDE_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const CLAUDE_MESSAGES_PATH: &str = "/v1/messages";
 const CLAUDE_ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -318,15 +320,31 @@ impl ClaudeProvider {
                 "claude credential is required".to_owned(),
             ));
         }
+        let (headers, body) = Self::planned_wire(req, req.stream, credential.source);
         Ok(RoutePlan {
             provider: PROVIDER_CLAUDE,
             endpoint: Self::messages_endpoint(req.raw_query.as_deref(), &req.query, base_url)?,
             credential: planned_claude_credential(credential),
-            headers: Self::outbound_headers(req, req.stream, credential.source),
-            body: inject_prompt_cache_breakpoints(&req.payload),
+            headers,
+            body,
             timeouts: relay_timeouts(self.timeout),
             dialect: UpstreamDialect::AnthropicMessages,
         })
+    }
+
+    /// API keys keep prompt-cache breakpoints only. OAuth tokens go through
+    /// the Claude Code cloak — subscription credentials reject a bare body.
+    fn planned_wire(
+        req: &ProviderRequest,
+        stream: bool,
+        source: CredentialSource,
+    ) -> (HeaderMap, Option<Bytes>) {
+        let mut headers = Self::outbound_headers(req, stream, source);
+        let body = match source {
+            CredentialSource::OauthToken => fingerprint::cloak(req, &mut headers),
+            CredentialSource::ApiKey => inject_prompt_cache_breakpoints(&req.payload),
+        };
+        (headers, body)
     }
 
     async fn refresh_oauth_token(
@@ -496,12 +514,13 @@ impl RoutePlanner for ClaudeProvider {
                 "claude credential is required".to_owned(),
             ));
         }
+        let (headers, body) = Self::planned_wire(req, false, credential.source);
         Ok(RoutePlan {
             provider: PROVIDER_CLAUDE,
             endpoint: Self::count_tokens_endpoint(req.raw_query.as_deref(), &req.query, &base_url)?,
             credential: planned_claude_credential(&credential),
-            headers: Self::outbound_headers(req, false, credential.source),
-            body: inject_prompt_cache_breakpoints(&req.payload),
+            headers,
+            body,
             timeouts: relay_timeouts(self.timeout),
             dialect: UpstreamDialect::AnthropicMessages,
         })

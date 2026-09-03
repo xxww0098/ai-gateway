@@ -84,16 +84,20 @@ pub(crate) async fn post_form(
 /// GET for ignored real-API smokes. Not an inference path: no tenant payload,
 /// response never forwarded to a client.
 #[cfg(test)]
-pub(crate) async fn get_text(
+pub(crate) async fn get_text<N, V>(
     url: &str,
-    headers: &[(&str, &str)],
-) -> Result<(u16, String), ProviderError> {
+    headers: &[(N, V)],
+) -> Result<(u16, String), ProviderError>
+where
+    N: AsRef<str>,
+    V: AsRef<str>,
+{
     let mut request = shared_client()
         .get(url)
         .timeout(Duration::from_secs(30))
         .header(ACCEPT, "application/json");
     for (name, value) in headers {
-        request = request.header(*name, *value);
+        request = request.header(name.as_ref(), value.as_ref());
     }
     let response = request
         .send()

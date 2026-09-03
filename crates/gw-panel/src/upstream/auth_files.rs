@@ -283,6 +283,99 @@ pub async fn create(
     ok(json!({"message": "created", "created": created, "count": created.len()}))
 }
 
+/// `POST /auth-files/import-local` — read CLI OAuth files already on this host.
+///
+/// Scans well-known paths under `AGW_LOCAL_OAUTH_HOME` / `$HOME` (Codex,
+/// Claude Code, Grok, Kiro). Client-supplied filesystem paths are ignored so
+/// an admin request cannot read arbitrary files. A credential whose access or
+/// refresh token is already stored is skipped rather than duplicated.
+pub async fn import_local(State(state): State<PanelState>, _admin: AdminUser) -> Response {
+    let Some(home) = gw_provider::local_oauth::process_home() else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            ERR_BAD_REQUEST,
+            "cannot resolve a home directory to scan for CLI OAuth files",
+        );
+    };
+    let found = gw_provider::local_oauth::discover(&home);
+    let mut existing = match sorted_records(&state).await {
+        Ok(records) => records,
+        Err(error) => return list_failure(&error),
+    };
+    let now = Utc::now();
+    let mut imported: Vec<Value> = Vec::new();
+    let mut skipped: Vec<Value> = Vec::new();
+    for cred in found {
+        let source = cred.source.display().to_string();
+        if already_imported(&existing, &cred) {
+            skipped.push(json!({
+                "provider": cred.provider,
+                "source": source,
+                "reason": "already imported",
+            }));
+            continue;
+        }
+        let filename = format!("{}-local.json", cred.provider);
+        let body = cred.to_upload_json().to_string();
+        let mut record = match record_from_upload(&filename, body.as_bytes(), now) {
+            Ok(record) => record,
+            Err(message) => {
+                skipped.push(json!({
+                    "provider": cred.provider,
+                    "source": source,
+                    "reason": message,
+                }));
+                continue;
+            }
+        };
+        if let Some(name) = cred.source.file_name().and_then(|name| name.to_str()) {
+            record.label = name.to_owned();
+        }
+        if let Err(error) = state.auth_store.save(&record).await {
+            tracing::error!(%error, "failed to persist imported credential");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ERR_LIST_FAILED,
+                "failed to register imported auth file",
+            );
+        }
+        existing.push(record.clone());
+        imported.push(serialize_auth_file(&record, imported.len()));
+    }
+    ok(json!({
+        "imported": imported,
+        "skipped": skipped,
+        "count": imported.len(),
+    }))
+}
+
+/// True when this host already stores the same CLI credential.
+#[must_use]
+pub fn already_imported(
+    existing: &[AuthRecord],
+    cred: &gw_provider::local_oauth::LocalOauthCred,
+) -> bool {
+    existing.iter().any(|record| {
+        if !record.provider.eq_ignore_ascii_case(cred.provider) {
+            return false;
+        }
+        let refresh_hit = !cred.refresh_token.is_empty()
+            && metadata_token(record, "refresh_token") == Some(cred.refresh_token.as_str());
+        let access_hit = !cred.access_token.is_empty()
+            && metadata_token(record, "access_token") == Some(cred.access_token.as_str());
+        refresh_hit || access_hit
+    })
+}
+
+fn metadata_token<'a>(record: &'a AuthRecord, key: &str) -> Option<&'a str> {
+    record
+        .metadata
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 /// Parses one uploaded credential file. 对应 `sdkMgmtAuthFromUpload`。
 ///
 /// # Errors
@@ -298,10 +391,11 @@ pub fn record_from_upload(
     if body.len() > MAX_UPLOAD_BYTES {
         return Err("failed to read auth file");
     }
-    let payload: Map<String, Value> = serde_json::from_slice::<Value>(body)
+    let mut payload: Map<String, Value> = serde_json::from_slice::<Value>(body)
         .ok()
         .and_then(|value| value.as_object().cloned())
         .ok_or("invalid auth JSON")?;
+    gw_provider::local_oauth::lift_cli_shape(&mut payload);
 
     let provider = provider_from_auth_json(&payload)?;
     let mut record = AuthRecord::new(uuid::Uuid::new_v4().to_string(), provider, now);
@@ -417,6 +511,9 @@ pub fn provider_from_auth_json(payload: &Map<String, Value>) -> Result<String, &
     };
     if !provider.is_empty() {
         return Ok(provider);
+    }
+    if let Some(inferred) = gw_provider::local_oauth::infer_provider(payload) {
+        return Ok(inferred.to_owned());
     }
     if payload.contains_key("service_account") {
         return Ok("vertex".to_owned());

@@ -1,4 +1,5 @@
 import { currentWatch, startLogin } from './command.js'
+import { importLocalAndMaybeUpload } from './local-import.js'
 
 export interface HttpAuth {
   origin: string
@@ -95,6 +96,15 @@ export async function handleHttp(req: HttpRequest, res: HttpResponse, deps: Http
     if (method === 'POST' && path.endsWith('/logout')) {
       await deps.logout()
       res.end(JSON.stringify({ ok: true, loggedIn: false }))
+      return
+    }
+    if (method === 'POST' && path.endsWith('/import-local')) {
+      const current = deps.token()
+      const report = await importLocalAndMaybeUpload({
+        origin: current?.origin ?? storedOrigin(deps),
+        apiKey: current?.apiKey,
+      })
+      res.end(JSON.stringify(report))
       return
     }
     if (method === 'POST' && path.endsWith('/origin')) {

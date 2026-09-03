@@ -9,9 +9,11 @@
 
 use std::time::Duration;
 
+use bytes::Bytes;
 use gw_authcore::{AuthRecord, AuthStatus};
 use http::{HeaderMap, HeaderValue};
 use serde::Deserialize;
+use serde_json::{Value, json};
 use url::Url;
 
 use crate::common::{
@@ -271,11 +273,16 @@ impl ClaudeProvider {
 
     /// The provider-owned headers for an outbound Messages request.
     ///
-    /// `anthropic-version` only fills a gap, so a caller can still pin an older
-    /// API version. The credential is **not** here — it travels as
-    /// [`RoutePlan::credential`] and the relay is what strips the client's own
-    /// `x-api-key` and marks the replacement sensitive.
-    fn outbound_headers(req: &ProviderRequest, stream: bool) -> HeaderMap {
+    /// `anthropic-version` and `anthropic-beta` only fill gaps, so a caller can
+    /// still pin an older API version or their own beta list. The credential is
+    /// **not** here — it travels as [`RoutePlan::credential`] and the relay is
+    /// what strips the client's own `x-api-key` and marks the replacement
+    /// sensitive.
+    fn outbound_headers(
+        req: &ProviderRequest,
+        stream: bool,
+        source: CredentialSource,
+    ) -> HeaderMap {
         let mut headers = HeaderMap::new();
         default_content_negotiation(&mut headers, stream);
         // `default_content_negotiation` only fills gaps in the map it is given,
@@ -290,6 +297,11 @@ impl ClaudeProvider {
                 "anthropic-version",
                 HeaderValue::from_static(CLAUDE_ANTHROPIC_VERSION),
             );
+        }
+        if !req.headers.contains_key("anthropic-beta")
+            && let Ok(value) = HeaderValue::from_str(anthropic_beta_features(source))
+        {
+            headers.insert("anthropic-beta", value);
         }
         headers
     }
@@ -309,9 +321,9 @@ impl ClaudeProvider {
         Ok(RoutePlan {
             provider: PROVIDER_CLAUDE,
             endpoint: Self::messages_endpoint(req.raw_query.as_deref(), &req.query, base_url)?,
-            credential: Credential::XApiKey(credential.value.clone()),
-            headers: Self::outbound_headers(req, req.stream),
-            body: None,
+            credential: planned_claude_credential(credential),
+            headers: Self::outbound_headers(req, req.stream, credential.source),
+            body: inject_prompt_cache_breakpoints(&req.payload),
             timeouts: relay_timeouts(self.timeout),
             dialect: UpstreamDialect::AnthropicMessages,
         })
@@ -335,6 +347,91 @@ impl ClaudeProvider {
         serde_json::from_slice(&payload).map_err(|err| {
             ProviderError::Other(anyhow::anyhow!("parsing claude refresh response: {err}"))
         })
+    }
+}
+
+/// OAuth tokens go on `Authorization`; long-lived console keys stay on `x-api-key`.
+fn planned_claude_credential(credential: &ClaudeCredential) -> Credential {
+    match credential.source {
+        CredentialSource::OauthToken => Credential::Bearer(credential.value.clone()),
+        CredentialSource::ApiKey => Credential::XApiKey(credential.value.clone()),
+    }
+}
+
+/// Feature flags Anthropic requires for OAuth and for prompt-cache breakpoints.
+///
+/// Dates are part of Anthropic's header grammar; callers that already sent
+/// `anthropic-beta` keep their own list.
+fn anthropic_beta_features(source: CredentialSource) -> &'static str {
+    match source {
+        CredentialSource::OauthToken => "oauth-2025-04-20,prompt-caching-2024-07-31",
+        CredentialSource::ApiKey => "prompt-caching-2024-07-31",
+    }
+}
+
+/// Adds `cache_control: { type: "ephemeral" }` on the last system block and
+/// the last tool when the client did not already set a breakpoint.
+///
+/// Returns `None` when the body is left untouched so the relay can forward
+/// the inbound bytes by refcount.
+fn inject_prompt_cache_breakpoints(payload: &[u8]) -> Option<Bytes> {
+    if payload.is_empty() {
+        return None;
+    }
+    let mut value: Value = serde_json::from_slice(payload).ok()?;
+    if json_contains_key(&value, "cache_control") {
+        return None;
+    }
+    let object = value.as_object_mut()?;
+    let mut changed = false;
+    if let Some(system) = object.get_mut("system") {
+        changed |= mark_system_breakpoint(system);
+    }
+    if let Some(tools) = object.get_mut("tools") {
+        changed |= mark_last_object(tools);
+    }
+    if !changed {
+        return None;
+    }
+    serde_json::to_vec(&value).ok().map(Bytes::from)
+}
+
+fn mark_system_breakpoint(system: &mut Value) -> bool {
+    match system {
+        Value::String(text) => {
+            *system = json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": { "type": "ephemeral" }
+            }]);
+            true
+        }
+        Value::Array(_) => mark_last_object(system),
+        _ => false,
+    }
+}
+
+fn mark_last_object(value: &mut Value) -> bool {
+    let Value::Array(items) = value else {
+        return false;
+    };
+    let Some(last) = items.iter_mut().rev().find(|item| item.is_object()) else {
+        return false;
+    };
+    let Some(object) = last.as_object_mut() else {
+        return false;
+    };
+    object.insert("cache_control".to_owned(), json!({ "type": "ephemeral" }));
+    true
+}
+
+fn json_contains_key(value: &Value, key: &str) -> bool {
+    match value {
+        Value::Object(map) => {
+            map.contains_key(key) || map.values().any(|child| json_contains_key(child, key))
+        }
+        Value::Array(items) => items.iter().any(|child| json_contains_key(child, key)),
+        _ => false,
     }
 }
 
@@ -402,9 +499,9 @@ impl RoutePlanner for ClaudeProvider {
         Ok(RoutePlan {
             provider: PROVIDER_CLAUDE,
             endpoint: Self::count_tokens_endpoint(req.raw_query.as_deref(), &req.query, &base_url)?,
-            credential: Credential::XApiKey(credential.value.clone()),
-            headers: Self::outbound_headers(req, false),
-            body: None,
+            credential: planned_claude_credential(&credential),
+            headers: Self::outbound_headers(req, false, credential.source),
+            body: inject_prompt_cache_breakpoints(&req.payload),
             timeouts: relay_timeouts(self.timeout),
             dialect: UpstreamDialect::AnthropicMessages,
         })

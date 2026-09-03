@@ -342,6 +342,11 @@ fn a_sticky_account_is_preferred_while_it_stays_healthy() {
     pool.remember(7, "gpt-4o", "b");
     let preferred = pool.preferred(7, "gpt-4o");
     assert_eq!(preferred.as_deref(), Some("b"));
+    assert_eq!(
+        pool.preferred(7, "GPT-4o").as_deref(),
+        Some("b"),
+        "case variants must reuse the same sticky account"
+    );
     for _ in 0..8 {
         assert_eq!(
             pool.pick_sticky(&auths, preferred.as_deref(), &[])

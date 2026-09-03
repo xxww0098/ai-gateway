@@ -194,6 +194,11 @@ impl ChannelPolicyCache {
     }
 }
 
+/// Same key the pricing cache uses, so `GPT-4o` and `gpt-4o` stick to one account.
+fn affinity_model_key(model: &str) -> String {
+    gw_pricing::normalize_model_key(model)
+}
+
 /// Health- and policy-aware upstream account selection.
 ///
 /// Selection allocates only one candidate vector and never expands it by
@@ -300,7 +305,7 @@ impl ChannelPool {
         if user_id == 0 || model.is_empty() || auth_id.is_empty() {
             return;
         }
-        let key = (user_id, model.to_owned());
+        let key = (user_id, affinity_model_key(model));
         if self.affinity.len() >= MAX_AFFINITY_ENTRIES && !self.affinity.contains_key(&key) {
             // Affinity is only a latency hint. Dropping old hints is preferable
             // to letting attacker-controlled model cardinality become a leak.
@@ -316,7 +321,7 @@ impl ChannelPool {
             return None;
         }
         self.affinity
-            .get(&(user_id, model.to_owned()))
+            .get(&(user_id, affinity_model_key(model)))
             .map(|v| v.clone())
     }
 

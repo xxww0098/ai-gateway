@@ -118,6 +118,7 @@ export function AgwSection(props: Partial<AgwSectionInjected>): JSX.Element {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
   const [start, setStart] = useState<StartPayload>()
+  const [importText, setImportText] = useState<string>()
 
   const applyStatus = (payload: StatusPayload): void => {
     setLoggedIn(payload.loggedIn === true)
@@ -178,6 +179,26 @@ export function AgwSection(props: Partial<AgwSectionInjected>): JSX.Element {
     }
   }
 
+  const onImport = async (): Promise<void> => {
+    setBusy(true)
+    setError(undefined)
+    try {
+      const report = await api<{
+        found?: Array<{ provider?: string, source?: string, hasAccessToken?: boolean }>
+        uploaded?: { status?: number }
+        error?: string
+      }>('/agw-oauth/import-local', { method: 'POST' })
+      const lines = (report.found ?? []).map(row => `${row.provider ?? '?'} · ${row.source ?? ''}`)
+      if (report.uploaded?.status !== undefined) lines.push(`Upload HTTP ${report.uploaded.status}`)
+      if (report.error) lines.push(report.error)
+      setImportText(lines.join('\n') || t('importHint', 'No local CLI files found.'))
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const onLogout = async (): Promise<void> => {
     setBusy(true)
     setError(undefined)
@@ -202,6 +223,7 @@ export function AgwSection(props: Partial<AgwSectionInjected>): JSX.Element {
     <div style={page}>
       <h1 style={titleStyle}>{t('title', 'AGW Oauth')}</h1>
       <p style={descStyle}>{t('description', '连接 AI-GateWay 网关并通过浏览器安全登录。')}</p>
+      <p style={descStyle}>{t('importHint', '已有 ~/.codex/auth.json 或 ~/.claude/.credentials.json 时，优先导入，不必再登录。')}</p>
       <label style={fieldStyle}>
         <span>{t('originLabel', '网关地址')}</span>
         <input
@@ -237,7 +259,13 @@ export function AgwSection(props: Partial<AgwSectionInjected>): JSX.Element {
             {busy ? t('saving', '保存中…') : t('login', '登录')}
           </button>
         )}
+        <button type="button" style={btnStyle} disabled={busy} onClick={() => { void onImport() }}>
+          {t('importLocal', '导入本机 CLI 凭据')}
+        </button>
       </div>
+      {importText !== undefined ? (
+        <pre style={{ ...descStyle, whiteSpace: 'pre-wrap' }}>{importText}</pre>
+      ) : undefined}
       {(openUrl !== undefined || userCode !== undefined) && !loggedIn ? (
         <div style={{ ...fieldStyle, gap: 8 }}>
           <p style={{ ...descStyle, margin: 0 }}>{t('waiting', '请在浏览器中完成 AI-GateWay 登录。')}</p>

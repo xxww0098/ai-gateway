@@ -1,4 +1,5 @@
 import { currentWatch, startLogin } from './command.js';
+import { importLocalAndMaybeUpload } from './local-import.js';
 function storedOrigin(deps) {
     return deps.token()?.origin ?? deps.savedOrigin();
 }
@@ -69,6 +70,15 @@ export async function handleHttp(req, res, deps) {
         if (method === 'POST' && path.endsWith('/logout')) {
             await deps.logout();
             res.end(JSON.stringify({ ok: true, loggedIn: false }));
+            return;
+        }
+        if (method === 'POST' && path.endsWith('/import-local')) {
+            const current = deps.token();
+            const report = await importLocalAndMaybeUpload({
+                origin: current?.origin ?? storedOrigin(deps),
+                apiKey: current?.apiKey,
+            });
+            res.end(JSON.stringify(report));
             return;
         }
         if (method === 'POST' && path.endsWith('/origin')) {

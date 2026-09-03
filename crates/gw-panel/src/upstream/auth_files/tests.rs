@@ -140,6 +140,58 @@ fn the_x_api_key_header_spelling_folds_into_api_key() {
 }
 
 #[test]
+fn a_claude_code_credentials_file_is_filed_under_claude() {
+    let record = upload(json!({
+        "claudeAiOauth": {
+            "accessToken": "sk-ant-oat-test",
+            "refreshToken": "sk-ant-ort-test",
+            "expiresAt": 1_800_000_000_000_i64
+        }
+    }))
+    .expect("claude code file");
+    assert_eq!(record.provider, "claude");
+    assert!(super::super::record::has_metadata(&record, "access_token"));
+    assert!(super::super::record::has_metadata(&record, "refresh_token"));
+}
+
+#[test]
+fn a_codex_cli_auth_file_is_filed_under_codex() {
+    let record = upload(json!({
+        "tokens": {
+            "access_token": "codex-at",
+            "refresh_token": "codex-rt",
+            "id_token": "codex-id"
+        },
+        "last_refresh": "2026-01-01T00:00:00Z"
+    }))
+    .expect("codex cli file");
+    assert_eq!(record.provider, "codex");
+    assert!(super::super::record::has_metadata(&record, "access_token"));
+    assert!(super::super::record::has_metadata(&record, "refresh_token"));
+}
+
+#[test]
+fn the_same_cli_token_is_not_imported_twice() {
+    let first = upload(json!({
+        "claudeAiOauth": {
+            "accessToken": "same-at",
+            "refreshToken": "same-rt"
+        }
+    }))
+    .expect("first");
+    let cred = gw_provider::local_oauth::LocalOauthCred {
+        provider: "claude",
+        source: std::path::PathBuf::from("/tmp/.claude/.credentials.json"),
+        access_token: "same-at".to_owned(),
+        refresh_token: "same-rt".to_owned(),
+        id_token: String::new(),
+        expires_at: String::new(),
+        email: String::new(),
+    };
+    assert!(already_imported(&[first], &cred));
+}
+
+#[test]
 fn nested_oauth_tokens_are_lifted_to_the_top_level() {
     // The executors read the flat keys; leaving them nested makes a valid
     // credential look like it has no token at all.

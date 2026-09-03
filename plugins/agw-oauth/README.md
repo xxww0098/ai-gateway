@@ -24,7 +24,9 @@ On the web profile, open **Settings → AGW Oauth**. Enter the gateway URL, then
 
 ![AGW Oauth signed in](./agw-oauth-signed-in.png)
 
-`/agw login`, `/agw status`, and `/agw logout` keep working in the command bar.
+`/agw import`, `/agw login`, `/agw status`, and `/agw logout` keep working in the command bar.
+
+Prefer **Import local CLI files** / `/agw import` when `~/.codex/auth.json` or `~/.claude/.credentials.json` already exist. That reads the CLI files; it does not start a new browser login. If the saved AI-GateWay key is an admin key, the plugin uploads them to `/api/panel/admin/sdk-management/auth-files`. On the gateway host itself, `POST /auth-files/import-local` scans the same paths. Details: [docs/local-oauth.md](../../docs/local-oauth.md).
 
 ## Environment
 
@@ -66,3 +68,4 @@ When the web profile is running, the plugin also exposes same-origin:
 - `GET /agw-oauth/status` — `{ loggedIn, origin, watch }` (origin is returned even when only the settings field was saved)
 - `POST /agw-oauth/origin` — `{ "origin": "https://..." }` persist origin without `AGW_ORIGIN`
 - `POST /agw-oauth/logout` — same as `/agw logout` (clear store, drop adapter)
+- `POST /agw-oauth/import-local` — read well-known CLI OAuth files; upload when an admin API key is stored

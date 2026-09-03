@@ -87,11 +87,14 @@ curl https://<your-host>/v1/chat/completions \
 
 ```bash
 make test          # cargo test --workspace（无需外部服务）
-make test-ignored  # 需要真 Postgres/Redis 的那一档
+make test-ignored  # 需要真 Postgres/Redis 的那一档（跳过真实上游）
+make test-real-api # REAL_API=1 + 本机 ~/.codex 或 ~/.claude；见 docs/real-api-tests.md
 make gates         # cargo xtask ci —— 9 条架构门禁
 make lint          # clippy --all-targets -- -D warnings
 cd frontend && npm test       # 前端 vitest
 ```
+
+本机 CLI OAuth（Codex / Claude Code 等）导入与和 dsh-plugin-oauth-subs 的差距：[`docs/local-oauth.md`](docs/local-oauth.md)。
 
 ```bash
 make build         # cargo build --release → ./ai-gateway

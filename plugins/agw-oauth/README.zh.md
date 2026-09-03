@@ -20,7 +20,9 @@ web profile 打开 **设置 → AGW Oauth**。填写网关地址后点 **登录*
 
 ![AGW Oauth signed in](./agw-oauth-signed-in.png)
 
-命令栏里的 `/agw login`、`/agw status`、`/agw logout` 仍然可用。
+命令栏里的 `/agw import`、`/agw login`、`/agw status`、`/agw logout` 仍然可用。
+
+本机已有 `~/.codex/auth.json` 或 `~/.claude/.credentials.json` 时，用 **导入本机 CLI 凭据** / `/agw import`，不要再走一遍浏览器。保存的 key 若是管理员，插件会 POST 到网关 `/auth-files`。网关本机可用 `POST /auth-files/import-local`。详见 [docs/local-oauth.md](../../docs/local-oauth.md)。
 
 ## 环境变量
 
@@ -44,3 +46,4 @@ web profile 启动后还会挂（同源）：
 - `GET /agw-oauth/status`：`{ loggedIn, origin, watch }`（仅保存了设置页 origin 时也会返回 origin）
 - `POST /agw-oauth/origin`：`{ "origin": "https://..." }`，不依赖 `AGW_ORIGIN` 持久化网关地址
 - `POST /agw-oauth/logout`：等同 `/agw logout`（清空 store、卸掉 adapter）
+- `POST /agw-oauth/import-local`：读本机 CLI OAuth 文件；已登录管理员 key 时上传到网关

@@ -144,9 +144,9 @@ pub async fn exchange(
             })
         }
         Provider::Kiro => super::device::exchange_kiro_code(config, code).await,
-        Provider::Xai => anyhow::bail!(
-            "xAI uses the device-code flow, not an authorization-code callback"
-        ),
+        Provider::Xai => {
+            anyhow::bail!("xAI uses the device-code flow, not an authorization-code callback")
+        }
     }
 }
 

@@ -46,9 +46,18 @@ fn the_oauth_providers_round_trip() {
 fn grok_is_an_alias_for_xai() {
     assert_eq!(Provider::parse("grok"), Some(Provider::Xai));
     assert_eq!(Provider::parse("XAI"), Some(Provider::Xai));
-    assert_eq!(Provider::from_auth_url_key("xai-auth-url"), Some(Provider::Xai));
-    assert_eq!(Provider::from_auth_url_key("grok-auth-url"), Some(Provider::Xai));
-    assert_eq!(Provider::from_auth_url_key("kiro-auth-url"), Some(Provider::Kiro));
+    assert_eq!(
+        Provider::from_auth_url_key("xai-auth-url"),
+        Some(Provider::Xai)
+    );
+    assert_eq!(
+        Provider::from_auth_url_key("grok-auth-url"),
+        Some(Provider::Xai)
+    );
+    assert_eq!(
+        Provider::from_auth_url_key("kiro-auth-url"),
+        Some(Provider::Kiro)
+    );
 }
 
 #[test]

@@ -147,8 +147,11 @@ jobs:
       # Serialize the test harness while preserving concurrency inside each
       # test, so isolation failures are real product failures rather than
       # cross-test schema races.
+      # real_* smokes need REAL_API=1 plus host CLI files (make test-real-api).
+      # They are #[ignore]d so the default suite stays CI-safe, but this job
+      # runs the ignored tier — skip them here the same way `make test-ignored` does.
       - name: Test (ignored tier)
-        run: cargo test --workspace -- --ignored --test-threads=1
+        run: cargo test --workspace -- --ignored --test-threads=1 --skip real_
 
   frontend:
     name: Frontend

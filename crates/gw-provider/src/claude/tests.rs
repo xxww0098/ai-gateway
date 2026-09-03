@@ -8,7 +8,7 @@ use gw_authcore::AuthRecord;
 use serde_json::json;
 
 use super::*;
-use crate::common::{requested_model, REQUESTED_MODEL_METADATA_KEY};
+use crate::common::{REQUESTED_MODEL_METADATA_KEY, requested_model};
 
 fn auth_with(metadata: serde_json::Value) -> AuthRecord {
     AuthRecord {
@@ -133,15 +133,17 @@ fn a_base_url_without_a_host_is_rejected() {
         ClaudeProvider::messages_endpoint(None, &[], "https://").is_err(),
         "a hostless URL must not re-parse with a path segment as the host"
     );
-    assert!(ClaudeProvider::new(
-        &ProviderConfig {
-            base_url: "not-a-url".to_owned(),
-            api_key: String::new(),
-            enabled: true,
-        },
-        0
-    )
-    .is_err());
+    assert!(
+        ClaudeProvider::new(
+            &ProviderConfig {
+                base_url: "not-a-url".to_owned(),
+                api_key: String::new(),
+                enabled: true,
+            },
+            0
+        )
+        .is_err()
+    );
 }
 
 // --- credentials ------------------------------------------------------------

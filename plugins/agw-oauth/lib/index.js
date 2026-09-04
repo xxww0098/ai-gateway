@@ -6,6 +6,7 @@ import { AgwAdapter, PROVIDER } from './adapter.js';
 import { parseModelsPayload } from './catalog.js';
 import { Config, resolveOrigin } from './config.js';
 import { currentWatch, resetLoginWatch, startLogin, usageText } from './command.js';
+import { importLocalAndMaybeUpload } from './local-import.js';
 import { handleHttp } from './http.js';
 import { TokenStore } from './store.js';
 export const name = 'agw-oauth';
@@ -15,6 +16,7 @@ export { PROVIDER, parseModelsPayload, parseGatewayModel, toResolvedModel } from
 export { startDevice, pollDevice } from './oauth.js';
 export { AgwAdapter } from './adapter.js';
 export { handleHttp } from './http.js';
+export { discoverLocalOauth, parseCliJson } from './local-import.js';
 export function apply(ctx, config) {
     ctx.logger.info('[agw-oauth] plugin loaded!');
     const store = new TokenStore();
@@ -96,8 +98,8 @@ export function apply(ctx, config) {
     if (commands !== undefined) {
         commands.register({
             name: 'agw',
-            description: 'AI-GateWay OAuth: status, login, logout',
-            input: { hint: '[status|login|logout]' },
+            description: 'AI-GateWay OAuth: status, import, login, logout',
+            input: { hint: '[status|import|login|logout]' },
             handler: async (invocation) => {
                 const action = (invocation.rawInput.trim().split(/\s+/)[0] ?? 'status').toLowerCase();
                 if (action === 'help' || action === '-h' || action === '--help') {
@@ -106,6 +108,24 @@ export function apply(ctx, config) {
                 if (action === 'logout') {
                     await logout();
                     return { kind: 'success', text: 'Logged out of AI-GateWay.' };
+                }
+                if (action === 'import') {
+                    const report = await importLocalAndMaybeUpload({
+                        origin: snapshot?.origin ?? savedOrigin,
+                        apiKey: snapshot?.apiKey,
+                    });
+                    const lines = report.found.length === 0
+                        ? ['No local CLI OAuth files found under ~/.codex, ~/.claude, ~/.grok, or ~/.kiro.']
+                        : report.found.map(row => `${row.provider}: ${row.source} (access=${row.hasAccessToken} refresh=${row.hasRefreshToken})`);
+                    if (report.uploaded !== undefined) {
+                        lines.push(`Upload HTTP ${report.uploaded.status}`);
+                    }
+                    else if (report.found.length > 0 && snapshot === undefined) {
+                        lines.push('Not logged into AI-GateWay; files were only listed. Run /agw login as an admin to upload, or POST /auth-files/import-local on the gateway host.');
+                    }
+                    if (report.error !== undefined)
+                        lines.push(report.error);
+                    return { kind: report.error === undefined ? 'success' : 'error', text: lines.join('\n') };
                 }
                 if (action === 'login') {
                     return startLogin(loginOrigin(), persist, invocation.signal);

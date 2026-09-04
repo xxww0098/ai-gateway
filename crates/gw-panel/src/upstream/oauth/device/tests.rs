@@ -12,11 +12,7 @@ fn interval() -> i64 {
 
 #[test]
 fn a_pending_token_body_keeps_waiting() {
-    let outcome = interpret_token_http(
-        400,
-        r#"{"error":"authorization_pending"}"#,
-        interval(),
-    );
+    let outcome = interpret_token_http(400, r#"{"error":"authorization_pending"}"#, interval());
     match outcome {
         DevicePollOutcome::Pending { interval } => assert_eq!(interval, 5),
         other => panic!("expected pending, got {other:?}"),

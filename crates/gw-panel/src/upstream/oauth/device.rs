@@ -26,8 +26,7 @@ mod tests;
 /// Source: CLIProxyAPI `internal/auth/xai/types.go` / router-for-me xAI docs.
 const XAI_DISCOVERY: &str = "https://auth.x.ai/.well-known/openid-configuration";
 const XAI_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
-const XAI_SCOPE: &str =
-    "openid profile email offline_access grok-cli:access api:access";
+const XAI_SCOPE: &str = "openid profile email offline_access grok-cli:access api:access";
 const XAI_DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 pub(super) const XAI_API_BASE: &str = "https://api.x.ai/v1";
 
@@ -78,7 +77,11 @@ pub fn classify_device_token_body(status: u16, raw: &str, interval: i64) -> Devi
 /// Same as [`classify_device_token_body`]; named for the mock-HTTP tests.
 #[must_use]
 pub fn interpret_token_http(status: u16, raw: &str, interval: i64) -> DevicePollOutcome {
-    let interval = if interval > 0 { interval } else { DEFAULT_INTERVAL };
+    let interval = if interval > 0 {
+        interval
+    } else {
+        DEFAULT_INTERVAL
+    };
     let parsed: Result<Map<String, Value>, _> = serde_json::from_str(raw.trim());
     let Ok(object) = parsed else {
         return DevicePollOutcome::Failed {
@@ -130,7 +133,6 @@ pub fn interpret_token_http(status: u16, raw: &str, interval: i64) -> DevicePoll
     DevicePollOutcome::Completed(tokens)
 }
 
-
 fn normalize_token_keys(mut object: Map<String, Value>) -> Map<String, Value> {
     for (camel, snake) in [
         ("accessToken", "access_token"),
@@ -160,7 +162,9 @@ pub fn validate_xai_endpoint(raw: &str) -> bool {
         return false;
     }
     match url.host_str() {
-        Some(host) => host.eq_ignore_ascii_case("x.ai") || host.to_ascii_lowercase().ends_with(".x.ai"),
+        Some(host) => {
+            host.eq_ignore_ascii_case("x.ai") || host.to_ascii_lowercase().ends_with(".x.ai")
+        }
         None => false,
     }
 }
@@ -179,10 +183,8 @@ pub fn device_session_ttl(expires_in: i64) -> Duration {
 /// Whether this session is a device / IDC flow (no redirect_uri required).
 #[must_use]
 pub fn is_device_flow(config: &SessionConfig) -> bool {
-    matches!(
-        config.flow.trim(),
-        "device" | "idc" | "import"
-    ) || !config.device_code.trim().is_empty()
+    matches!(config.flow.trim(), "device" | "idc" | "import")
+        || !config.device_code.trim().is_empty()
 }
 
 // ---------------------------------------------------------------- xAI
@@ -236,7 +238,13 @@ pub async fn start_xai_device(config: &mut SessionConfig) -> anyhow::Result<Devi
         "xAI device authorization returned no device_code"
     );
 
-    apply_device_start(config, &started, &discovery.token_endpoint, XAI_CLIENT_ID, "");
+    apply_device_start(
+        config,
+        &started,
+        &discovery.token_endpoint,
+        XAI_CLIENT_ID,
+        "",
+    );
     config.flow = "device".to_owned();
     config.auth_method = "device".to_owned();
     Ok(started)
@@ -310,7 +318,9 @@ fn decorate_xai_tokens(tokens: &mut TokenResponse) {
             tokens.account_id = account_id;
         }
     }
-    tokens.extra.insert("api_key".to_owned(), json!(tokens.access_token));
+    tokens
+        .extra
+        .insert("api_key".to_owned(), json!(tokens.access_token));
     tokens
         .extra
         .insert("base_url".to_owned(), json!(XAI_API_BASE));
@@ -596,10 +606,9 @@ fn decorate_kiro_tokens(tokens: &mut TokenResponse, config: &SessionConfig) {
             .insert("region".to_owned(), json!(config.region));
     }
     if !config.token_endpoint.is_empty() {
-        tokens.extra.insert(
-            "token_endpoint".to_owned(),
-            json!(config.token_endpoint),
-        );
+        tokens
+            .extra
+            .insert("token_endpoint".to_owned(), json!(config.token_endpoint));
     }
 }
 
@@ -624,8 +633,8 @@ async fn register_kiro_client(
     if let Some(issuer) = issuer_url {
         body["issuerUrl"] = json!(issuer);
     }
-    let registered = post_json_json::<RegisteredClient>(&format!("{oidc}/client/register"), &body)
-        .await?;
+    let registered =
+        post_json_json::<RegisteredClient>(&format!("{oidc}/client/register"), &body).await?;
     anyhow::ensure!(
         !registered.client_id.trim().is_empty(),
         "Kiro RegisterClient returned no client_id"
@@ -645,9 +654,9 @@ fn oidc_base(region: &str) -> String {
 /// `~/.aws/sso/cache/` on the operator's machine — this gateway never reads
 /// that path.
 pub fn parse_kiro_import(raw: &Value) -> anyhow::Result<TokenResponse> {
-    let object = raw.as_object().ok_or_else(|| {
-        anyhow::anyhow!("Kiro import must be a JSON object")
-    })?;
+    let object = raw
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("Kiro import must be a JSON object"))?;
     let text = |keys: &[&str]| {
         keys.iter()
             .find_map(|key| object.get(*key).and_then(Value::as_str))
@@ -766,10 +775,7 @@ pub fn mark_polled(config: &mut SessionConfig, now: chrono::DateTime<Utc>, inter
 
 /// JSON the console gets after a device start.
 #[must_use]
-pub fn device_start_payload(
-    state: &str,
-    started: &DeviceCodeResponse,
-) -> Value {
+pub fn device_start_payload(state: &str, started: &DeviceCodeResponse) -> Value {
     let open = if started.verification_uri_complete.trim().is_empty() {
         started.verification_uri.clone()
     } else {
@@ -798,7 +804,11 @@ fn http_client() -> reqwest::Result<reqwest::Client> {
 }
 
 async fn get_json<T: for<'de> Deserialize<'de>>(url: &str) -> anyhow::Result<T> {
-    let response = http_client()?.get(url).header("Accept", "application/json").send().await?;
+    let response = http_client()?
+        .get(url)
+        .header("Accept", "application/json")
+        .send()
+        .await?;
     let status = response.status();
     let body = response.bytes().await?;
     anyhow::ensure!(
@@ -834,7 +844,10 @@ async fn post_form_raw(url: &str, form: &[(&str, String)]) -> anyhow::Result<(u1
     Ok((status, body))
 }
 
-async fn post_json_json<T: for<'de> Deserialize<'de>>(url: &str, body: &Value) -> anyhow::Result<T> {
+async fn post_json_json<T: for<'de> Deserialize<'de>>(
+    url: &str,
+    body: &Value,
+) -> anyhow::Result<T> {
     let (status, text) = post_json_raw(url, body).await?;
     anyhow::ensure!(
         (200..300).contains(&status),

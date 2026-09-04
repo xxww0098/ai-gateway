@@ -31,6 +31,7 @@ pub mod codex;
 pub mod common;
 pub mod gemini;
 pub mod kiro;
+pub mod local_oauth;
 pub mod openai;
 pub mod usage;
 pub mod vertex;

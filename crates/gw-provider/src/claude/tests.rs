@@ -344,6 +344,166 @@ fn a_caller_supplied_api_version_survives_but_a_missing_one_is_filled_in() {
 }
 
 #[test]
+fn oauth_tokens_would_be_bearer_but_are_not_sent_over_rustls() {
+    let provider = provider("https://api.anthropic.com", "sk-config");
+    let err = provider
+        .plan_messages(
+            &ProviderRequest::default(),
+            &ClaudeCredential {
+                value: "oat".to_owned(),
+                source: CredentialSource::OauthToken,
+            },
+            "https://api.anthropic.com",
+        )
+        .expect_err("OAuth inference must fail closed without Chrome TLS");
+    let dump = err.to_string();
+    assert!(
+        dump.contains("rustls") && dump.contains("refused"),
+        "{dump}"
+    );
+
+    let key = provider
+        .plan_messages(
+            &ProviderRequest::default(),
+            &ClaudeCredential {
+                value: "sk".to_owned(),
+                source: CredentialSource::ApiKey,
+            },
+            "https://api.anthropic.com",
+        )
+        .expect("plans");
+    assert!(matches!(&key.credential, gw_relay::Credential::XApiKey(k) if k == "sk"));
+}
+
+/// Prompt-cache and OAuth are separate Anthropic betas. An API-key plan must
+/// not claim the OAuth beta (that header is rejected on console keys).
+#[test]
+fn beta_features_follow_the_credential_source() {
+    let provider = provider("https://api.anthropic.com", "sk-config");
+    fingerprint::assert_oauth_http_fingerprint(&fingerprint::probe_headers());
+
+    let key = provider
+        .plan_messages(
+            &ProviderRequest::default(),
+            &ClaudeCredential {
+                value: "sk".to_owned(),
+                source: CredentialSource::ApiKey,
+            },
+            "https://api.anthropic.com",
+        )
+        .expect("plans");
+    let key_beta = key
+        .headers
+        .get("anthropic-beta")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(key_beta.contains("prompt-caching"), "{key_beta}");
+    assert!(!key_beta.contains("oauth"), "{key_beta}");
+    assert!(!key.headers.contains_key(http::header::USER_AGENT));
+}
+
+/// Cloak still builds a CC-shaped body; the planner must not hand that
+/// body to `gw-relay` while TLS is rustls.
+#[test]
+fn oauth_messages_are_cloaked_and_then_refused() {
+    let provider = provider("https://api.anthropic.com", "sk-config");
+    let payload = serde_json::json!({
+        "system": "stable prefix",
+        "messages": [{"role": "user", "content": "hey"}]
+    })
+    .to_string();
+    let req = ProviderRequest {
+        payload: bytes::Bytes::from(payload.clone()),
+        ..Default::default()
+    };
+    let mut headers = HeaderMap::new();
+    let cloaked = fingerprint::cloak(&req, &mut headers).expect("cloak");
+    let value: serde_json::Value = serde_json::from_slice(&cloaked).expect("json");
+    let first = value["system"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        first.starts_with("x-anthropic-billing-header:"),
+        "cloak skipped the billing block: {first}"
+    );
+    assert!(value["system"][0].get("cache_control").is_none());
+
+    let err = provider
+        .plan_messages(
+            &req,
+            &ClaudeCredential {
+                value: "oat".to_owned(),
+                source: CredentialSource::OauthToken,
+            },
+            "https://api.anthropic.com",
+        )
+        .expect_err("must not send the cloaked body over rustls");
+    assert!(err.to_string().contains("refused"), "{err}");
+
+    let key = provider
+        .plan_messages(
+            &ProviderRequest {
+                payload: bytes::Bytes::from(payload),
+                ..Default::default()
+            },
+            &ClaudeCredential {
+                value: "sk".to_owned(),
+                source: CredentialSource::ApiKey,
+            },
+            "https://api.anthropic.com",
+        )
+        .expect("plans");
+    if let Some(body) = key.body {
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let first = value["system"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            !first.starts_with("x-anthropic-billing-header:"),
+            "console keys must not wear the Claude Code billing cloak"
+        );
+    }
+}
+
+#[test]
+fn a_caller_supplied_beta_list_is_left_alone() {
+    let provider = provider("https://api.anthropic.com", "sk-config");
+    let mut headers = HeaderMap::new();
+    headers.insert("anthropic-beta", HeaderValue::from_static("custom-beta"));
+    let plan = provider
+        .plan_messages(
+            &ProviderRequest {
+                headers,
+                ..Default::default()
+            },
+            &ClaudeCredential {
+                value: "sk".to_owned(),
+                source: CredentialSource::ApiKey,
+            },
+            "https://api.anthropic.com",
+        )
+        .expect("plans");
+    assert!(!plan.headers.contains_key("anthropic-beta"));
+}
+
+/// A body that already opted into cache_control is forwarded untouched.
+#[test]
+fn existing_cache_control_is_not_rewritten() {
+    let original =
+        br#"{"system":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}"#;
+    assert!(inject_prompt_cache_breakpoints(original).is_none());
+}
+
+/// A string system prompt becomes a breakpointed block so subsequent turns
+/// share a prefix. The property is "a cache_control object appears", not a
+/// particular Anthropic date string.
+#[test]
+fn a_string_system_prompt_gains_a_cache_breakpoint() {
+    let rewritten =
+        inject_prompt_cache_breakpoints(br#"{"system":"stable prefix","tools":[{"name":"x"}]}"#)
+            .expect("rewritten");
+    let value: serde_json::Value = serde_json::from_slice(&rewritten).expect("json");
+    assert!(json_contains_key(&value, "cache_control"));
+    assert_eq!(value["system"][0]["text"], "stable prefix");
+}
+
+#[test]
 fn a_blank_credential_is_refused_before_anything_is_planned() {
     let provider = provider("https://api.anthropic.com", "sk-config");
     let err = provider

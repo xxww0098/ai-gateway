@@ -352,7 +352,17 @@ pub async fn auth_url(
             };
             expires_at = now + device::device_session_ttl(started.expires_in);
             config.expires_at = rfc3339(expires_at);
-            if let Err(response) = persist_session(state, provider, &oauth_state, &started.verification_uri_complete, &config, now, expires_at).await {
+            if let Err(response) = persist_session(
+                state,
+                provider,
+                &oauth_state,
+                &started.verification_uri_complete,
+                &config,
+                now,
+                expires_at,
+            )
+            .await
+            {
                 return response;
             }
             return ok(device::device_start_payload(&oauth_state, &started));
@@ -364,13 +374,18 @@ pub async fn auth_url(
                     let tokens = match device::parse_kiro_import(&start.token) {
                         Ok(tokens) => tokens,
                         Err(error) => {
-                            return err(StatusCode::BAD_REQUEST, ERR_BAD_REQUEST, error.to_string());
+                            return err(
+                                StatusCode::BAD_REQUEST,
+                                ERR_BAD_REQUEST,
+                                error.to_string(),
+                            );
                         }
                     };
                     return persist_imported(state, provider, tokens).await;
                 }
                 "authcode" => {
-                    let authorize_url = match device::start_kiro_authcode(&mut config, &start).await {
+                    let authorize_url = match device::start_kiro_authcode(&mut config, &start).await
+                    {
                         Ok(url) => url,
                         Err(error) => {
                             tracing::warn!(%error, "Kiro authorization-code start failed");
@@ -381,7 +396,17 @@ pub async fn auth_url(
                             );
                         }
                     };
-                    if let Err(response) = persist_session(state, provider, &oauth_state, &authorize_url, &config, now, expires_at).await {
+                    if let Err(response) = persist_session(
+                        state,
+                        provider,
+                        &oauth_state,
+                        &authorize_url,
+                        &config,
+                        now,
+                        expires_at,
+                    )
+                    .await
+                    {
                         return response;
                     }
                     return ok(json!({
@@ -405,7 +430,17 @@ pub async fn auth_url(
                     };
                     expires_at = now + device::device_session_ttl(started.expires_in);
                     config.expires_at = rfc3339(expires_at);
-                    if let Err(response) = persist_session(state, provider, &oauth_state, &started.verification_uri_complete, &config, now, expires_at).await {
+                    if let Err(response) = persist_session(
+                        state,
+                        provider,
+                        &oauth_state,
+                        &started.verification_uri_complete,
+                        &config,
+                        now,
+                        expires_at,
+                    )
+                    .await
+                    {
                         return response;
                     }
                     return ok(device::device_start_payload(&oauth_state, &started));
@@ -422,7 +457,17 @@ pub async fn auth_url(
             "failed to create OAuth URL",
         );
     };
-    if let Err(response) = persist_session(state, provider, &oauth_state, &authorize_url, &config, now, expires_at).await {
+    if let Err(response) = persist_session(
+        state,
+        provider,
+        &oauth_state,
+        &authorize_url,
+        &config,
+        now,
+        expires_at,
+    )
+    .await
+    {
         return response;
     }
     // Both key spellings: the console reads `auth_url`, older callers `url`.
@@ -459,7 +504,11 @@ pub async fn device_poll(
         .unwrap_or("")
         .to_owned();
     if oauth_state.is_empty() {
-        return err(StatusCode::BAD_REQUEST, ERR_BAD_REQUEST, "state is required");
+        return err(
+            StatusCode::BAD_REQUEST,
+            ERR_BAD_REQUEST,
+            "state is required",
+        );
     }
 
     let row = match load_session_by_state(&state, &oauth_state).await {
@@ -480,11 +529,15 @@ pub async fn device_poll(
             "auth_id": row.auth_id,
         }));
     }
-    if row.status() == STATUS_FAILED || (row.status() == STATUS_PENDING && Utc::now() > row.expires_at) {
+    if row.status() == STATUS_FAILED
+        || (row.status() == STATUS_PENDING && Utc::now() > row.expires_at)
+    {
         if row.status() == STATUS_PENDING {
             mark_session(&state, row.id, STATUS_FAILED, None).await;
         }
-        return ok(json!({"status": "error", "provider": row.provider, "message": "OAuth session expired"}));
+        return ok(
+            json!({"status": "error", "provider": row.provider, "message": "OAuth session expired"}),
+        );
     }
     let config = session_config_of(&row);
     finish_device_poll(&state, provider, &row, config, false).await

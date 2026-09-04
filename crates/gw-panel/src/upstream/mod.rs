@@ -69,6 +69,10 @@ pub fn router() -> Router<PanelState> {
         )
         .route(&path("/auth-files/quota"), get(auth_files::quota))
         .route(&path("/auth-files/models"), get(auth_files::models))
+        .route(
+            &path("/auth-files/import-local"),
+            post(auth_files::import_local),
+        )
         .route(&path("/oauth-sessions"), get(oauth::list_sessions))
         .route(&path("/get-auth-status"), get(oauth::auth_status))
         .route(&path("/oauth-callback"), post(oauth::sdk_callback))

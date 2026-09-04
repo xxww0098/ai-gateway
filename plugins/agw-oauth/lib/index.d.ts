@@ -12,6 +12,7 @@ export { PROVIDER, parseModelsPayload, parseGatewayModel, toResolvedModel } from
 export { startDevice, pollDevice } from './oauth.js';
 export { AgwAdapter } from './adapter.js';
 export { handleHttp } from './http.js';
+export { discoverLocalOauth, parseCliJson } from './local-import.js';
 export declare function apply(ctx: Context, config: {
     origin: string;
 }): void;

@@ -112,6 +112,7 @@ function AgwSection(props) {
   const [busy, setBusy] = (0, import_react.useState)(false);
   const [error, setError] = (0, import_react.useState)();
   const [start, setStart] = (0, import_react.useState)();
+  const [importText, setImportText] = (0, import_react.useState)();
   const applyStatus = (payload) => {
     setLoggedIn(payload.loggedIn === true);
     if (typeof payload.origin === "string") setOrigin(payload.origin);
@@ -164,6 +165,21 @@ function AgwSection(props) {
       setBusy(false);
     }
   };
+  const onImport = async () => {
+    setBusy(true);
+    setError(void 0);
+    try {
+      const report = await api("/agw-oauth/import-local", { method: "POST" });
+      const lines = (report.found ?? []).map((row) => `${row.provider ?? "?"} \xB7 ${row.source ?? ""}`);
+      if (report.uploaded?.status !== void 0) lines.push(`Upload HTTP ${report.uploaded.status}`);
+      if (report.error) lines.push(report.error);
+      setImportText(lines.join("\n") || t("importHint", "No local CLI files found."));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
   const onLogout = async () => {
     setBusy(true);
     setError(void 0);
@@ -185,6 +201,7 @@ function AgwSection(props) {
   return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: page, children: [
     /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h1", { style: titleStyle, children: t("title", "AGW Oauth") }),
     /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { style: descStyle, children: t("description", "\u8FDE\u63A5 AI-GateWay \u7F51\u5173\u5E76\u901A\u8FC7\u6D4F\u89C8\u5668\u5B89\u5168\u767B\u5F55\u3002") }),
+    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { style: descStyle, children: t("importHint", "\u5DF2\u6709 ~/.codex/auth.json \u6216 ~/.claude/.credentials.json \u65F6\uFF0C\u4F18\u5148\u5BFC\u5165\uFF0C\u4E0D\u5FC5\u518D\u767B\u5F55\u3002") }),
     /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { style: fieldStyle, children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: t("originLabel", "\u7F51\u5173\u5730\u5740") }),
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
@@ -218,11 +235,17 @@ function AgwSection(props) {
       ),
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: loggedIn ? t("loggedIn", "\u5DF2\u767B\u5F55 \xB7 OAuth \u51ED\u636E\u53EF\u7528") : t("loggedOut", "\u672A\u767B\u5F55") })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: rowStyle, children: loggedIn ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { type: "button", style: btnStyle, disabled: busy, onClick: () => {
-      void onLogout();
-    }, children: t("logout", "\u9000\u51FA\u767B\u5F55") }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { type: "button", style: btnStyle, disabled: busy, onClick: () => {
-      void onLogin();
-    }, children: busy ? t("saving", "\u4FDD\u5B58\u4E2D\u2026") : t("login", "\u767B\u5F55") }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: rowStyle, children: [
+      loggedIn ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { type: "button", style: btnStyle, disabled: busy, onClick: () => {
+        void onLogout();
+      }, children: t("logout", "\u9000\u51FA\u767B\u5F55") }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { type: "button", style: btnStyle, disabled: busy, onClick: () => {
+        void onLogin();
+      }, children: busy ? t("saving", "\u4FDD\u5B58\u4E2D\u2026") : t("login", "\u767B\u5F55") }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { type: "button", style: btnStyle, disabled: busy, onClick: () => {
+        void onImport();
+      }, children: t("importLocal", "\u5BFC\u5165\u672C\u673A CLI \u51ED\u636E") })
+    ] }),
+    importText !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("pre", { style: { ...descStyle, whiteSpace: "pre-wrap" }, children: importText }) : void 0,
     (openUrl !== void 0 || userCode !== void 0) && !loggedIn ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: { ...fieldStyle, gap: 8 }, children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { style: { ...descStyle, margin: 0 }, children: t("waiting", "\u8BF7\u5728\u6D4F\u89C8\u5668\u4E2D\u5B8C\u6210 AI-GateWay \u767B\u5F55\u3002") }),
       userCode !== void 0 && userCode.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: rowStyle, children: [
@@ -248,6 +271,8 @@ var en = {
   loggedIn: "Signed in \xB7 OAuth credentials available",
   loggedOut: "Not signed in",
   login: "Sign in",
+  importLocal: "Import local CLI files",
+  importHint: "Reads ~/.codex/auth.json and ~/.claude/.credentials.json. Prefer this over a new browser login.",
   logout: "Sign out",
   saving: "Saving\u2026",
   waiting: "Finish signing in to AI-GateWay in the browser.",
@@ -264,6 +289,8 @@ var zh = {
   loggedIn: "\u5DF2\u767B\u5F55 \xB7 OAuth \u51ED\u636E\u53EF\u7528",
   loggedOut: "\u672A\u767B\u5F55",
   login: "\u767B\u5F55",
+  importLocal: "\u5BFC\u5165\u672C\u673A CLI \u51ED\u636E",
+  importHint: "\u8BFB\u53D6 ~/.codex/auth.json \u4E0E ~/.claude/.credentials.json\u3002\u5DF2\u6709\u6587\u4EF6\u65F6\u4E0D\u5FC5\u518D\u8D70\u6D4F\u89C8\u5668\u767B\u5F55\u3002",
   logout: "\u9000\u51FA\u767B\u5F55",
   saving: "\u4FDD\u5B58\u4E2D\u2026",
   waiting: "\u8BF7\u5728\u6D4F\u89C8\u5668\u4E2D\u5B8C\u6210 AI-GateWay \u767B\u5F55\u3002",

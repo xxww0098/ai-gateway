@@ -81,6 +81,33 @@ pub(crate) async fn post_form(
     .await
 }
 
+/// GET for ignored real-API smokes. Not an inference path: no tenant payload,
+/// response never forwarded to a client.
+#[cfg(test)]
+pub(crate) async fn get_text<N, V>(
+    url: &str,
+    headers: &[(N, V)],
+) -> Result<(u16, String), ProviderError>
+where
+    N: AsRef<str>,
+    V: AsRef<str>,
+{
+    let mut request = shared_client()
+        .get(url)
+        .timeout(Duration::from_secs(30))
+        .header(ACCEPT, "application/json");
+    for (name, value) in headers {
+        request = request.header(name.as_ref(), value.as_ref());
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|err| ProviderError::Other(anyhow::anyhow!("real-api GET failed: {err}")))?;
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+    Ok((status, body))
+}
+
 /// Shared status check + body read.
 async fn read(response: reqwest::Response, what: &'static str) -> Result<Bytes, ProviderError> {
     let status = response.status().as_u16();

@@ -264,25 +264,156 @@ fn cred_or_panic(provider: &'static str) -> LocalOauthCred {
         })
 }
 
+/// ChatGPT subscription OAuth is not an OpenAI Platform API key: it lacks
+/// `api.model.read`, so `api.openai.com/v1/models` returns 403. Codex CLI
+/// lists models on the ChatGPT backend, and `client_version` is required.
+const CODEX_BACKEND_MODELS: &str = "https://chatgpt.com/backend-api/codex/models";
+const CODEX_VERSION_ENV: &str = "AGW_CODEX_CLI_VERSION";
+const CODEX_CLI_FALLBACK_VERSION: &str = "0.149.0";
+
+fn codex_cli_version() -> String {
+    std::env::var(CODEX_VERSION_ENV)
+        .ok()
+        .map(|raw| raw.trim().trim_start_matches('v').to_owned())
+        .filter(|value| !value.is_empty())
+        .or_else(discover_codex_cli_version)
+        .unwrap_or_else(|| CODEX_CLI_FALLBACK_VERSION.to_owned())
+}
+
+fn discover_codex_cli_version() -> Option<String> {
+    let output = std::process::Command::new("codex")
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_dotted_version(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_dotted_version(text: &str) -> Option<String> {
+    text.split_whitespace().find_map(|token| {
+        let token = token
+            .trim_start_matches('v')
+            .trim_end_matches(|c: char| !c.is_ascii_digit());
+        let parts: Vec<&str> = token.split('.').collect();
+        (parts.len() >= 3
+            && parts
+                .iter()
+                .take(3)
+                .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())))
+        .then(|| parts[..3].join("."))
+    })
+}
+
+fn codex_backend_models_url(client_version: &str) -> String {
+    let version = client_version.trim();
+    assert!(
+        !version.is_empty(),
+        "Codex backend /models requires client_version"
+    );
+    let mut url = url::Url::parse(CODEX_BACKEND_MODELS).expect("static Codex backend models URL");
+    url.query_pairs_mut().append_pair("client_version", version);
+    url.to_string()
+}
+
+fn looks_like_codex_catalog(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    let Some(models) = value.get("models").and_then(Value::as_array) else {
+        return false;
+    };
+    models.iter().any(|model| {
+        model
+            .get("slug")
+            .and_then(Value::as_str)
+            .is_some_and(|slug| !slug.is_empty())
+            || model
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+    })
+}
+
+/// The probe must hit ChatGPT's Codex catalog, not Platform `/v1/models`.
+#[test]
+fn codex_models_probe_targets_chatgpt_backend_not_platform_api() {
+    let version = "1.2.3";
+    let url = url::Url::parse(&codex_backend_models_url(version)).expect("probe url");
+    assert_eq!(url.scheme(), "https");
+    assert_eq!(url.host_str(), Some("chatgpt.com"));
+    let path = url.path();
+    assert!(
+        path.contains("backend-api") && path.contains("codex") && path.ends_with("/models"),
+        "{path}"
+    );
+    let query: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    assert!(
+        query
+            .iter()
+            .any(|(k, v)| k == "client_version" && v == version),
+        "{query:?}"
+    );
+    assert_ne!(url.host_str(), Some("api.openai.com"));
+    assert!(!path.contains("/v1/"));
+}
+
+/// Codex catalog is `{models:[{slug}]}`. Platform `{data:[{id}]}` is the wrong API.
+#[test]
+fn codex_catalog_accepts_slug_list_and_rejects_platform_data_list() {
+    assert!(looks_like_codex_catalog(
+        r#"{"models":[{"slug":"gpt-test","display_name":"gpt-test"}]}"#
+    ));
+    assert!(looks_like_codex_catalog(
+        r#"{"models":[{"id":"gpt-test"}]}"#
+    ));
+    assert!(!looks_like_codex_catalog(
+        r#"{"object":"list","data":[{"id":"gpt-4","object":"model"}]}"#
+    ));
+    assert!(!looks_like_codex_catalog(r#"{"models":[]}"#));
+    assert!(!looks_like_codex_catalog("not-json"));
+}
+
+#[test]
+fn dotted_cli_version_is_taken_from_codex_version_text() {
+    assert_eq!(
+        parse_dotted_version("codex-cli 0.42.0"),
+        Some("0.42.0".to_owned())
+    );
+    assert_eq!(parse_dotted_version("not a version"), None);
+}
+
 #[tokio::test]
 #[ignore = "REAL_API=1 plus ~/.codex/auth.json"]
 async fn real_codex_models_lists_when_local_oauth_exists() {
     require_real_api();
     let cred = cred_or_panic("codex");
+    let version = codex_cli_version();
+    let url = codex_backend_models_url(&version);
+    let authorization = format!("Bearer {}", cred.access_token);
+    let user_agent = format!("codex-cli/{version}");
     let (status, body) = crate::oauth::get_text(
-        "https://api.openai.com/v1/models",
-        &[("authorization", &format!("Bearer {}", cred.access_token))],
+        &url,
+        &[
+            ("authorization", authorization.as_str()),
+            ("user-agent", user_agent.as_str()),
+        ],
     )
     .await
     .unwrap_or_else(|err| panic!("codex models request failed: {err}"));
     assert!(
         (200..300).contains(&status),
-        "codex GET /v1/models returned {status}: {body}. \
+        "codex GET chatgpt.com/backend-api/codex/models returned {status}: {body}. \
+         ChatGPT OAuth is not a Platform API key (missing api.model.read). \
          If 401, refresh the Codex CLI login and retry."
     );
     assert!(
-        body.contains("\"data\"") || body.contains("\"id\""),
-        "codex models response had no catalog: {body}"
+        looks_like_codex_catalog(&body),
+        "codex models response was not {{models:[{{slug}}]}}: {body}"
     );
 }
 

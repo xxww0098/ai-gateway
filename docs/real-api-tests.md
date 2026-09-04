@@ -20,12 +20,16 @@ REAL_API=1 cargo test -p gw-provider --lib -- --ignored --nocapture real_
 
 | 测试 | 请求 | 凭据 |
 | --- | --- | --- |
-| `real_codex_models_lists_when_local_oauth_exists` | `GET https://api.openai.com/v1/models` | Codex CLI `~/.codex/auth.json` |
+| `real_codex_models_lists_when_local_oauth_exists` | `GET https://chatgpt.com/backend-api/codex/models?client_version=<ver>`（`Authorization: Bearer` + `User-Agent: codex-cli/<ver>`）。`client_version` 必填。 | Codex CLI `~/.codex/auth.json` |
 | `real_claude_oauth_stays_fail_closed_without_chrome_tls` | **不打 Anthropic**。断言 cloak 头 + `refuse_unverified_send`。有 `AGW_CLAUDE_CAPTURE` / `~/.claude/agw-capture.json` 时对照抓包。 | Claude Code `~/.claude/.credentials.json` |
+
+**ChatGPT / Codex CLI OAuth ≠ OpenAI Platform API key。** 订阅登录写进 `~/.codex/auth.json` 的 access token **没有** `api.model.read`，对 `https://api.openai.com/v1/models` 会 403。Codex CLI 自己的目录在 ChatGPT backend：`/backend-api/codex/models`，响应形如 `{"models":[{"slug":…}]}`，不是 Platform 的 `{"data":[{"id":…}]}`。
 
 Claude 订阅推理在 Chrome uTLS 落地前 **fail-closed**。见 `docs/claude-fingerprint.md`。
 
 本 runner 没有安装 `claude`，没有真抓包；宣称 JA3 一致是不允许的。
+
+可选：`export AGW_CODEX_CLI_VERSION=0.149.0`（或本机 `codex --version`）后再跑 Codex 冒烟，`client_version` / User-Agent 才和安装钉在一起。未设置且 PATH 上没有 `codex` 时用文档钉。
 
 可选：`export AGW_CLAUDE_CODE_VERSION=2.1.233`（或本机 `claude --version`）后再跑，User-Agent 才和安装钉在一起。
 

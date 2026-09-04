@@ -272,13 +272,12 @@ const CODEX_VERSION_ENV: &str = "AGW_CODEX_CLI_VERSION";
 const CODEX_CLI_FALLBACK_VERSION: &str = "0.149.0";
 
 fn codex_cli_version() -> String {
-    if let Ok(raw) = std::env::var(CODEX_VERSION_ENV) {
-        let trimmed = raw.trim().trim_start_matches('v');
-        if !trimmed.is_empty() {
-            return trimmed.to_owned();
-        }
-    }
-    discover_codex_cli_version().unwrap_or_else(|| CODEX_CLI_FALLBACK_VERSION.to_owned())
+    std::env::var(CODEX_VERSION_ENV)
+        .ok()
+        .map(|raw| raw.trim().trim_start_matches('v').to_owned())
+        .filter(|value| !value.is_empty())
+        .or_else(discover_codex_cli_version)
+        .unwrap_or_else(|| CODEX_CLI_FALLBACK_VERSION.to_owned())
 }
 
 fn discover_codex_cli_version() -> Option<String> {

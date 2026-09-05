@@ -13,6 +13,9 @@ use std::collections::HashMap;
 pub struct PinResult {
     pub pinned: String,
     pub extra: String,
+    /// True when this call stored the prefix. Callers keep the original
+    /// message objects on a fresh pin so the first hop is byte-stable.
+    pub fresh: bool,
 }
 
 /// Bounded map of conversation-id → first system text.
@@ -46,12 +49,14 @@ impl PrefixPins {
             return PinResult {
                 pinned: String::new(),
                 extra: String::new(),
+                fresh: true,
             };
         }
         if conversation_id.is_empty() || skip_ids.contains(&conversation_id) {
             return PinResult {
                 pinned: text.to_owned(),
                 extra: String::new(),
+                fresh: true,
             };
         }
         if let Some(existing) = self.map.get(conversation_id) {
@@ -59,6 +64,7 @@ impl PrefixPins {
                 return PinResult {
                     pinned: existing.clone(),
                     extra: String::new(),
+                    fresh: false,
                 };
             }
             let extra = if text.starts_with(existing.as_str()) {
@@ -72,6 +78,7 @@ impl PrefixPins {
             return PinResult {
                 pinned: existing.clone(),
                 extra,
+                fresh: false,
             };
         }
         if self.map.len() >= self.cap
@@ -83,6 +90,7 @@ impl PrefixPins {
         PinResult {
             pinned: text.to_owned(),
             extra: String::new(),
+            fresh: true,
         }
     }
 

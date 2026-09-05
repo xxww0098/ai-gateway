@@ -1,23 +1,28 @@
 //! Shared OAuth **hop planning**. No sockets.
 //!
-//! `dsh-plugin-oauth-subs` and `gw-provider` both need the same vendor
-//! fingerprints: cache ids, identity headers, and the body fields each
-//! upstream 400s on. This crate is that knowledge as values.
+//! Replicates `dsh-plugin-oauth-subs` family hops as values: identity
+//! headers, cache ids, and the body fields each upstream 400s on.
 //!
 //! Inference HTTP stays in `gw-relay`. Credential refresh stays in
 //! `gw-provider::oauth`. Authorization / `Credential` never appear here —
 //! a hop header map that carries a bearer is a second credential path.
 //!
-//! Families do not import each other. Cache helpers for Codex stay in
-//! [`codex`]; Grok's stay in [`grok`]; Kiro's stay in [`kiro`].
+//! Families do not import each other.
 
 #![deny(clippy::todo, clippy::unimplemented)]
 
+pub mod antigravity;
 pub mod codex;
+pub mod copilot;
+pub mod cursor;
 pub mod family;
+pub mod glm;
 pub mod grok;
 pub mod id;
+pub mod kimi;
 pub mod kiro;
+pub mod ollama;
+pub mod opencode;
 pub mod pin;
 pub mod rewrite;
 

@@ -3,6 +3,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::family::Family;
+
 fn sources() -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         for entry in fs::read_dir(dir).expect("src") {
@@ -64,24 +66,25 @@ fn sources_do_not_send() {
 /// Family modules must not import another family's cache helpers.
 #[test]
 fn family_modules_do_not_import_each_other() {
-    let pairs = [
-        ("codex.rs", "crate::grok"),
-        ("codex.rs", "crate::kiro"),
-        ("grok.rs", "crate::codex"),
-        ("grok.rs", "crate::kiro"),
-        ("kiro.rs", "crate::codex"),
-        ("kiro.rs", "crate::grok"),
-    ];
+    let names: Vec<&str> = Family::ALL.iter().map(|f| f.as_str()).collect();
     for path in sources() {
         let rel = relative(&path);
         let file = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let text = fs::read_to_string(&path).expect("read");
-        for (owner, forbidden) in pairs {
-            if file == owner || rel.starts_with(&format!("{}/", owner.trim_end_matches(".rs"))) {
-                assert!(
-                    !text.contains(forbidden),
-                    "{rel} imports {forbidden} — cache helpers stay in-family"
-                );
+        for owner in &names {
+            let owner_file = format!("{owner}.rs");
+            let owner_dir = format!("{owner}/");
+            if file == owner_file || rel.starts_with(&owner_dir) {
+                for other in &names {
+                    if other == owner {
+                        continue;
+                    }
+                    let forbidden = format!("crate::{other}");
+                    assert!(
+                        !text.contains(&forbidden),
+                        "{rel} imports {forbidden} — cache helpers stay in-family"
+                    );
+                }
             }
         }
     }

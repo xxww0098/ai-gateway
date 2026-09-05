@@ -2,7 +2,9 @@
 
 use bytes::Bytes;
 use http::HeaderMap;
-use serde_json::Value;
+use serde_json::{Value, json};
+
+use crate::pin::PrefixPins;
 
 /// What a planner knows about one inbound request, without a socket.
 #[derive(Debug, Clone, Default)]
@@ -13,14 +15,16 @@ pub struct HopInput<'a> {
     pub account_id: Option<&'a str>,
     /// Grok JWT `sub` (optional). Absent → `x-userid` is omitted.
     pub user_id: Option<&'a str>,
-    /// Model slug for routing hints / Kiro conversation suffix.
+    /// Model slug for routing hints / conversation suffix.
     pub model: Option<&'a str>,
     /// Codex `service_tier` (`fast` / `priority`), if the body asked for one.
     pub service_tier: Option<&'a str>,
-    /// Grok `x-grok-req-id`. Missing → a fresh UUID (one per planned attempt).
+    /// Per-attempt id (`x-grok-req-id`, Cursor `x-request-id`). Caller-owned.
     pub request_id: Option<&'a str>,
     /// Retry count. Grok stamps `x-grok-transient-retry` when > 0.
     pub retry_attempt: u32,
+    /// Explicit conversation id, outranking body `session_id`.
+    pub session_id: Option<&'a str>,
 }
 
 /// Planned hop: identity + cache headers, optional rewritten body.
@@ -85,4 +89,70 @@ pub(crate) fn insert_owned(headers: &mut HeaderMap, name: &'static str, value: &
         return;
     };
     headers.insert(name, value);
+}
+
+pub(crate) fn remove_keys(value: &mut Value, keys: &[&str]) {
+    if let Value::Object(map) = value {
+        for key in keys {
+            map.remove(*key);
+        }
+    }
+}
+
+pub(crate) fn message_text(message: &Value) -> String {
+    match message.get("content") {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .map(|part| match part {
+                Value::String(text) => text.clone(),
+                Value::Object(_) => part
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                _ => String::new(),
+            })
+            .collect(),
+        _ => String::new(),
+    }
+}
+
+/// Pin the leading `system` run. Fresh pins keep the original objects;
+/// later DSH snapshots park as a trailing system message.
+pub(crate) fn park_leading_system(
+    messages: &[Value],
+    conversation_id: &str,
+    pins: Option<&mut PrefixPins>,
+    skip_ids: &[&str],
+) -> Vec<Value> {
+    let mut head_len = 0;
+    while head_len < messages.len()
+        && messages[head_len].get("role").and_then(Value::as_str) == Some("system")
+    {
+        head_len += 1;
+    }
+    if head_len == 0 {
+        return messages.to_vec();
+    }
+    let Some(pins) = pins else {
+        return messages.to_vec();
+    };
+    let text = messages[..head_len]
+        .iter()
+        .map(message_text)
+        .filter(|chunk| !chunk.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let result = pins.pin(conversation_id, &text, skip_ids);
+    if result.fresh {
+        return messages.to_vec();
+    }
+    let mut out = Vec::with_capacity(messages.len() - head_len + 2);
+    out.push(json!({ "role": "system", "content": result.pinned }));
+    out.extend(messages[head_len..].iter().cloned());
+    if !result.extra.is_empty() {
+        out.push(json!({ "role": "system", "content": result.extra }));
+    }
+    out
 }

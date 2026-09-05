@@ -25,6 +25,10 @@ pub struct HopInput<'a> {
     pub retry_attempt: u32,
     /// Explicit conversation id, outranking body `session_id`.
     pub session_id: Option<&'a str>,
+    /// Kiro `profileArn`. Absent → omitted from the CodeWhisperer body.
+    pub profile_arn: Option<&'a str>,
+    /// Antigravity Cloud Code `project`. Missing → generateContent is not built.
+    pub project_id: Option<&'a str>,
 }
 
 /// Planned hop: identity + cache headers, optional rewritten body.

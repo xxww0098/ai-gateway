@@ -38,3 +38,46 @@ fn cache_fields_leave_the_body() {
     assert!(value.get("prompt_cache_key").is_none());
     assert_eq!(value["model"], json!("big-pickle"));
 }
+
+/// Muse Spark chat bodies become Responses `input`, not Completions `messages`.
+#[test]
+fn muse_spark_chat_becomes_responses_input() {
+    let body = serde_json::to_vec(&json!({
+        "model": "muse-spark-1.3-contributor-free",
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 8,
+    }))
+    .unwrap();
+    let hop = plan(
+        &HopInput {
+            body: &body,
+            ..HopInput::default()
+        },
+        None,
+    );
+    let value: serde_json::Value = serde_json::from_slice(hop.body.as_deref().unwrap()).unwrap();
+    assert!(value.get("messages").is_none());
+    assert_eq!(value["input"][0]["role"], json!("user"));
+    assert!(
+        value["max_output_tokens"].as_u64().unwrap()
+            >= super::translate::OPENCODE_MIN_OUTPUT_TOKENS
+    );
+}
+
+/// Completions models stay chat-shaped.
+#[test]
+fn completions_models_keep_messages() {
+    let body = serde_json::to_vec(&json!({
+        "model": "big-pickle",
+        "messages": [{ "role": "user", "content": "hi" }],
+    }))
+    .unwrap();
+    let hop = plan(
+        &HopInput {
+            body: &body,
+            ..HopInput::default()
+        },
+        None,
+    );
+    assert!(hop.body.is_none());
+}

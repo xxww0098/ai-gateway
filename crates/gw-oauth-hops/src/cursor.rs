@@ -12,6 +12,11 @@ use crate::rewrite::{
     string_field,
 };
 
+pub mod proto;
+pub mod translate;
+
+pub use translate::openai_to_cursor;
+
 /// When DSH sends neither `session_id` nor `prompt_cache_key`.
 pub const CURSOR_STABLE_SESSION: &str = "dsh-cursor";
 /// Official CLI fingerprint (Rahularya01/pi-cursor h2-session).
@@ -21,7 +26,7 @@ pub const CURSOR_CLIENT_TYPE: &str = "cli";
 /// Host-side Fast picker suffix. Not Codex `service_tier`.
 pub const CURSOR_FAST_SUFFIX: &str = "-fast";
 
-fn peel_fast(model_id: &str) -> &str {
+pub(crate) fn peel_fast(model_id: &str) -> &str {
     let raw = model_id.trim();
     let suffix = CURSOR_FAST_SUFFIX;
     if raw.len() >= suffix.len() {
@@ -64,11 +69,10 @@ pub fn conversation_id(body: &Value, explicit: Option<&str>, model: Option<&str>
     append_model(&base, model)
 }
 
-/// Plan Cursor CLI identity. Body stays JSON — protobuf encoding is a later
-/// hop. `pins` is accepted for the family signature; prefix parking happens
-/// on the protobuf `root_prompt_messages_json` list, not this JSON body.
+/// Plan Cursor CLI identity. Chat Completions with `messages` become a
+/// Connect-framed AgentService/Run body.
 #[must_use]
-pub fn plan(input: &HopInput<'_>, _pins: Option<&mut PrefixPins>) -> HopRewrite {
+pub fn plan(input: &HopInput<'_>, pins: Option<&mut PrefixPins>) -> HopRewrite {
     let original = parse_object(input.body);
     let mut next = original.clone();
     let cache_session_id = conversation_id(&next, input.session_id, input.model);
@@ -100,12 +104,14 @@ pub fn plan(input: &HopInput<'_>, _pins: Option<&mut PrefixPins>) -> HopRewrite 
     debug_assert!(!headers.contains_key(http::header::AUTHORIZATION));
     debug_assert!(!headers.contains_key("session-id"));
     debug_assert!(!headers.contains_key("x-grok-conv-id"));
-    debug_assert_eq!(
-        headers
-            .get("x-cursor-client-type")
-            .and_then(|v| v.to_str().ok()),
-        Some(CURSOR_CLIENT_TYPE)
-    );
+
+    if let Some(bytes) = openai_to_cursor(&original, input.session_id, input.model, pins) {
+        return HopRewrite {
+            headers,
+            body: Some(bytes::Bytes::from(bytes)),
+            cache_session_id: Some(cache_session_id),
+        };
+    }
 
     HopRewrite {
         headers,

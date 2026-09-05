@@ -3,7 +3,7 @@ name = "gw-oauth-hops"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Shared OAuth hop planning: identity headers, cache pins, body rewrite. No sockets."
+description = "Shared OAuth hop planning: identity, cache, vendor body translation. No sockets."
 
 [lib]
 doctest = false          # rule 2.10: internal crate, no external example readers
@@ -12,6 +12,8 @@ doctest = false          # rule 2.10: internal crate, no external example reader
 workspace = true         # rule 4.2: the table is inert without this
 
 [dependencies]
+base64.workspace = true
 bytes.workspace = true
 http.workspace = true
 serde_json = { workspace = true, features = ["std"] }
+sha2 = { workspace = true, features = ["std"] }

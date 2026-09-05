@@ -2,13 +2,20 @@
 //!
 //! Cache affinity is `conversationState.conversationId` (id + model). There is
 //! no Codex `prompt_cache_key` and no Grok `x-grok-conv-id`. Identity headers
-//! assume the native event-stream wire — do not stamp them on an OpenAI body.
+//! assume the native event-stream wire. OpenAI chat bodies are translated.
 
 use http::HeaderMap;
 use serde_json::Value;
 
 use crate::id::{first_cache_id, sanitize_cache_id};
-use crate::rewrite::{HopInput, HopRewrite, insert_static, parse_object, string_field};
+use crate::pin::PrefixPins;
+use crate::rewrite::{
+    HopInput, HopRewrite, body_if_changed, insert_static, parse_object, string_field,
+};
+
+pub mod translate;
+
+pub use translate::{KIRO_CHAT_ORIGIN, KIRO_SYSTEM_ACK, kiro_to_openai, openai_to_kiro};
 
 /// When DSH sends neither `session_id` nor `prompt_cache_key`.
 pub const KIRO_STABLE_SESSION: &str = "dsh-kiro";
@@ -58,16 +65,23 @@ pub fn identity_headers() -> HeaderMap {
     headers
 }
 
-/// Plan cache id + native identity headers. Body is left untouched: translating
-/// OpenAI chat ↔ GenerateAssistantResponse is a later hop, not this crate's
-/// first slice.
+/// Plan cache id + native identity headers. Chat Completions bodies become
+/// `conversationState`; already-native bodies are forwarded unchanged.
 #[must_use]
-pub fn plan(input: &HopInput<'_>) -> HopRewrite {
+pub fn plan(input: &HopInput<'_>, pins: Option<&mut PrefixPins>) -> HopRewrite {
     let original = parse_object(input.body);
-    let cache_session_id = conversation_id(&original, None, input.model);
+    let cache_session_id = conversation_id(&original, input.session_id, input.model);
+    let next = openai_to_kiro(
+        &original,
+        input.session_id,
+        input.profile_arn,
+        input.model,
+        pins,
+    )
+    .unwrap_or_else(|| original.clone());
     HopRewrite {
         headers: identity_headers(),
-        body: None,
+        body: body_if_changed(&original, next),
         cache_session_id: Some(cache_session_id),
     }
 }

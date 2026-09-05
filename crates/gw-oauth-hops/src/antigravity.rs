@@ -1,6 +1,6 @@
 //! Google Antigravity (hub) hop. Sticky identity is request `sessionId`,
-//! not Codex headers and not `implicitCacheConfig`. Full OpenAI ↔
-//! generateContent translation stays in the planner.
+//! not Codex headers and not `implicitCacheConfig`. Chat Completions bodies
+//! become generateContent when a project id is present.
 
 use http::HeaderMap;
 use serde_json::Value;
@@ -10,6 +10,10 @@ use crate::pin::PrefixPins;
 use crate::rewrite::{
     HopInput, HopRewrite, body_if_changed, insert_static, parse_object, remove_keys, string_field,
 };
+
+pub mod translate;
+
+pub use translate::{antigravity_to_openai, openai_to_antigravity};
 
 /// When DSH sends neither `session_id` nor `prompt_cache_key`.
 pub const ANTIGRAVITY_STABLE_SESSION: &str = "dsh-antigravity";
@@ -52,12 +56,12 @@ pub fn conversation_id(body: &Value, explicit: Option<&str>, model: Option<&str>
     append_model_on_stable(&base, model)
 }
 
-/// Plan hub chat identity and stamp `sessionId` onto the body.
+/// Plan hub chat identity. Chat Completions + project id → generateContent.
 #[must_use]
-pub fn plan(input: &HopInput<'_>, _pins: Option<&mut PrefixPins>) -> HopRewrite {
+pub fn plan(input: &HopInput<'_>, pins: Option<&mut PrefixPins>) -> HopRewrite {
     let original = parse_object(input.body);
+    let cache_session_id = conversation_id(&original, input.session_id, input.model);
     let mut next = original.clone();
-    let cache_session_id = conversation_id(&next, input.session_id, input.model);
     remove_keys(
         &mut next,
         &[
@@ -67,9 +71,19 @@ pub fn plan(input: &HopInput<'_>, _pins: Option<&mut PrefixPins>) -> HopRewrite 
             "session_id",
         ],
     );
-    next["sessionId"] = Value::String(cache_session_id.clone());
-    if next.get("userAgent").is_none() {
-        next["userAgent"] = Value::String(ANTIGRAVITY_BODY_USER_AGENT.to_owned());
+    if let Some(translated) = openai_to_antigravity(
+        &original,
+        input.project_id,
+        input.session_id,
+        input.model,
+        pins,
+    ) {
+        next = translated;
+    } else {
+        next["sessionId"] = Value::String(cache_session_id.clone());
+        if next.get("userAgent").is_none() {
+            next["userAgent"] = Value::String(ANTIGRAVITY_BODY_USER_AGENT.to_owned());
+        }
     }
 
     let mut headers = HeaderMap::new();

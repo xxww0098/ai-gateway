@@ -41,3 +41,34 @@ fn session_id_is_the_gemini_field() {
     assert_eq!(value["sessionId"], json!("ag-1"));
     assert!(value.get("prompt_cache_key").is_none());
 }
+
+/// With a project id, chat Completions become generateContent.
+#[test]
+fn chat_with_project_becomes_generate_content() {
+    let body = serde_json::to_vec(&json!({
+        "model": "gemini-3-flash",
+        "session_id": "ag-9",
+        "messages": [
+            { "role": "system", "content": "be brief" },
+            { "role": "user", "content": "hi" }
+        ]
+    }))
+    .unwrap();
+    let hop = plan(
+        &HopInput {
+            body: &body,
+            project_id: Some("proj-1"),
+            ..HopInput::default()
+        },
+        None,
+    );
+    let value: serde_json::Value = serde_json::from_slice(hop.body.as_deref().unwrap()).unwrap();
+    assert_eq!(value["project"], json!("proj-1"));
+    assert_eq!(value["requestType"], json!("agent"));
+    assert_eq!(value["request"]["sessionId"], json!("ag-9"));
+    assert!(value.get("messages").is_none());
+    assert_eq!(
+        value["request"]["systemInstruction"]["parts"][0]["text"],
+        json!("be brief")
+    );
+}

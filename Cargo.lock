@@ -890,9 +890,11 @@ dependencies = [
 name = "gw-oauth-hops"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "bytes",
  "http",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

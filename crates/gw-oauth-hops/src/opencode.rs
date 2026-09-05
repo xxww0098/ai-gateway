@@ -1,6 +1,5 @@
 //! OpenCode Free (Zen) hop. Anonymous relay — never send Authorization.
-//! Zen has no documented conversation / shard field. Strip Codex / Grok
-//! cache keys only; do not invent `prompt_cache_key`.
+//! Muse Spark is Zen Responses; other free models stay Completions.
 
 use http::HeaderMap;
 use serde_json::Value;
@@ -10,6 +9,10 @@ use crate::pin::PrefixPins;
 use crate::rewrite::{
     HopInput, HopRewrite, body_if_changed, insert_static, parse_object, remove_keys, string_field,
 };
+
+pub mod translate;
+
+pub use translate::{chat_to_responses, is_responses_model, responses_to_chat};
 
 /// Analyzer-only fallback. Never written onto the JSON.
 pub const OPENCODE_STABLE_SESSION: &str = "dsh-opencode";
@@ -31,8 +34,7 @@ pub fn conversation_id(body: &Value, explicit: Option<&str>) -> String {
     .unwrap_or_else(|| OPENCODE_STABLE_SESSION.to_owned())
 }
 
-/// Plan OpenCode identity. `pins` is accepted for the family signature and
-/// ignored — Zen has no documented prefix pin.
+/// Plan OpenCode identity. Muse Spark chat bodies become Responses.
 #[must_use]
 pub fn plan(input: &HopInput<'_>, _pins: Option<&mut PrefixPins>) -> HopRewrite {
     let original = parse_object(input.body);
@@ -47,6 +49,13 @@ pub fn plan(input: &HopInput<'_>, _pins: Option<&mut PrefixPins>) -> HopRewrite 
             "session_id",
         ],
     );
+    let model = input
+        .model
+        .or_else(|| string_field(&original, "model"))
+        .unwrap_or("");
+    if is_responses_model(model) && next.get("input").is_none() {
+        next = chat_to_responses(&next);
+    }
 
     let mut headers = HeaderMap::new();
     insert_static(&mut headers, "user-agent", OPENCODE_USER_AGENT);

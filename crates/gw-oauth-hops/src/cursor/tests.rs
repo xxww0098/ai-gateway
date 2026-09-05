@@ -71,3 +71,26 @@ fn cache_fields_leave_the_body() {
     assert!(value.get("prompt_cache_key").is_none());
     assert!(value.get("service_tier").is_none());
 }
+
+/// Chat Completions with messages become a Connect frame, not JSON.
+#[test]
+fn chat_messages_become_connect_protobuf() {
+    let body = serde_json::to_vec(&json!({
+        "model": "composer-2.5",
+        "session_id": "c-9",
+        "messages": [{ "role": "user", "content": "hi" }],
+    }))
+    .unwrap();
+    let hop = plan(
+        &HopInput {
+            body: &body,
+            ..HopInput::default()
+        },
+        None,
+    );
+    let bytes = hop.body.expect("protobuf body");
+    assert_eq!(bytes[0], 0, "connect flag none");
+    let len = u32::from_be_bytes(bytes[1..5].try_into().unwrap()) as usize;
+    assert_eq!(bytes.len(), 5 + len);
+    assert!(serde_json::from_slice::<serde_json::Value>(&bytes).is_err());
+}

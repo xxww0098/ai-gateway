@@ -202,7 +202,12 @@ fn the_refresh_token_is_read_from_either_nesting_level() {
 fn a_request_without_a_token_is_refused_before_anything_is_planned() {
     let provider = provider();
     let err = provider
-        .plan_request(&ProviderRequest::default(), "", CODEX_DEFAULT_BASE_URL)
+        .plan_request(
+            &ProviderRequest::default(),
+            "",
+            CODEX_DEFAULT_BASE_URL,
+            None,
+        )
         .expect_err("an empty access token must not produce a plan");
     assert!(matches!(err, ProviderError::Credential(_)), "{err:?}");
 }
@@ -216,7 +221,7 @@ fn streaming_requests_force_include_usage_like_the_openai_planner() {
         ..Default::default()
     };
     let plan = provider
-        .plan_request(&req, "tok", CODEX_DEFAULT_BASE_URL)
+        .plan_request(&req, "tok", CODEX_DEFAULT_BASE_URL, None)
         .expect("plans");
 
     assert_eq!(
@@ -225,18 +230,33 @@ fn streaming_requests_force_include_usage_like_the_openai_planner() {
     );
     assert!(matches!(&plan.credential, gw_relay::Credential::Bearer(t) if t == "tok"));
     assert_eq!(plan.headers[ACCEPT], "text/event-stream");
-    // 插入内容本身由 `common_tests` 覆盖；这里只证明 planner 接上了那条路。
     let body = plan
         .body
         .as_ref()
         .expect("a streaming plan rewrites the body");
-    assert!(body.len() > req.payload.len());
-    assert_eq!(
-        body.len(),
-        crate::common::ensure_include_usage(&req.payload, Surface::OpenAiCompletions)
-            .expect("fixture must be spliceable")
-            .len()
-    );
+    let value: serde_json::Value = serde_json::from_slice(body).unwrap();
+    assert_eq!(value["stream"], json!(true));
+    assert_eq!(value["stream_options"]["include_usage"], json!(true));
+    assert!(plan.headers.contains_key("originator"));
+    assert!(plan.headers.contains_key("user-agent"));
+    assert!(!plan.headers.contains_key(http::header::AUTHORIZATION));
+}
+
+/// DSH `session_id` is copied onto the cache key then dropped. chatgpt.com
+/// 400s if it stays on the JSON.
+#[test]
+fn inbound_session_id_is_stripped_before_the_relay() {
+    let req = ProviderRequest {
+        payload: Bytes::from_static(br#"{"model":"gpt-5.5","session_id":"dsh-sess"}"#),
+        ..Default::default()
+    };
+    let plan = provider()
+        .plan_request(&req, "tok", CODEX_DEFAULT_BASE_URL, None)
+        .expect("plans");
+    let body = plan.body.expect("stripping session_id rewrites the body");
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(value.get("session_id").is_none());
+    assert!(plan.headers.contains_key("session-id"));
 }
 
 // --- OAuth token rotation ------------------------------------------------------

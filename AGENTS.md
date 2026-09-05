@@ -137,6 +137,8 @@ hold 在**同一个事务**里锁订阅行 → 轮转 → 比「已用 + 在途�
 
 - `gw-provider` 只产出 `RoutePlan`（端点、凭证、provider 自己的头、可能改写过的 body）——
   一个纯值，不含 socket。`Provider::execute` / `execute_stream` 已**删除**，不是弃用。
+- 订阅 hop 的 identity / cache / body 改写在 `gw-oauth-hops`：还是纯值，没有 socket。
+  `gw-provider` 把它填进 `RoutePlan`。家族之间不互相 import 缓存助手。
 - 唯一留在 `gw-provider` 的 HTTP 是**凭证刷新**，集中在 `oauth.rs`：它打的是身份提供方的
   token 端点，不带租户载荷，响应不回给客户端，也不在请求路径上。
 - 这条规矩由 `gw-provider/src/route/tests.rs` 的源码扫描守着：除 `oauth.rs` 外任何文件出现

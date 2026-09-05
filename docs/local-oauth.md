@@ -35,18 +35,18 @@
 
 ## 对比 [dsh-plugin-oauth-subs](https://github.com/xxww0098/dsh-plugin-oauth-subs)
 
-那是 Harness 里直连各订阅上游的 loopback 代理。本仓库是 LLM 中转网关：凭证进 `auth_records`，推理只从 `gw-relay` 出网。
+那是 Harness 里直连各订阅上游的 loopback 代理。本仓库是 LLM 中转网关：凭证进 `auth_records`，推理只从 `gw-relay` 出网。订阅 hop 的 **identity / cache / body 改写** 在 [`crates/gw-oauth-hops`](../crates/gw-oauth-hops)，`gw-provider` 把它填进 `RoutePlan`，不在 hops crate 里发 HTTP。
 
 | 参考插件能力 | 本仓库 | 说明 |
 | --- | --- | --- |
-| Codex 读 `~/.codex/auth.json` | 已做 | 导入 + 既有 PKCE 刷新 |
+| Codex 读 `~/.codex/auth.json` | 已做 | 导入 + 既有 PKCE 刷新 + `gw-oauth-hops::codex` |
 | Claude Code `~/.claude/.credentials.json` | 已做 | 参考插件没有这一家；OAuth token 走 Bearer + `oauth` beta |
-| Grok / Hermes 本地文件 | 已做 | 既有 device-code 仍在 |
-| Kiro 本地 / SSO cache | 已做 | 既有 import / device / auth-code |
-| GLM / Z.ai / BigModel | **不做** | 没有 `gw-provider` 执行器，前端契约冻结 |
-| Antigravity | **不做** | 面板已明确 404，无后端 |
-| Cursor 导入 / Keychain | **不做** | 无 Cursor 上游；不读 Keychain |
-| Ollama Cloud / Kimi / OpenCode | **不做** | 无对应 planner；Ollama Cloud 是 API key，不是 OAuth 文件 |
+| Grok / Hermes 本地文件 | 已做 | 既有 device-code + `gw-oauth-hops::grok` |
+| Kiro 本地 / SSO cache | 已做 | 既有 import / device / auth-code + `gw-oauth-hops::kiro` |
+| GLM / Z.ai / BigModel | hop 已做 | `gw-oauth-hops::glm`；还没有 `gw-provider` 执行器 |
+| Antigravity | hop 已做 | `gw-oauth-hops::antigravity`；面板仍 404，无 planner |
+| Cursor | hop 已做 | `gw-oauth-hops::cursor` identity；protobuf AgentService 仍未接线 |
+| Kimi / OpenCode / Copilot / Ollama Cloud | hop 已做 | 同 crate；还没有对应 planner |
 | DSH 设置页 / 配额条 / loopback `:8318` | **不做** | 与网关架构无关的 UI |
 
 ## 缓存命中（顺带）

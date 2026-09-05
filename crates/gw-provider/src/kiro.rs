@@ -136,8 +136,8 @@ impl KiroProvider {
 
     /// Plans an outbound CodeWhisperer request.
     ///
-    /// There is no protocol translation here: the payload is forwarded as-is
-    /// under a Bearer token, and the endpoint is the account's base URL itself.
+    /// OpenAI chat bodies are translated in `gw-oauth-hops::kiro`. Already-native
+    /// `conversationState` payloads pass through.
     fn plan_request(
         &self,
         req: &ProviderRequest,
@@ -152,6 +152,16 @@ impl KiroProvider {
         let endpoint = url::Url::parse(base_url.trim_end_matches('/'))
             .map_err(|err| ProviderError::Other(anyhow::anyhow!("invalid kiro base_url: {err}")))?;
 
+        let hop = gw_oauth_hops::kiro::plan(
+            &gw_oauth_hops::HopInput {
+                body: &req.payload,
+                model: (!req.model.trim().is_empty()).then_some(req.model.as_str()),
+                profile_arn: req.metadata.get("profile_arn").map(String::as_str),
+                ..gw_oauth_hops::HopInput::default()
+            },
+            None,
+        );
+
         let mut headers = HeaderMap::new();
         if !req.headers.contains_key(CONTENT_TYPE) {
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -161,13 +171,14 @@ impl KiroProvider {
         } else if !req.headers.contains_key(ACCEPT) {
             headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         }
+        gw_oauth_hops::merge_headers(&mut headers, hop.headers);
 
         Ok(RoutePlan {
             provider: PROVIDER_KIRO,
             endpoint,
             credential: Credential::Bearer(access_token.to_owned()),
             headers,
-            body: None,
+            body: hop.body,
             timeouts: relay_timeouts(self.timeout),
             // Kiro has no cell in the 15-cell matrix; the payload is whatever
             // the caller sent, so the nearest honest label is the OpenAI chat

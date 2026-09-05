@@ -31,6 +31,7 @@ ai-gateway/
 │   ├── gw-pricing/         #   ModelPriceCache + 四列单价 Calculator
 │   ├── gw-ledger/          #   Hold/Settle/Release 账本（Redis Lua + PG）
 │   ├── gw-provider/        #   上游路由规划（RoutePlan）+ 凭证刷新 + usage 解析（不发推理 HTTP）
+│   ├── gw-oauth-hops/      #   订阅 hop 规划（identity / cache / body rewrite，无 socket）
 │   ├── gw-proxy/           #   /v1/* 代理内核（无 /v1beta）
 │   ├── gw-panel/           #   /api/panel/** 运营面板，按业务域切分
 │   ├── gw-relay/           #   纯字节中继内核

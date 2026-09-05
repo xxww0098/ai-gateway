@@ -17,6 +17,7 @@ gw-authcore.workspace = true
 # 用 gw_relay::splice_include_usage 的定点字节插入，取代 ensure_include_usage 的
 # 整体 JSON round-trip（审计缺陷 #4）。依赖方向是单向的：gw-relay 不依赖任何内部 crate。
 gw-relay.workspace = true
+gw-oauth-hops.workspace = true
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true, features = ["std"] }
 chrono = { workspace = true, features = ["clock", "std", "serde"] }

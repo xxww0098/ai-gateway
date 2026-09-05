@@ -136,6 +136,7 @@ impl XaiProvider {
         req: &ProviderRequest,
         access_token: &str,
         base_url: &str,
+        user_id: Option<&str>,
     ) -> Result<RoutePlan, ProviderError> {
         if access_token.is_empty() {
             return Err(ProviderError::Credential(
@@ -151,12 +152,34 @@ impl XaiProvider {
         };
         let endpoint = url::Url::parse(&endpoint)
             .map_err(|err| ProviderError::Other(anyhow::anyhow!("invalid xai endpoint: {err}")))?;
+
+        let inbound_req_id = req
+            .headers
+            .get("x-grok-req-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+        let minted_req_id = inbound_req_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let hop = gw_oauth_hops::grok::plan(&gw_oauth_hops::HopInput {
+            body: &req.payload,
+            user_id,
+            model: (!req.model.trim().is_empty()).then_some(req.model.as_str()),
+            request_id: Some(minted_req_id.as_str()),
+            ..gw_oauth_hops::HopInput::default()
+        });
+        let hop_headers = hop.headers;
+        let hop_body = hop.body;
         // Force the terminal usage envelope on streams, but only after
         // re-verifying `stream: true` in the body itself. `None` 表示一个字节都不动。
         let body = if req.stream {
-            RoutePlan::splice(ensure_include_usage(&req.payload, surface))
+            let source = hop_body.as_ref().unwrap_or(&req.payload);
+            match RoutePlan::splice(ensure_include_usage(source, surface)) {
+                Some(bytes) => Some(bytes),
+                None => hop_body,
+            }
         } else {
-            None
+            hop_body
         };
 
         let mut headers = HeaderMap::new();
@@ -168,6 +191,7 @@ impl XaiProvider {
         } else if !req.headers.contains_key(ACCEPT) {
             headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         }
+        gw_oauth_hops::merge_headers(&mut headers, hop_headers);
 
         Ok(RoutePlan {
             provider: PROVIDER_XAI,
@@ -214,7 +238,9 @@ impl RoutePlanner for XaiProvider {
         req: &ProviderRequest,
     ) -> Result<RoutePlan, ProviderError> {
         let (access_token, base_url) = self.resolve_credentials(auth);
-        self.plan_request(req, &access_token, &base_url)
+        let user_id = string_from_map(&auth.metadata, "user_id")
+            .or_else(|| nested_string(&auth.metadata, META_TOKEN_DATA, "user_id"));
+        self.plan_request(req, &access_token, &base_url, user_id.as_deref())
     }
 
     async fn refresh(&self, auth: &AuthRecord) -> Result<AuthRecord, ProviderError> {

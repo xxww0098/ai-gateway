@@ -185,6 +185,7 @@ impl CodexProvider {
         req: &ProviderRequest,
         access_token: &str,
         base_url: &str,
+        account_id: Option<&str>,
     ) -> Result<RoutePlan, ProviderError> {
         if access_token.is_empty() {
             return Err(ProviderError::Credential(
@@ -201,12 +202,26 @@ impl CodexProvider {
         let endpoint = url::Url::parse(&endpoint).map_err(|err| {
             ProviderError::Other(anyhow::anyhow!("invalid codex endpoint: {err}"))
         })?;
+
+        let hop = gw_oauth_hops::codex::plan(&gw_oauth_hops::HopInput {
+            body: &req.payload,
+            account_id,
+            model: (!req.model.trim().is_empty()).then_some(req.model.as_str()),
+            service_tier: req.metadata.get("service_tier").map(String::as_str),
+            ..gw_oauth_hops::HopInput::default()
+        });
+        let hop_headers = hop.headers;
+        let hop_body = hop.body;
         // Force the terminal usage envelope on streams, but only after
         // re-verifying `stream: true` in the body itself. `None` 表示一个字节都不动。
         let body = if req.stream {
-            RoutePlan::splice(ensure_include_usage(&req.payload, surface))
+            let source = hop_body.as_ref().unwrap_or(&req.payload);
+            match RoutePlan::splice(ensure_include_usage(source, surface)) {
+                Some(bytes) => Some(bytes),
+                None => hop_body,
+            }
         } else {
-            None
+            hop_body
         };
 
         let mut headers = HeaderMap::new();
@@ -218,6 +233,7 @@ impl CodexProvider {
         } else if !req.headers.contains_key(ACCEPT) {
             headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         }
+        gw_oauth_hops::merge_headers(&mut headers, hop_headers);
 
         Ok(RoutePlan {
             provider: PROVIDER_CODEX,
@@ -338,7 +354,9 @@ impl RoutePlanner for CodexProvider {
         req: &ProviderRequest,
     ) -> Result<RoutePlan, ProviderError> {
         let (access_token, base_url) = self.resolve_credentials(auth);
-        self.plan_request(req, &access_token, &base_url)
+        let account_id = string_from_map(&auth.metadata, "account_id")
+            .or_else(|| string_from_map(&auth.metadata, "chatgpt_account_id"));
+        self.plan_request(req, &access_token, &base_url, account_id.as_deref())
     }
 
     /// Rotates the OAuth credential.

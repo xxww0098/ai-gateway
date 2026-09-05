@@ -76,6 +76,7 @@ gw-provider = { path = "crates/gw-provider" }
 gw-relay = { path = "crates/gw-relay" }
 gw-proxy = { path = "crates/gw-proxy" }
 gw-panel = { path = "crates/gw-panel" }
+gw-oauth-hops = { path = "crates/gw-oauth-hops" }
 
 # Rule 4.2 + 5.3 ratchet: only `deny` what has ZERO violations today. The
 # skeleton still carries todo!()/unimplemented!(), so those stay `warn` and get

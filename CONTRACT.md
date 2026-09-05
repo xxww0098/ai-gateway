@@ -46,6 +46,7 @@ ai-gateway：Rust + axum 实现的 LLM 中转网关，不依赖任何上游网�
 | `authcore` | `crates/gw-authcore/**` |
 | `ledger-pricing` | `crates/gw-ledger/**`、`crates/gw-pricing/**` |
 | `provider-openai` | `crates/gw-provider/src/{common,openai,codex,usage,streambuf}.rs` |
+| `oauth-hops` | `crates/gw-oauth-hops/**` |
 | `provider-claude` | `crates/gw-provider/src/{claude,gemini,vertex}.rs` |
 | `proxy-kernel` | `crates/gw-proxy/**` |
 | `relay` | `crates/gw-relay/**` |

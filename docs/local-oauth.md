@@ -35,7 +35,7 @@
 
 ## 对比 [dsh-plugin-oauth-subs](https://github.com/xxww0098/dsh-plugin-oauth-subs)
 
-那是 Harness 里直连各订阅上游的 loopback 代理。本仓库是 LLM 中转网关：凭证进 `auth_records`，推理只从 `gw-relay` 出网。
+那是 Harness 里直连各订阅上游的 loopback 代理。本仓库是 LLM 中转网关：凭证进 `auth_records`，推理只从 `gw-relay` 出网。订阅 hop 的 **identity / cache / body 改写** 在 [`crates/gw-oauth-hops`](../crates/gw-oauth-hops)，`gw-provider` 把它填进 `RoutePlan`，不在 hops crate 里发 HTTP。
 
 | 参考插件能力 | 本仓库 | 说明 |
 | --- | --- | --- |

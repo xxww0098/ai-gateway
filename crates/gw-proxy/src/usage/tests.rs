@@ -305,7 +305,7 @@ async fn strict_mode_neither_charges_nor_releases_and_records_the_event() {
     let logs = fixture.store.logs.lock();
     assert_eq!(logs.len(), 1);
     assert!(logs[0].failed);
-    assert_eq!(logs[0].actual_cost, 0.0);
+    assert_eq!(logs[0].cost, 0.0);
     assert_eq!(
         logs[0].raw_metadata.as_ref().expect("reason")["reason"].as_str(),
         Some(REASON_MISSING_USAGE_STRICT),
@@ -373,7 +373,20 @@ async fn a_rolled_back_transaction_leaves_the_reservation_for_reconciliation() {
         "a hold cleared after a rollback would charge nothing but lose the reservation",
     );
     assert_eq!(fixture.ledger.held_amount(&ctx.operation), Some(1.0));
-    assert!(fixture.store.logs.lock()[0].failed);
+    let logs = fixture.store.logs.lock();
+    let failed = &logs[0];
+    assert!(failed.failed);
+    // 回滚意味着**一分钱都没动**，所以这条审计行的金额列必须是 0：面板的总花费
+    // 直接 SUM(usage_logs.cost)、不按 failed 过滤，留着全额就会把一次失败的尝试
+    // 算成真花掉的钱，与 balance_logs 对不上账。
+    assert_eq!(failed.cost, 0.0, "回滚的结算行不许带可汇总的金额");
+    // 尝试收多少不能丢 —— 它是运维判断这次回滚值不值得追的唯一线索。
+    let attempted = failed
+        .raw_metadata
+        .as_ref()
+        .and_then(|meta| meta.get("attempted_cost"))
+        .and_then(serde_json::Value::as_f64);
+    assert!(attempted.is_some(), "尝试金额要留在 metadata 里");
 }
 
 #[tokio::test]

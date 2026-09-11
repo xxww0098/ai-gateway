@@ -33,8 +33,6 @@ pub const DEFAULT_REQUESTS_PER_MIN: i64 = 60;
 pub const DEFAULT_TOKENS_PER_MIN: i64 = 100_000;
 /// Default per-identity concurrency budget (`MaxConcurrent`).
 pub const DEFAULT_MAX_CONCURRENT: i64 = 10;
-/// Default burst allowance (`BurstSize`). See [`RateLimitSettings::burst_size`].
-pub const DEFAULT_BURST_SIZE: i64 = 2;
 /// Default gateway-wide request cap (`GlobalRequestCap`).
 pub const DEFAULT_GLOBAL_REQUEST_CAP: i64 = 10_000;
 /// Default gateway-wide token cap (`GlobalTokenCap`).
@@ -148,6 +146,25 @@ redis.call('EXPIRE', gtok_key, expire_sec)
 return "ALLOWED"
 "#;
 
+/// Account-scoped in-flight cap. Does **not** touch request/token/global windows.
+const CHANNEL_CONC_LUA: &str = r#"
+local conc_key  = KEYS[1]
+local max_conc  = tonumber(ARGV[1])
+local request_id = ARGV[2]
+
+if max_conc <= 0 then
+    return "ALLOWED"
+end
+
+local current = redis.call('SCARD', conc_key)
+if current >= max_conc then
+    return "DENIED:concurrent"
+end
+redis.call('SADD', conc_key, request_id)
+redis.call('EXPIRE', conc_key, 600)
+return "ALLOWED"
+"#;
+
 /// Per-group limit overrides. A field of zero (or less) means "inherit the
 /// default", it does not mean "forbid".
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -158,8 +175,6 @@ pub struct RateLimitOverride {
     pub tokens_per_min: i64,
     /// Overrides [`RateLimitSettings::max_concurrent`] when positive.
     pub max_concurrent: i64,
-    /// Overrides [`RateLimitSettings::burst_size`] when positive.
-    pub burst_size: i64,
 }
 
 /// Limiter configuration. Mirrors `gw_config::RateLimitConfig` field-for-field.
@@ -171,9 +186,6 @@ pub struct RateLimitSettings {
     pub tokens_per_min: i64,
     /// Per-identity in-flight requests.
     pub max_concurrent: i64,
-    /// Burst allowance. Carried for config parity: the script does not consume
-    /// it — the sliding window *is* the burst budget.
-    pub burst_size: i64,
     /// Gateway-wide request cap; `<= 0` disables the global check.
     pub global_request_cap: i64,
     /// Gateway-wide token cap; `<= 0` disables the global check.
@@ -192,7 +204,6 @@ impl Default for RateLimitSettings {
             requests_per_min: DEFAULT_REQUESTS_PER_MIN,
             tokens_per_min: DEFAULT_TOKENS_PER_MIN,
             max_concurrent: DEFAULT_MAX_CONCURRENT,
-            burst_size: DEFAULT_BURST_SIZE,
             global_request_cap: DEFAULT_GLOBAL_REQUEST_CAP,
             global_token_cap: DEFAULT_GLOBAL_TOKEN_CAP,
             group_overrides: HashMap::new(),
@@ -210,7 +221,6 @@ impl RateLimitSettings {
             (&mut self.requests_per_min, defaults.requests_per_min),
             (&mut self.tokens_per_min, defaults.tokens_per_min),
             (&mut self.max_concurrent, defaults.max_concurrent),
-            (&mut self.burst_size, defaults.burst_size),
             (&mut self.global_request_cap, defaults.global_request_cap),
             (&mut self.global_token_cap, defaults.global_token_cap),
         ] {
@@ -225,6 +235,18 @@ impl RateLimitSettings {
     /// over the default for each field it sets positively, and a per-model
     /// token limit then wins over both.
     pub fn effective_limits(&self, group_id: Option<Id>, model: &str) -> EffectiveLimits {
+        self.effective_limits_for(group_id, model, 0)
+    }
+
+    /// Like [`Self::effective_limits`], then a positive `user_concurrency`
+    /// replaces `max_concurrent`. The admin-set `users.concurrency` is the
+    /// per-tenant cap; the YAML value is only the fallback.
+    pub fn effective_limits_for(
+        &self,
+        group_id: Option<Id>,
+        model: &str,
+        user_concurrency: i64,
+    ) -> EffectiveLimits {
         let mut limits = EffectiveLimits {
             max_requests: self.requests_per_min,
             max_tokens: self.tokens_per_min,
@@ -252,6 +274,10 @@ impl RateLimitSettings {
             limits.max_tokens = limit;
         }
 
+        if user_concurrency > 0 {
+            limits.max_concurrent = user_concurrency;
+        }
+
         limits
     }
 }
@@ -262,7 +288,6 @@ impl From<&gw_config::RateLimitOverride> for RateLimitOverride {
             requests_per_min: i64::from(cfg.requests_per_min),
             tokens_per_min: cfg.tokens_per_min,
             max_concurrent: i64::from(cfg.max_concurrent),
-            burst_size: i64::from(cfg.burst_size),
         }
     }
 }
@@ -276,7 +301,6 @@ impl From<&gw_config::RateLimitConfig> for RateLimitSettings {
             requests_per_min: i64::from(cfg.requests_per_min),
             tokens_per_min: cfg.tokens_per_min,
             max_concurrent: i64::from(cfg.max_concurrent),
-            burst_size: i64::from(cfg.burst_size),
             global_request_cap: i64::from(cfg.global_request_cap),
             global_token_cap: cfg.global_token_cap,
             group_overrides: cfg
@@ -334,12 +358,6 @@ impl DeniedDimension {
             Self::GlobalTokenLimit => "global_token_limit",
             Self::Unspecified => "unspecified",
         }
-    }
-
-    /// Whether the rejection came from a gateway-wide cap rather than from the
-    /// caller's own budget — the two deserve different messages upstream.
-    pub fn is_global(self) -> bool {
-        matches!(self, Self::GlobalRequestCount | Self::GlobalTokenLimit)
     }
 
     fn from_wire(raw: &str) -> Self {
@@ -409,6 +427,7 @@ pub struct RateLimiter {
     redis: Option<Redis>,
     settings: RateLimitSettings,
     script: Script,
+    channel_script: Script,
 }
 
 impl fmt::Debug for RateLimiter {
@@ -429,6 +448,7 @@ impl RateLimiter {
             redis,
             settings: settings.with_defaults(),
             script: Script::new(RATE_LIMIT_LUA),
+            channel_script: Script::new(CHANNEL_CONC_LUA),
         }
     }
 
@@ -454,12 +474,29 @@ impl RateLimiter {
         model: &str,
         group_id: Option<Id>,
     ) -> RateLimitDecision {
+        self.limit(identity, token_count, model, group_id, 0).await
+    }
+
+    /// Like [`Self::allow`], with a per-user concurrent-request cap.
+    ///
+    /// A positive `user_concurrency` replaces the YAML/group `max_concurrent`
+    /// for this request. `<= 0` keeps the configured default.
+    pub async fn limit(
+        &self,
+        identity: &str,
+        token_count: i64,
+        model: &str,
+        group_id: Option<Id>,
+        user_concurrency: i64,
+    ) -> RateLimitDecision {
         let Some(conn) = self.redis.as_ref() else {
             tracing::warn!("RateLimiter: Redis client is nil, allowing request (fail-open)");
             return RateLimitDecision::Allowed { release_id: None };
         };
 
-        let limits = self.settings.effective_limits(group_id, model);
+        let limits = self
+            .settings
+            .effective_limits_for(group_id, model, user_concurrency);
         let request_id = new_request_id();
         let mut conn = conn.clone();
 
@@ -540,6 +577,75 @@ impl RateLimiter {
         }
         Ok(())
     }
+
+    /// Reserves one in-flight slot for an upstream account.
+    ///
+    /// Unlike [`Self::allow`] this does not consume request/token/global
+    /// windows — those stay per-tenant. `max_concurrent <= 0` skips Redis
+    /// entirely (unlimited).
+    pub async fn acquire_channel(&self, auth_id: &str, max_concurrent: i64) -> RateLimitDecision {
+        if max_concurrent <= 0 {
+            return RateLimitDecision::Allowed { release_id: None };
+        }
+        let Some(conn) = self.redis.as_ref() else {
+            tracing::warn!(
+                auth_id,
+                "RateLimiter: Redis client is nil, allowing channel slot (fail-open)"
+            );
+            return RateLimitDecision::Allowed { release_id: None };
+        };
+        let request_id = new_request_id();
+        let mut conn = conn.clone();
+        let mut invocation = self.channel_script.prepare_invoke();
+        invocation
+            .key(channel_concurrency_key(auth_id))
+            .arg(max_concurrent)
+            .arg(&request_id);
+        let outcome: Result<String, _> = invocation.invoke_async(&mut conn).await;
+        let raw = match outcome {
+            Ok(raw) => raw,
+            Err(error) => {
+                tracing::warn!(
+                    auth_id,
+                    %error,
+                    "RateLimiter: channel concurrency script error, allowing (fail-open)"
+                );
+                return RateLimitDecision::Allowed { release_id: None };
+            }
+        };
+        parse_script_result(&raw, &request_id)
+    }
+
+    /// Frees a slot reserved by [`Self::acquire_channel`].
+    pub async fn release_channel(&self, auth_id: &str, release_id: &str) -> Result<(), InfraError> {
+        let Some(conn) = self.redis.as_ref() else {
+            return Ok(());
+        };
+        if release_id.is_empty() {
+            return Ok(());
+        }
+        let mut conn = conn.clone();
+        let removed: i64 = conn
+            .srem(channel_concurrency_key(auth_id), release_id)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    auth_id,
+                    release_id,
+                    %error,
+                    "RateLimiter: failed to release channel slot"
+                );
+                InfraError::Redis(error)
+            })?;
+        if removed == 0 {
+            tracing::debug!(
+                auth_id,
+                release_id,
+                "RateLimiter: channel slot was already gone (expired or double-released)"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Turns the script's reply into a decision, treating an unrecognised payload
@@ -570,6 +676,12 @@ fn token_key(identity: &str) -> String {
 /// Per-identity in-flight request set key.
 fn concurrency_key(identity: &str) -> String {
     format!("{KEY_PREFIX}:conc:{identity}")
+}
+
+/// Per-upstream-account in-flight set. Separate prefix so a tenant identity
+/// can never collide with an auth id.
+fn channel_concurrency_key(auth_id: &str) -> String {
+    format!("{KEY_PREFIX}:channel:conc:{auth_id}")
 }
 
 /// Gateway-wide request window key.

@@ -21,6 +21,10 @@ dist-ssr/
 
 # Agent tooling state
 .claude/
+.agents/
+.codex/
+.codegraph/
+.impeccable/
 
 # IDE
 .idea/

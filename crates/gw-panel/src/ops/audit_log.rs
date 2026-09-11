@@ -40,8 +40,7 @@ pub const SOURCE_SDK: &str = "sdk";
 /// 对应 `opSourceBalance`。
 pub const SOURCE_BALANCE: &str = "balance";
 
-/// 对应 `apiErrorInternal`。
-const ERR_INTERNAL: i32 = 5000;
+use crate::codes::INTERNAL as ERR_INTERNAL;
 
 /// Ceiling on the per-table over-fetch. 对应既有实现的 `if fetchLimit > 1000 { fetchLimit = 1000 }`。
 const MAX_FETCH: i64 = 1000;

@@ -53,12 +53,7 @@ interface RefundRecord {
   created_at: string
 }
 
-type AdminRefundsProps = {
-  /** When true, omit page chrome (embedded in Commerce tabs). */
-  embedded?: boolean
-}
-
-export default function AdminRefunds({ embedded = false }: AdminRefundsProps) {
+export default function AdminRefunds() {
   const [records, setRecords] = useState<RefundRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [page, setPage] = useState(1)
@@ -124,14 +119,14 @@ export default function AdminRefunds({ embedded = false }: AdminRefundsProps) {
     switch (status) {
       case "pending":
         return (
-          <Badge variant="outline" className="text-amber-600 border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800">
+          <Badge variant="outline" className="text-amber-700 dark:text-amber-400 border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800">
             <Clock className="w-3 h-3 mr-1" />
             待审核
           </Badge>
         )
       case "approved":
         return (
-          <Badge className="bg-emerald-500 hover:bg-emerald-600 text-white border-transparent">
+          <Badge className="bg-emerald-700 hover:bg-emerald-800 text-white border-transparent">
             <CheckCircle2 className="w-3 h-3 mr-1" />
             已通过
           </Badge>
@@ -153,30 +148,11 @@ export default function AdminRefunds({ embedded = false }: AdminRefundsProps) {
   const pendingCount = records.filter((r) => r.status === "pending").length
 
   return (
-    <div
-      className={`space-y-6 ${embedded ? "" : "animate-in fade-in duration-500"}`}
-      style={embedded ? undefined : { willChange: "transform, opacity" }}
-    >
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        {!embedded ? (
-          <div className="space-y-1">
-            <h3 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
-              <ArrowLeftRight className="w-6 h-6 text-primary" />
-              退款审核
-            </h3>
-            <p className="text-sm text-gray-500 max-w-2xl">
-              审核用户的退订申请。金额小于 $100 的退订已自动通过，此处仅显示需要人工审核的申请。
-            </p>
-          </div>
-        ) : (
-          <p className="text-sm text-gray-500 max-w-2xl">
-            审核退订申请；小额退款可能已自动通过。
-          </p>
-        )}
-
-        <div className="flex items-center gap-2">
-          {pendingCount > 0 && (
-            <Badge variant="outline" className="text-amber-600 border-amber-200 bg-amber-50 dark:bg-amber-950/20">
+    <div className="space-y-6">
+      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
+      <div className="flex items-center gap-2">
+        {pendingCount > 0 && (
+            <Badge variant="outline" className="text-amber-700 dark:text-amber-400 border-amber-200 bg-amber-50 dark:bg-amber-950/20">
               <AlertTriangle className="w-3 h-3 mr-1" />
               {pendingCount} 待审核
             </Badge>
@@ -222,7 +198,7 @@ export default function AdminRefunds({ embedded = false }: AdminRefundsProps) {
                   <EmptyState
                     size="compact"
                     icon={ArrowLeftRight}
-                    title="暂无退款申请"
+                    title="还没有退款申请"
                     description="用户提交订阅退款申请后将在此处展示。管理员审核通过后将取消对应权益并退款至账户余额。"
                   />
                 </TableCell>
@@ -380,7 +356,7 @@ export default function AdminRefunds({ embedded = false }: AdminRefundsProps) {
               {selectedRecord.status === "pending" && (
                 <div className="flex gap-2 pt-2">
                   <Button
-                    className="flex-1 bg-emerald-600 hover:bg-emerald-700"
+                    className="flex-1 bg-emerald-700 hover:bg-emerald-800"
                     onClick={() => {
                       setDetailOpen(false)
                       handleApprove(selectedRecord.id)

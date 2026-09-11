@@ -22,7 +22,7 @@ async fn a_limiter_without_redis_admits_traffic_instead_of_stopping_it() {
     // Fail-open is the deliberate posture: a rate limiter outage must not take
     // the proxy down with it.
     let (allowed, release_id) = limiter_without_redis()
-        .allow("7", 1, "gpt-4o", None)
+        .allow("7", 1, "gpt-4o", None, 0)
         .await
         .expect("failing open is not an error");
     assert!(allowed);

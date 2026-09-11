@@ -193,6 +193,15 @@ impl Calculator {
     /// price every column at `default_price_per_1m`.
     /// All-zero [`TokenUsage`] yields exactly 0 whatever the price or
     /// `rate_mult`.
+    ///
+    /// The caller is expected to hand over **mutually exclusive** columns
+    /// (`gw_proxy::usage::billable_tokens` does that per upstream); this
+    /// method prices whatever it is given, it does not un-nest anything.
+    ///
+    /// A `cached_input_price_per1_m` or `reasoning_price_per1_m` left at 0 is
+    /// read as "not configured", not as "free": the slice falls back to the
+    /// input / output rate respectively. See the fallback comment below for
+    /// the vendor evidence behind that reading.
     #[must_use]
     pub fn compute(&self, model_id: &str, tokens: TokenUsage, rate_mult: f64) -> CostBreakdown {
         let (input_per_1m, output_per_1m, cached_per_1m, reasoning_per_1m) =
@@ -208,6 +217,28 @@ impl Calculator {
                     (d, d, d, d)
                 }
             };
+
+        // 子费率留空（0）等于「这一块按基准费率走」，**不等于免费**。
+        //
+        // `cached_input_price_per1_m` / `reasoning_price_per1_m` 的建表默认值都是 0，
+        // 运维新加一行 model_prices 时极容易留空。而这两个列不是可选加成——`cached`
+        // 与 `reasoning` 是真实发生过的 token，每一家上游都为它们收钱，只是相对
+        // 基准价打折或另计：OpenAI 缓存读 0.1×~0.5× input、reasoning 干脆按 output 价；
+        // Google 缓存 0.1×~0.25×；Anthropic 缓存读 0.1×、缓存写 1.25×。
+        // 所以「没配」的忠实读法是回落到基准费率，这也让一行没填子费率的价目
+        // 与「把子费率填成基准价」完全等价，是唯一自洽的默认。
+        //
+        // 与 `PRODUCT.md` 的第三条产品原则同向：不把空值画成零成本。
+        let cached_per_1m = if cached_per_1m > 0.0 {
+            cached_per_1m
+        } else {
+            input_per_1m
+        };
+        let reasoning_per_1m = if reasoning_per_1m > 0.0 {
+            reasoning_per_1m
+        } else {
+            output_per_1m
+        };
 
         // Sum the raw products, divide once, scale once.
         let raw = input_per_1m * tokens.input as f64

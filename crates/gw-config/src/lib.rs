@@ -64,10 +64,6 @@ pub const DEFAULT_LOG_LEVEL: &str = "warn";
 pub const DEFAULT_HOLD_TTL_SECONDS: i32 = 300;
 /// Balance cache TTL default.
 pub const DEFAULT_BALANCE_CACHE_TTL_SECONDS: i32 = 30;
-/// `BillingConfig.BudgetTokenMultiplier` doc comment.
-pub const DEFAULT_BUDGET_TOKEN_MULTIPLIER: i32 = 10;
-/// `BillingConfig.BudgetTokenTTLSeconds` doc comment.
-pub const DEFAULT_BUDGET_TOKEN_TTL_SECONDS: i32 = 60;
 /// `BillingConfig.LowBalanceThresholdUSD` doc comment.
 pub const DEFAULT_LOW_BALANCE_THRESHOLD_USD: f64 = 1.0;
 /// Price-cache refresh falls back to 60 seconds when unset (<= 0).
@@ -79,12 +75,23 @@ pub const DEFAULT_REQUESTS_PER_MIN: i32 = 60;
 pub const DEFAULT_TOKENS_PER_MIN: i64 = 100_000;
 /// Default concurrent-request cap.
 pub const DEFAULT_MAX_CONCURRENT: i32 = 10;
-/// Default burst size.
-pub const DEFAULT_BURST_SIZE: i32 = 2;
 /// Default global request cap.
 pub const DEFAULT_GLOBAL_REQUEST_CAP: i32 = 10_000;
 /// Default global token cap.
 pub const DEFAULT_GLOBAL_TOKEN_CAP: i64 = 10_000_000;
+
+/// Service-surface shared token. Empty = the `/api/service` group is not
+/// mounted at all (契约 §2). The stored value is kept verbatim; only the
+/// comparison trims the ends (see [`ServiceConfig::enabled`]).
+pub const DEFAULT_SERVICE_TOKEN: &str = "";
+/// Initial credit handed to a service-provisioned account. The contract
+/// requires `0` (a provisioned account gets no free money); non-zero is an
+/// experiment switch only.
+pub const DEFAULT_SERVICE_INITIAL_CREDIT: f64 = 0.0;
+/// Currency label echoed on余额 / 入账 responses. Display-only.
+pub const DEFAULT_SERVICE_CURRENCY: &str = "USD";
+/// Ceiling for one `POST /users/{id}/credits` amount.
+pub const DEFAULT_SERVICE_MAX_CREDIT: f64 = 100_000.0;
 
 /// Default failure threshold.
 pub const DEFAULT_FAILURE_THRESHOLD: f64 = 0.5;
@@ -108,12 +115,6 @@ fn default_hold_ttl_seconds() -> i32 {
 fn default_balance_cache_ttl_seconds() -> i32 {
     DEFAULT_BALANCE_CACHE_TTL_SECONDS
 }
-fn default_budget_token_multiplier() -> i32 {
-    DEFAULT_BUDGET_TOKEN_MULTIPLIER
-}
-fn default_budget_token_ttl_seconds() -> i32 {
-    DEFAULT_BUDGET_TOKEN_TTL_SECONDS
-}
 fn default_low_balance_threshold_usd() -> f64 {
     DEFAULT_LOW_BALANCE_THRESHOLD_USD
 }
@@ -129,9 +130,6 @@ fn default_tokens_per_min() -> i64 {
 fn default_max_concurrent() -> i32 {
     DEFAULT_MAX_CONCURRENT
 }
-fn default_burst_size() -> i32 {
-    DEFAULT_BURST_SIZE
-}
 fn default_global_request_cap() -> i32 {
     DEFAULT_GLOBAL_REQUEST_CAP
 }
@@ -146,6 +144,15 @@ fn default_window_seconds() -> i32 {
 }
 fn default_cooldown_seconds() -> i32 {
     DEFAULT_COOLDOWN_SECONDS
+}
+fn default_service_initial_credit() -> f64 {
+    DEFAULT_SERVICE_INITIAL_CREDIT
+}
+fn default_service_currency() -> String {
+    DEFAULT_SERVICE_CURRENCY.to_owned()
+}
+fn default_service_max_credit() -> f64 {
+    DEFAULT_SERVICE_MAX_CREDIT
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +181,8 @@ pub struct Config {
     pub rate_limit: RateLimitConfig,
     #[serde(default, rename = "circuit_breaker")]
     pub circuit_breaker: CircuitBreakerConfig,
+    #[serde(default)]
+    pub service: ServiceConfig,
 }
 
 /// HTTP server settings.
@@ -224,16 +233,6 @@ pub struct DatabaseConfig {
     pub max_open_conns: i32,
     #[serde(default)]
     pub conn_max_lifetime_minutes: i32,
-}
-
-impl DatabaseConfig {
-    /// The libpq key/value connection string.
-    pub fn dsn(&self) -> String {
-        format!(
-            "host={} port={} user={} password={} dbname={} sslmode={}",
-            self.host, self.port, self.user, self.password, self.dbname, self.sslmode
-        )
-    }
 }
 
 /// Redis connection settings.
@@ -297,11 +296,6 @@ impl SdkConfig {
 
         provider
     }
-
-    /// The upstream request timeout, `0` meaning "no configured timeout".
-    pub fn timeout(&self) -> Option<Duration> {
-        (self.timeout_seconds > 0).then(|| Duration::from_secs(self.timeout_seconds as u64))
-    }
 }
 
 /// Per-provider upstream settings.
@@ -336,13 +330,60 @@ pub struct AuthConfig {
     /// upstream credentials. Empty = cleartext (backward compatible).
     #[serde(default)]
     pub credential_encryption_key: String,
-    /// Retained for backward-compatible parsing only: runtime admin
-    /// authorization lives in `users.role`, never in an email claim.
-    #[serde(default)]
-    pub admin_emails: Vec<String>,
-    /// One-time, server-side admin bootstrap. Inert once any admin exists.
+    /// One-time, server-side owner bootstrap. Inert once any `super_admin` exists.
     #[serde(default)]
     pub bootstrap_admin_email: String,
+    /// Optional password for the bootstrap owner. Empty = promote-on-register
+    /// only. Must not be set without [`Self::bootstrap_admin_email`].
+    #[serde(default)]
+    pub bootstrap_admin_password: String,
+}
+
+/// How [`AuthConfig`] wants the first `super_admin` to be created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BootstrapMode {
+    Disabled,
+    PromoteOnRegister { email: String },
+    Seed { email: String, password: String },
+}
+
+/// Misconfiguration of the bootstrap env/yaml pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapConfigError {
+    PasswordWithoutEmail,
+    PasswordLength,
+}
+
+impl std::fmt::Display for BootstrapConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PasswordWithoutEmail => {
+                f.write_str("BOOTSTRAP_ADMIN_PASSWORD requires BOOTSTRAP_ADMIN_EMAIL")
+            }
+            Self::PasswordLength => f.write_str("BOOTSTRAP_ADMIN_PASSWORD must be 8 to 72 bytes"),
+        }
+    }
+}
+
+impl std::error::Error for BootstrapConfigError {}
+
+impl AuthConfig {
+    /// Interpret the email/password pair. Password-only is a hard error.
+    pub fn bootstrap_mode(&self) -> Result<BootstrapMode, BootstrapConfigError> {
+        let email = self.bootstrap_admin_email.trim().to_lowercase();
+        match (email.is_empty(), self.bootstrap_admin_password.is_empty()) {
+            (true, true) => Ok(BootstrapMode::Disabled),
+            (false, true) => Ok(BootstrapMode::PromoteOnRegister { email }),
+            (true, false) => Err(BootstrapConfigError::PasswordWithoutEmail),
+            (false, false) => match self.bootstrap_admin_password.len() {
+                8..=72 => Ok(BootstrapMode::Seed {
+                    email,
+                    password: self.bootstrap_admin_password.clone(),
+                }),
+                _ => Err(BootstrapConfigError::PasswordLength),
+            },
+        }
+    }
 }
 
 /// JWT settings.
@@ -357,9 +398,6 @@ pub struct JwtConfig {
 /// Billing / pre-charge settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BillingConfig {
-    /// No fallback default: `0` stays `0`.
-    #[serde(default)]
-    pub hold_amount: i32,
     /// No fallback default: `0` stays `0`. Note the unit — per **1K** tokens,
     /// while `pricing::Calculator` works per 1M (see
     /// [`BillingConfig::default_price_per_1m_tokens`]).
@@ -369,10 +407,6 @@ pub struct BillingConfig {
     pub hold_ttl_seconds: i32,
     #[serde(default = "default_balance_cache_ttl_seconds")]
     pub balance_cache_ttl_seconds: i32,
-    #[serde(default = "default_budget_token_multiplier")]
-    pub budget_token_multiplier: i32,
-    #[serde(default = "default_budget_token_ttl_seconds")]
-    pub budget_token_ttl_seconds: i32,
     #[serde(default = "default_low_balance_threshold_usd")]
     pub low_balance_threshold_usd: f64,
     /// `false` = conservative fallback settlement; `true` = suspend billing on
@@ -386,12 +420,9 @@ pub struct BillingConfig {
 impl Default for BillingConfig {
     fn default() -> Self {
         Self {
-            hold_amount: 0,
             default_price_per_1k_tokens: 0.0,
             hold_ttl_seconds: default_hold_ttl_seconds(),
             balance_cache_ttl_seconds: default_balance_cache_ttl_seconds(),
-            budget_token_multiplier: default_budget_token_multiplier(),
-            budget_token_ttl_seconds: default_budget_token_ttl_seconds(),
             low_balance_threshold_usd: default_low_balance_threshold_usd(),
             strict_usage_metadata_mode: false,
             price_cache_refresh_seconds: default_price_cache_refresh_seconds(),
@@ -446,8 +477,6 @@ pub struct RateLimitOverride {
     pub tokens_per_min: i64,
     #[serde(default)]
     pub max_concurrent: i32,
-    #[serde(default)]
-    pub burst_size: i32,
 }
 
 /// Rate-limiting settings.
@@ -459,8 +488,6 @@ pub struct RateLimitConfig {
     pub tokens_per_min: i64,
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: i32,
-    #[serde(default = "default_burst_size")]
-    pub burst_size: i32,
     #[serde(default = "default_global_request_cap")]
     pub global_request_cap: i32,
     #[serde(default = "default_global_token_cap")]
@@ -477,7 +504,6 @@ impl Default for RateLimitConfig {
             requests_per_min: default_requests_per_min(),
             tokens_per_min: default_tokens_per_min(),
             max_concurrent: default_max_concurrent(),
-            burst_size: default_burst_size(),
             global_request_cap: default_global_request_cap(),
             global_token_cap: default_global_token_cap(),
             group_overrides: BTreeMap::new(),
@@ -507,15 +533,83 @@ impl Default for CircuitBreakerConfig {
     }
 }
 
-impl CircuitBreakerConfig {
-    /// Rolling failure-rate window, defaulted when unset.
-    pub fn window(&self) -> Duration {
-        seconds_or(self.window_seconds, DEFAULT_WINDOW_SECONDS)
+/// 服务面（`/api/service`）设置 —— ozon-pod 集成契约见
+/// [`docs/service-api.md`](../../docs/service-api.md) §5。
+///
+/// 职责与关键不变量：
+///
+/// * `token` 是服务面唯一的凭证。空（或纯空白）= **整组路由不挂载**，不是「不带
+///   凭证放行」；非空时每个请求都要 `Authorization: Bearer <token>` 且常量时间比较。
+///   字段本身不被改写（`normalize` 不碰它），但比较时两侧都按 HTTP 头的规则裁掉
+///   首尾空白 —— 否则一个尾部带空格的 token 永远匹配不上而无人察觉。token 内部的
+///   空白仍是秘密的一部分。
+/// * `initial_credit` 是供给账号的初始额度，契约要求 `0`（供给账号不赠注册额度）；
+///   非 0 只是实验开关。
+/// * `currency` / `max_credit` 都在这里收敛默认值，消费方（gw-panel 服务面）直接
+///   读字段，不要再各自兜一次底（规则 1.9）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceConfig {
+    /// `Authorization: Bearer` 的共享密钥。空 = 服务面不挂载。
+    #[serde(default)]
+    pub token: String,
+    /// 供给账号的初始额度；契约要求 0。
+    #[serde(default = "default_service_initial_credit")]
+    pub initial_credit: f64,
+    /// 余额与入账金额的币种标签，只作展示与透传。
+    #[serde(default = "default_service_currency")]
+    pub currency: String,
+    /// 单次入账上限（`POST /users/{user_id}/credits` 的 `amount` 上限）。
+    #[serde(default = "default_service_max_credit")]
+    pub max_credit: f64,
+}
+
+impl Default for ServiceConfig {
+    fn default() -> Self {
+        Self {
+            token: DEFAULT_SERVICE_TOKEN.to_owned(),
+            initial_credit: default_service_initial_credit(),
+            currency: default_service_currency(),
+            max_credit: default_service_max_credit(),
+        }
+    }
+}
+
+impl ServiceConfig {
+    /// 服务面是否挂载。纯空白的 token 视为未配置 —— 它不可能被任何请求带上，
+    /// 挂上去也只会是一组永远 401 的路由。
+    pub fn enabled(&self) -> bool {
+        !self.token.trim().is_empty()
     }
 
-    /// Open-state cooldown, defaulted when unset.
-    pub fn cooldown(&self) -> Duration {
-        seconds_or(self.cooldown_seconds, DEFAULT_COOLDOWN_SECONDS)
+    /// 供给账号的初始额度。负数 / NaN / 无穷都在这里收敛成 0：一个新建账号的
+    /// 起始余额不能是负的，也不能是 NaN（那会毁掉余额列）。
+    pub fn effective_initial_credit(&self) -> f64 {
+        if self.initial_credit.is_finite() && self.initial_credit > 0.0 {
+            self.initial_credit
+        } else {
+            DEFAULT_SERVICE_INITIAL_CREDIT
+        }
+    }
+
+    /// 币种标签；空串回退 [`DEFAULT_SERVICE_CURRENCY`]。
+    pub fn effective_currency(&self) -> &str {
+        if self.currency.trim().is_empty() {
+            DEFAULT_SERVICE_CURRENCY
+        } else {
+            self.currency.trim()
+        }
+    }
+
+    /// 单次入账上限；非正或非有限回退 [`DEFAULT_SERVICE_MAX_CREDIT`]。
+    ///
+    /// 上限为 0 等于「永远不许入账」，那更可能是漏配而不是本意，所以与
+    /// `billing.hold_ttl_seconds` 这些字段一样按 `<= 0 → 默认` 处理。
+    pub fn effective_max_credit(&self) -> f64 {
+        if self.max_credit.is_finite() && self.max_credit > 0.0 {
+            self.max_credit
+        } else {
+            DEFAULT_SERVICE_MAX_CREDIT
+        }
     }
 }
 
@@ -571,9 +665,9 @@ impl Config {
     /// sees the same effective values.
     ///
     /// Only fields that have a `<= 0 → default` fallback are clamped;
-    /// `billing.hold_amount`, `billing.default_price_per_1k_tokens`,
-    /// `billing.low_balance_threshold_usd`, the `budget_token_*` pair and the
-    /// database pool knobs have no such fallback, so an explicit `0` survives.
+    /// `billing.default_price_per_1k_tokens`,
+    /// `billing.low_balance_threshold_usd` and the database pool knobs have no
+    /// such fallback, so an explicit `0` survives.
     pub fn normalize(&mut self) {
         if self.server.host.trim().is_empty() {
             self.server.host = DEFAULT_SERVER_HOST.to_owned();
@@ -601,7 +695,6 @@ impl Config {
         );
         clamp_i64(&mut self.rate_limit.tokens_per_min, DEFAULT_TOKENS_PER_MIN);
         clamp_i32(&mut self.rate_limit.max_concurrent, DEFAULT_MAX_CONCURRENT);
-        clamp_i32(&mut self.rate_limit.burst_size, DEFAULT_BURST_SIZE);
         clamp_i32(
             &mut self.rate_limit.global_request_cap,
             DEFAULT_GLOBAL_REQUEST_CAP,
@@ -622,6 +715,16 @@ impl Config {
             &mut self.circuit_breaker.cooldown_seconds,
             DEFAULT_COOLDOWN_SECONDS,
         );
+
+        if self.service.currency.trim().is_empty() {
+            self.service.currency = default_service_currency();
+        }
+        if !self.service.max_credit.is_finite() || self.service.max_credit <= 0.0 {
+            self.service.max_credit = DEFAULT_SERVICE_MAX_CREDIT;
+        }
+        if !self.service.initial_credit.is_finite() || self.service.initial_credit < 0.0 {
+            self.service.initial_credit = DEFAULT_SERVICE_INITIAL_CREDIT;
+        }
     }
 }
 

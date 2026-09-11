@@ -79,6 +79,7 @@ struct Identity {
     email: Option<String>,
     role: Option<String>,
     status: Option<String>,
+    concurrency: Option<i64>,
 }
 
 impl Identity {
@@ -311,7 +312,7 @@ async fn load_identity(state: &PanelState, user_id: i64) -> Result<Identity, Aut
     }
 
     let row: Option<Identity> =
-        sqlx::query_as("SELECT email, role, status FROM users WHERE id = $1")
+        sqlx::query_as("SELECT email, role, status, concurrency FROM users WHERE id = $1")
             .bind(user_id)
             .fetch_optional(&state.pg)
             .await
@@ -325,13 +326,15 @@ async fn load_identity(state: &PanelState, user_id: i64) -> Result<Identity, Aut
     // so a burst against one bogus id does not hammer the DB.
     let identity = row.unwrap_or_default();
     let status = identity.status();
-    state.user_status_cache.set(
+    let concurrency = identity.concurrency.unwrap_or(0).max(0);
+    state.user_status_cache.set_row(
         user_id,
         if status.is_empty() {
             STATUS_MISSING
         } else {
             status
         },
+        concurrency,
         USER_STATUS_TTL,
     );
 

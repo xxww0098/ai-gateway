@@ -2,8 +2,12 @@
 //!
 //! 对应原实现的 redeem_persistence 测试。
 
-use crate::common::{fresh_db, redeem_code_state, seed_redeem_code, seed_user};
-use gw_panel::commerce::redeem::{Claim, claim_code, release_claim};
+use crate::common::{
+    balance_of, fresh_db, ledger_without_redis, redeem_code_state, seed_redeem_code, seed_user,
+};
+use gw_panel::commerce::redeem::{
+    Claim, RedeemApplyError, apply_redeem, claim_code, release_claim,
+};
 
 #[tokio::test]
 #[ignore = "needs a local Postgres: set GW_TEST_DATABASE_URL"]
@@ -102,4 +106,83 @@ async fn releasing_never_steals_back_someone_elses_claim() {
     let (status, used_by_id) = redeem_code_state(&pool, code).await;
     assert_eq!(status, "used", "别人的认领不能被撤销");
     assert_eq!(used_by_id, Some(winner));
+}
+
+#[tokio::test]
+#[ignore = "needs a local Postgres: set GW_TEST_DATABASE_URL"]
+async fn a_failed_credit_leaves_the_code_unused() {
+    let pool = fresh_db("redeem_credit_rollback").await;
+    let ledger = ledger_without_redis(&pool);
+    let user = seed_user(&pool, "a@example.com", 0.0).await;
+    let code_id = seed_redeem_code(&pool, "RDM-ZERO", 10.0).await;
+
+    let err = apply_redeem(
+        &pool,
+        &ledger,
+        user,
+        "a@example.com",
+        "RDM-ZERO",
+        code_id,
+        0.0,
+    )
+    .await
+    .expect_err("zero amount must fail");
+    assert!(matches!(err, RedeemApplyError::Credit(_)));
+    let (status, used_by_id) = redeem_code_state(&pool, code_id).await;
+    assert_eq!(status, "unused");
+    assert_eq!(used_by_id, None);
+    assert!((balance_of(&pool, user).await).abs() < 1e-9);
+}
+
+#[tokio::test]
+#[ignore = "needs a local Postgres: set GW_TEST_DATABASE_URL"]
+async fn used_without_credit_is_repaired_once_for_the_owner() {
+    let pool = fresh_db("redeem_used_without_credit").await;
+    let ledger = ledger_without_redis(&pool);
+    let user = seed_user(&pool, "owner@example.com", 0.0).await;
+    let other = seed_user(&pool, "other@example.com", 0.0).await;
+    let code_id = seed_redeem_code(&pool, "RDM-CRASH", 10.0).await;
+    claim_code(&pool, code_id, user, "owner@example.com")
+        .await
+        .expect("claim");
+
+    apply_redeem(
+        &pool,
+        &ledger,
+        user,
+        "owner@example.com",
+        "RDM-CRASH",
+        code_id,
+        10.0,
+    )
+    .await
+    .expect("repair");
+    assert!((balance_of(&pool, user).await - 10.0).abs() < 1e-9);
+
+    apply_redeem(
+        &pool,
+        &ledger,
+        user,
+        "owner@example.com",
+        "RDM-CRASH",
+        code_id,
+        10.0,
+    )
+    .await
+    .expect("idempotent retry");
+    assert!((balance_of(&pool, user).await - 10.0).abs() < 1e-9);
+
+    let err = apply_redeem(
+        &pool,
+        &ledger,
+        other,
+        "other@example.com",
+        "RDM-CRASH",
+        code_id,
+        10.0,
+    )
+    .await
+    .expect_err("other user");
+    assert!(matches!(err, RedeemApplyError::AlreadyUsed));
+    assert!((balance_of(&pool, other).await).abs() < 1e-9);
 }

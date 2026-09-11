@@ -1,7 +1,7 @@
 //! Policy and catalogue projection.
 
 use super::*;
-use crate::testsupport::fresh_db;
+use crate::testsupport::{FakeCatalog, fresh_db};
 
 #[tokio::test]
 #[ignore = "needs a local Postgres: see testsupport::PG_HOWTO"]
@@ -128,123 +128,13 @@ async fn the_sentinel_row_is_never_a_model() {
             .is_none(),
         "detail must not surface the reserved row either",
     );
-    assert!(
-        catalog
-            .resolve_channels(MODELS_URL_SENTINEL)
-            .await
-            .expect("resolving")
-            .is_empty(),
-        "路由查询也必须排除它，否则它会被当成一个可路由的模型",
-    );
 }
 
-#[tokio::test]
-#[ignore = "needs a local Postgres: see testsupport::PG_HOWTO"]
-async fn routing_sees_models_the_catalogue_listing_hides() {
-    // `visible` 是「对租户展示」开关，不是「允许调用」开关 —— 一个
-    // visible = false 的模型今天照样能被调用。路由查询若继承了
-    // `WHERE visible = TRUE`，会静默地把所有隐藏模型变成不可调用，
-    // 表现为「某些模型突然 503」，极难归因。
-    let pool = fresh_db("catalog_routing_visibility").await;
-    sqlx::query(
-        "INSERT INTO model_catalog_entries (channel_key, model_id, visible, models_url, created_at, updated_at) \
-         VALUES ('house-a', 'hidden-model', FALSE, '', NOW(), NOW()), \
-                ('house-b', 'hidden-model', FALSE, '', NOW(), NOW())",
-    )
-    .execute(&pool)
-    .await
-    .expect("seeding catalogue entries");
-
-    let catalog = SqlModelCatalog::new(pool);
-    assert!(
-        catalog.list_models().await.expect("listing").is_empty(),
-        "隐藏的模型不该出现在目录里",
-    );
-    assert_eq!(
-        catalog
-            .resolve_channels("hidden-model")
-            .await
-            .expect("resolving"),
-        ["house-a", "house-b"],
-        "但它必须仍然可路由，而且多渠道要按顺序全部返回",
-    );
-}
-
-// ---------------------------------------------------------------- 快照解析器
-
-/// 一个不碰数据库的目录，用来测快照与映射逻辑本身。
-struct StubCatalog(Vec<(String, Vec<String>)>);
-
-#[async_trait]
-impl ModelCatalog for StubCatalog {
-    async fn list_models(&self) -> anyhow::Result<Vec<ModelEntry>> {
-        Ok(Vec::new())
-    }
-
-    async fn get_model(&self, _id: &str) -> anyhow::Result<Option<ModelEntry>> {
-        Ok(None)
-    }
-
-    async fn model_routes(&self) -> anyhow::Result<Vec<(String, Vec<String>)>> {
-        Ok(self.0.clone())
-    }
-}
-
-/// Counts listing walks so a cache miss/hit is an observable property.
-struct CountingCatalog {
-    models: parking_lot::Mutex<Vec<ModelEntry>>,
-    routes: Vec<(String, Vec<String>)>,
-    list_calls: std::sync::atomic::AtomicUsize,
-    fail_list: std::sync::atomic::AtomicBool,
-}
-
-impl CountingCatalog {
-    fn with(models: Vec<ModelEntry>) -> Arc<Self> {
-        Arc::new(Self {
-            models: parking_lot::Mutex::new(models),
-            routes: Vec::new(),
-            list_calls: std::sync::atomic::AtomicUsize::new(0),
-            fail_list: std::sync::atomic::AtomicBool::new(false),
-        })
-    }
-
-    fn list_calls(&self) -> usize {
-        self.list_calls.load(std::sync::atomic::Ordering::SeqCst)
-    }
-}
-
-#[async_trait]
-impl ModelCatalog for CountingCatalog {
-    async fn list_models(&self) -> anyhow::Result<Vec<ModelEntry>> {
-        self.list_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if self.fail_list.load(std::sync::atomic::Ordering::SeqCst) {
-            anyhow::bail!("catalog unavailable");
-        }
-        Ok(self.models.lock().clone())
-    }
-
-    async fn get_model(&self, id: &str) -> anyhow::Result<Option<ModelEntry>> {
-        Ok(self.models.lock().iter().find(|m| m.id == id).cloned())
-    }
-
-    async fn resolve_channels(&self, model_id: &str) -> anyhow::Result<Vec<String>> {
-        Ok(self
-            .routes
-            .iter()
-            .find(|(id, _)| id == model_id)
-            .map(|(_, keys)| keys.clone())
-            .unwrap_or_default())
-    }
-
-    async fn model_routes(&self) -> anyhow::Result<Vec<(String, Vec<String>)>> {
-        Ok(self.routes.clone())
-    }
-}
+// ---------------------------------------------------------------- 快照缓存
 
 #[tokio::test]
 async fn a_warm_snapshot_answers_list_and_detail_without_rereading() {
-    let inner = CountingCatalog::with(vec![ModelEntry {
+    let inner = FakeCatalog::with(vec![ModelEntry {
         id: "gpt-4o".into(),
         owned_by: "openai".into(),
         ..ModelEntry::default()
@@ -270,7 +160,7 @@ async fn a_warm_snapshot_answers_list_and_detail_without_rereading() {
 
 #[tokio::test]
 async fn the_first_read_loads_the_snapshot_once() {
-    let inner = CountingCatalog::with(vec![ModelEntry {
+    let inner = FakeCatalog::with(vec![ModelEntry {
         id: "only".into(),
         ..ModelEntry::default()
     }]);
@@ -290,7 +180,7 @@ async fn the_first_read_loads_the_snapshot_once() {
 
 #[tokio::test]
 async fn a_failed_refresh_keeps_the_previous_snapshot() {
-    let inner = CountingCatalog::with(vec![ModelEntry {
+    let inner = FakeCatalog::with(vec![ModelEntry {
         id: "kept".into(),
         ..ModelEntry::default()
     }]);
@@ -310,76 +200,6 @@ async fn a_failed_refresh_keeps_the_previous_snapshot() {
             .as_deref(),
         Some("kept"),
         "a failed refresh must not wipe a good snapshot",
-    );
-}
-
-#[tokio::test]
-async fn the_listing_snapshot_does_not_cache_routing() {
-    let inner = Arc::new(CountingCatalog {
-        models: parking_lot::Mutex::new(Vec::new()),
-        routes: vec![("hidden".into(), vec!["house".into()])],
-        list_calls: std::sync::atomic::AtomicUsize::new(0),
-        fail_list: std::sync::atomic::AtomicBool::new(false),
-    });
-    let cache = CachedModelCatalog::new(inner);
-    cache.refresh().await.expect("refresh");
-    assert_eq!(
-        cache.resolve_channels("hidden").await.expect("routing"),
-        ["house"],
-        "routing must still see models the listing snapshot hides",
-    );
-}
-
-#[tokio::test]
-async fn an_unrefreshed_resolver_says_nothing_so_the_chain_falls_back() {
-    // 从未刷新过的快照是空的 —— 这不是退化，是安全灰度的默认态：
-    // 四级链的 L2 全部落空、直接落 L4，行为与收敛前逐字节相同。
-    let resolver = CatalogChannelResolver::new(Arc::new(StubCatalog(vec![(
-        "some-model".to_owned(),
-        vec!["some-channel".to_owned()],
-    )])));
-
-    assert!(resolver.snapshot_age().is_none());
-    assert!(resolver.channels_for_model("some-model").is_empty());
-
-    resolver.refresh().await.expect("refresh");
-    assert!(resolver.snapshot_age().is_some());
-    assert_eq!(resolver.channels_for_model("some-model"), ["some-channel"]);
-}
-
-#[tokio::test]
-async fn l1_works_before_any_refresh_because_the_channel_map_is_static() {
-    // 显式渠道前缀只查 `provider_for_channel`，那张表不依赖快照，
-    // 所以 `<channel>/<model>` 这类写法从装上 resolver 的第一秒就生效。
-    let resolver = CatalogChannelResolver::new(Arc::new(StubCatalog(Vec::new())))
-        .with_channel("house", Provider::Vertex);
-
-    assert_eq!(
-        resolver.provider_for_channel("house"),
-        Some(Provider::Vertex)
-    );
-    assert_eq!(
-        resolver.provider_for_channel("a-channel-nobody-configured"),
-        None,
-        "没有显式映射时必须说不知道，由调用方落通配 executor，而不是在这里猜",
-    );
-}
-
-#[test]
-fn builtin_openai_compatible_channels_share_the_openai_executor() {
-    // 内置的 OpenAI 兼容平台（xAI、百炼）不各自开 executor，
-    // 而是靠默认词表把 `<channel>/<model>` 指到同一个 OpenAI executor 上。
-    let resolver = CatalogChannelResolver::new(Arc::new(StubCatalog(Vec::new())));
-
-    assert_eq!(
-        resolver.provider_for_channel("bailian"),
-        Some(Provider::OpenAi),
-        "百炼是内置渠道，必须在默认词表里落到 OpenAI executor",
-    );
-    assert_eq!(
-        resolver.provider_for_channel("bailian"),
-        resolver.provider_for_channel("xai"),
-        "和既有的 xAI 走同一条路，不许长出第二个 executor",
     );
 }
 

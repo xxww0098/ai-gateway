@@ -42,9 +42,7 @@ pub mod quota;
 pub mod usage;
 
 pub use authcore::AuthcoreCrypto;
-pub use catalog::{
-    CachedModelCatalog, CatalogChannelResolver, SqlChannelPolicyStore, SqlModelCatalog,
-};
+pub use catalog::{CachedModelCatalog, SqlChannelPolicyStore, SqlModelCatalog};
 pub use directory::SqlTenantDirectory;
 pub use infra::{RedisIdempotencyStore, SharedCircuitBreaker, SharedRateLimiter};
 pub use ledger::SharedLedger;

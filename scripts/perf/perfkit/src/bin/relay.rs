@@ -51,9 +51,7 @@ use axum::routing::post;
 use bytes::Bytes;
 use futures_util::{TryStreamExt, stream};
 use gw_relay::endpoint::{IncludeUsagePolicy, RequestSpec, splice_include_usage, validate};
-use gw_relay::engine::{
-    RelayEngine, RelayOptions, Transport, UpstreamHead, UpstreamRequest,
-};
+use gw_relay::engine::{RelayEngine, RelayOptions, Transport, UpstreamHead, UpstreamRequest};
 use gw_relay::probe::{SseUsageProbe, UsageShape};
 use gw_relay::{
     Credential, Relay, RelayBody, RelayError, RelayRequest, RelayTimeouts, RelayTransportError,
@@ -377,7 +375,11 @@ fn main() -> anyhow::Result<()> {
         // 三个入口全挂上，与 `gw-relay` 的收敛结论一致。压测只打第一个，
         // 另外两个挂着是为了让路由表的形状与生产一致（axum 的路由匹配开销
         // 随路由条数变化，只挂一条会把这部分开销藏起来）。
-        let entry = if attempts > 1 { post(failover) } else { post(handle) };
+        let entry = if attempts > 1 {
+            post(failover)
+        } else {
+            post(handle)
+        };
         let app = Router::new()
             .route("/v1/chat/completions", entry.clone())
             .route("/v1/responses", entry.clone())

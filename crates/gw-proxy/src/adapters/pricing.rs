@@ -21,17 +21,6 @@ impl SharedCalculator {
     pub fn new(calculator: Arc<Calculator>) -> Self {
         Self(calculator)
     }
-
-    /// The underlying calculator, for callers that need more than the port.
-    pub fn inner(&self) -> &Arc<Calculator> {
-        &self.0
-    }
-}
-
-impl From<Arc<Calculator>> for SharedCalculator {
-    fn from(calculator: Arc<Calculator>) -> Self {
-        Self::new(calculator)
-    }
 }
 
 impl PricingCalculator for SharedCalculator {

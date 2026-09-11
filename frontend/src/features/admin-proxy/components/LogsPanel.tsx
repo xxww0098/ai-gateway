@@ -31,7 +31,7 @@ export function LogsPanel({ endpoint, allowClear }: LogsPanelProps) {
         logsText = JSON.stringify(data, null, 2)
       }
 
-      setLogs(logsText || '暂无日志内容...')
+      setLogs(logsText || '还没有日志')
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       if (msg.includes('logging to file disabled') || msg.includes('not enabled')) {
@@ -49,7 +49,7 @@ export function LogsPanel({ endpoint, allowClear }: LogsPanelProps) {
     try {
       await deleteProviderConfig(endpoint)
       toast.success('已清空日志')
-      setLogs('暂无日志内容...')
+      setLogs('还没有日志')
     } catch (e: unknown) {
       toast.error(`清空日志失败: ${e instanceof Error ? e.message : String(e)}`)
     }

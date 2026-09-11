@@ -75,18 +75,6 @@ impl PostgresAuthStore {
         })
     }
 
-    /// Builds a store with an already-constructed cipher.
-    #[must_use]
-    pub fn with_cipher(pool: PgPool, cipher: CredentialCipher) -> Self {
-        Self { pool, cipher }
-    }
-
-    /// Whether credentials are encrypted at rest.
-    #[must_use]
-    pub fn encryption_enabled(&self) -> bool {
-        self.cipher.enabled()
-    }
-
     /// Loads every credential.
     async fn list_records(&self) -> Result<Vec<AuthRecord>, AuthError> {
         let rows: Vec<AuthRow> = sqlx::query_as(SELECT_ALL)

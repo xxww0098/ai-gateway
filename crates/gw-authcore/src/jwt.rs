@@ -62,22 +62,6 @@ impl Claims {
     }
 }
 
-/// Issues an HS256 token with token version 0.
-///
-/// Retained for callers that do not participate in session revocation;
-/// production login uses [`generate_jwt_with_version`].
-///
-/// # Errors
-/// [`AuthError::MissingJwtSecret`] when `secret` is empty.
-pub fn generate_jwt(
-    user_id: UserId,
-    email: &str,
-    secret: &str,
-    expiry_hours: i64,
-) -> Result<String, AuthError> {
-    generate_jwt_with_version(user_id, email, secret, expiry_hours, 0)
-}
-
 /// Issues an HS256 token embedding `token_version`.
 ///
 /// `expiry_hours <= 0` falls back to [`DEFAULT_EXPIRY_HOURS`].

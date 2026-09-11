@@ -2,7 +2,8 @@ import { useState, useCallback, useMemo } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { queryKeys } from "@/shared/api/query-keys"
 import type { ApiKey } from "./types"
-import { fetchUsageLogs, fetchUserApiKeys } from "./api"
+import { fetchUsageLogs, fetchUserApiKeys, fetchUsageTrend, fetchUsageModels } from "./api"
+import { rangeDays } from "./format"
 import type { UsageLogsParams } from "./api"
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -33,6 +34,7 @@ export function useUsageLogs(opts: UseUsageLogsOptions = {}) {
 
   // Filter state
   const [filterKeyId, setFilterKeyId] = useState<string>('')
+  const [modelDraft, setModelDraft] = useState('')
   const [filterModel, setFilterModel] = useState('')
   const [dateRange, setDateRange] = useState<DateRange>('7d')
   const [startDate, setStartDate] = useState(daysAgo(6))
@@ -73,8 +75,9 @@ export function useUsageLogs(opts: UseUsageLogsOptions = {}) {
   const loading = usageQuery.isLoading
 
   const handleFilter = useCallback(() => {
+    setFilterModel(modelDraft.trim())
     setPage(1)
-  }, [])
+  }, [modelDraft])
 
   const handlePageChange = useCallback((newPage: number) => {
     setPage(newPage)
@@ -94,20 +97,36 @@ export function useUsageLogs(opts: UseUsageLogsOptions = {}) {
     qc.invalidateQueries({ queryKey: queryKeys.usage.all() })
   }, [qc])
 
+  const chartDays = rangeDays(dateRange, startDate, endDate)
+
+  const trendQuery = useQuery({
+    queryKey: queryKeys.usage.trend(chartDays),
+    queryFn: () => fetchUsageTrend(chartDays),
+  })
+
+  const modelsQuery = useQuery({
+    queryKey: queryKeys.usage.models(chartDays),
+    queryFn: () => fetchUsageModels(Math.min(90, chartDays)),
+  })
+
   return {
     // Data
     logs,
     stats,
     total,
     loading,
+    trend: trendQuery.data || [],
+    models: modelsQuery.data || [],
+    chartsLoading: trendQuery.isLoading || modelsQuery.isLoading,
     page,
     pageSize,
     totalPages,
     // Filters
     filterKeyId,
     setFilterKeyId,
-    filterModel,
-    setFilterModel,
+    filterModel: modelDraft,
+    appliedModel: filterModel,
+    setFilterModel: setModelDraft,
     dateRange,
     handleDateRangeChange,
     startDate,

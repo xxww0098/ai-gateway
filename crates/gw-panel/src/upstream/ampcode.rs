@@ -116,12 +116,61 @@ pub fn normalize_response(config: &Map<String, Value>) -> Map<String, Value> {
     let mut out = config.clone();
     for (hyphen, snake) in KNOWN_KEY_PAIRS {
         if let Some(value) = out.get(hyphen).cloned() {
-            out.entry(snake.to_owned()).or_insert(value);
+            out.insert(snake.to_owned(), value);
         } else if let Some(value) = out.get(snake).cloned() {
             out.insert(hyphen.to_owned(), value);
         }
     }
     out
+}
+
+/// Extracts a boolean from various JSON shapes:
+/// - Bare boolean: `true` / `false`
+/// - Bare string: `"true"` / `"false"` / `"1"` / `"0"`
+/// - Bare number: `1` / `0`
+/// - Object with `value`: `{"value": ...}`
+/// - Object with `force-model-mappings`: `{"force-model-mappings": ...}`
+/// - Object with `force_model_mappings`: `{"force_model_mappings": ...}`
+/// - Object wrapped in `ampcode`: `{"ampcode": {...}}`
+pub fn parse_bool_value(raw: &Value) -> Option<bool> {
+    match raw {
+        Value::Bool(b) => Some(*b),
+        Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        },
+        Value::Number(n) => match n.as_i64() {
+            Some(1) => Some(true),
+            Some(0) => Some(false),
+            _ => None,
+        },
+        Value::Object(map) => {
+            if let Some(v) = map.get("value") {
+                return parse_bool_value(v);
+            }
+            if let Some(v) = map.get("force-model-mappings") {
+                return parse_bool_value(v);
+            }
+            if let Some(v) = map.get("force_model_mappings") {
+                return parse_bool_value(v);
+            }
+            if let Some(inner) = map.get("ampcode") {
+                return parse_bool_value(inner);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Extracts `force-model-mappings` (or `force_model_mappings`) as boolean, defaulting to false.
+pub fn get_force_model_mappings_value(config: &Map<String, Value>) -> bool {
+    config
+        .get("force-model-mappings")
+        .or_else(|| config.get("force_model_mappings"))
+        .and_then(parse_bool_value)
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------- whole blob
@@ -163,11 +212,17 @@ pub async fn put(
         None => object.clone(),
     };
     normalize_input(&mut payload);
+    if let Some(v) = payload.get_mut("force-model-mappings")
+        && let Some(b) = parse_bool_value(v)
+    {
+        *v = Value::Bool(b);
+    }
 
     let mut config = match load(&state).await {
         Ok(config) => config,
         Err(error) => return load_failure(&error),
     };
+    normalize_input(&mut config);
     for (key, value) in payload {
         config.insert(key, value);
     }
@@ -366,6 +421,77 @@ pub async fn delete_upstream_api_key(
     _admin: AdminUser,
 ) -> Response {
     delete_scalar(state, "upstream-api-key").await
+}
+
+// ---------------------------------------------------------------- boolean keys
+
+/// `GET /ampcode/force-model-mappings`.
+pub async fn get_force_model_mappings(
+    State(state): State<PanelState>,
+    _admin: AdminUser,
+) -> Response {
+    match load(&state).await {
+        Ok(config) => {
+            let bool_val = get_force_model_mappings_value(&config);
+            ok(json!({
+                "force-model-mappings": bool_val,
+                "force_model_mappings": bool_val,
+            }))
+        }
+        Err(error) => load_failure(&error),
+    }
+}
+
+/// `PUT /ampcode/force-model-mappings`.
+pub async fn put_force_model_mappings(
+    State(state): State<PanelState>,
+    _admin: AdminUser,
+    body: Option<axum::Json<Value>>,
+) -> Response {
+    let Some(axum::Json(raw)) = body else {
+        return invalid_body();
+    };
+    let Some(parsed) = parse_bool_value(&raw) else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            ERR_BAD_REQUEST,
+            "invalid boolean value: expected boolean or {\"value\": boolean}",
+        );
+    };
+
+    let mut config = match load(&state).await {
+        Ok(config) => config,
+        Err(error) => return load_failure(&error),
+    };
+    config.remove("force_model_mappings");
+    config.insert("force-model-mappings".to_owned(), Value::Bool(parsed));
+    if let Err(error) = save(&state, &config).await {
+        return save_failure(&error);
+    }
+    ok(json!({
+        "force-model-mappings": parsed,
+        "force_model_mappings": parsed,
+    }))
+}
+
+/// `DELETE /ampcode/force-model-mappings`.
+pub async fn delete_force_model_mappings(
+    State(state): State<PanelState>,
+    _admin: AdminUser,
+) -> Response {
+    let mut config = match load(&state).await {
+        Ok(config) => config,
+        Err(error) => return load_failure(&error),
+    };
+    config.remove("force-model-mappings");
+    config.remove("force_model_mappings");
+    if let Err(error) = save(&state, &config).await {
+        return save_failure(&error);
+    }
+    ok(json!({
+        "force-model-mappings": false,
+        "force_model_mappings": false,
+    }))
 }
 
 // ---------------------------------------------------------------- shared

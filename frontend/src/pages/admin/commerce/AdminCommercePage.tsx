@@ -1,8 +1,10 @@
+import { lazy, Suspense } from 'react'
 import { ClipboardList, RotateCcw } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/shared/components/ui/tabs'
-import AdminOrders from '../orders/AdminOrdersPage'
-import AdminRefunds from '../refunds/AdminRefundsPage'
+
+const AdminOrders = lazy(() => import('../orders/AdminOrdersPage'))
+const AdminRefunds = lazy(() => import('../refunds/AdminRefundsPage'))
 
 const tabs = [
   { id: 'orders', label: '支付订单', icon: ClipboardList },
@@ -25,14 +27,7 @@ export default function AdminCommercePage() {
   }
 
   return (
-    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-7xl mx-auto">
-      <div>
-        <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">交易管理</h2>
-        <p className="text-gray-500 dark:text-dark-300 mt-1 text-sm">
-          集中处理全站用户的在线充值订单与订阅退款申请。
-        </p>
-      </div>
-
+    <div className="mx-auto max-w-7xl space-y-6">
       <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
         <TabsList className="grid h-auto w-full max-w-md grid-cols-2 gap-1 p-1 bg-muted rounded-xl">
           {tabs.map((tab) => (
@@ -47,13 +42,23 @@ export default function AdminCommercePage() {
           ))}
         </TabsList>
 
-        <TabsContent value="orders" className="mt-6 focus-visible:outline-none">
-          <AdminOrders embedded />
-        </TabsContent>
-        <TabsContent value="refunds" className="mt-6 focus-visible:outline-none">
-          <AdminRefunds embedded />
+        <TabsContent value={activeTab} className="mt-6 focus-visible:outline-none">
+          <Suspense fallback={<TabFallback />}>
+            {activeTab === 'orders' && <AdminOrders />}
+            {activeTab === 'refunds' && <AdminRefunds />}
+          </Suspense>
         </TabsContent>
       </Tabs>
+    </div>
+  )
+}
+
+function TabFallback() {
+  return (
+    <div className="space-y-3 py-6" role="status" aria-label="加载中">
+      <div className="h-10 rounded-xl bg-muted animate-pulse" />
+      <div className="h-10 rounded-xl bg-muted/70 animate-pulse" />
+      <div className="h-32 rounded-xl bg-muted/50 animate-pulse" />
     </div>
   )
 }

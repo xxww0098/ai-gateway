@@ -18,6 +18,7 @@ mod upstream;
 
 pub(crate) use billing::{
     FakeCalculator, FakeLedger, FakeQuotaStore, FakeScanner, FakeUsageStore, LedgerCall,
+    fold_model_usage,
 };
 pub(crate) use harness::{
     Harness, TEST_API_KEY, TEST_USER_ID, anonymous_request, chat_body, send, send_settled,

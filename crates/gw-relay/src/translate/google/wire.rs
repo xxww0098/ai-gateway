@@ -11,11 +11,11 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bytes::Bytes;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use crate::contract::{RelayUsage, TranslateError};
+use crate::translate::common;
 
 // ============================================================ 响应形状（入）
 
@@ -174,31 +174,21 @@ pub(super) fn anthropic_stop_reason(google: &str, has_tool_call: bool) -> &'stat
 /// `UpstreamShape` 错误。注释行（`:` 开头）、`event:` / `id:` / `retry:`
 /// 在 Google 侧没有语义，直接跳过 —— 这也是 `push` 允许产出零帧的原因。
 ///
-/// 多行 `data:` 按 SSE 规范用 `\n` 连接。
+/// 多行 `data:` 的拼接规则在 [`common::sse_data`] 里，这里只负责按空行切块。
 pub(super) fn data_payloads(buf: &[u8]) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
-    let mut cur: Option<Vec<u8>> = None;
+    let mut event: Vec<u8> = Vec::new();
     for raw in buf.split(|&b| b == b'\n') {
         let line = raw.strip_suffix(b"\r").unwrap_or(raw);
         if line.is_empty() {
-            if let Some(payload) = cur.take() {
-                out.push(payload);
-            }
+            out.extend(common::sse_data(&event));
+            event.clear();
             continue;
         }
-        let Some(rest) = line.strip_prefix(b"data:") else {
-            continue;
-        };
-        let rest = rest.strip_prefix(b" ").unwrap_or(rest);
-        let slot = cur.get_or_insert_with(Vec::new);
-        if !slot.is_empty() {
-            slot.push(b'\n');
-        }
-        slot.extend_from_slice(rest);
+        event.extend_from_slice(line);
+        event.push(b'\n');
     }
-    if let Some(payload) = cur.take() {
-        out.push(payload);
-    }
+    out.extend(common::sse_data(&event));
     out
 }
 
@@ -215,34 +205,6 @@ pub(super) fn parse_response(payload: &[u8]) -> Result<GenerateContentResponse, 
         .map_err(|err| TranslateError::UpstreamShape(format!("google response: {err}")))
 }
 
-/// OpenAI 方言的一帧：`data: {json}\n\n`，没有 `event:` 行。
-pub(super) fn openai_frame(value: &Value) -> Result<Bytes, TranslateError> {
-    let mut buf = Vec::with_capacity(64);
-    buf.extend_from_slice(b"data: ");
-    serialize_into(&mut buf, value)?;
-    buf.extend_from_slice(b"\n\n");
-    Ok(Bytes::from(buf))
-}
-
-/// Anthropic 方言的一帧：`event: <name>\ndata: {json}\n\n`。
-///
-/// `event:` 行不是可选的 —— Anthropic 的官方 SDK 按 `event` 字段分派事件类型，
-/// 只给 `data:` 的流会被它当成未知事件全部丢掉。
-pub(super) fn anthropic_frame(event: &str, value: &Value) -> Result<Bytes, TranslateError> {
-    let mut buf = Vec::with_capacity(64 + event.len());
-    buf.extend_from_slice(b"event: ");
-    buf.extend_from_slice(event.as_bytes());
-    buf.extend_from_slice(b"\ndata: ");
-    serialize_into(&mut buf, value)?;
-    buf.extend_from_slice(b"\n\n");
-    Ok(Bytes::from(buf))
-}
-
-fn serialize_into(buf: &mut Vec<u8>, value: &Value) -> Result<(), TranslateError> {
-    serde_json::to_writer(&mut *buf, value)
-        .map_err(|err| TranslateError::UpstreamShape(format!("cannot serialize frame: {err}")))
-}
-
 // ============================================================ 杂项
 
 /// 上游没给 `responseId` 时合成一个。客户端只把它当不透明字符串做日志关联，
@@ -254,37 +216,7 @@ pub(super) fn synthetic_id(prefix: &str) -> String {
     format!("{prefix}{nanos}")
 }
 
-/// unix 秒。OpenAI 的 `created` 字段要它。
-pub(super) fn unix_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-}
-
 // ============================================================ 请求侧共用
-
-/// 请求体必须是一个 JSON 对象。这是客户端的错，所以是 `Malformed`。
-pub(super) fn as_object(body: &[u8]) -> Result<Map<String, Value>, TranslateError> {
-    match serde_json::from_slice::<Value>(body) {
-        Ok(Value::Object(map)) => Ok(map),
-        Ok(other) => Err(TranslateError::Malformed(format!(
-            "request body must be a JSON object, got {}",
-            kind_of(&other)
-        ))),
-        Err(err) => Err(TranslateError::Malformed(err.to_string())),
-    }
-}
-
-pub(super) fn kind_of(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
-}
 
 /// 未知键一律拒绝。
 ///
@@ -375,7 +307,7 @@ pub(super) fn stop_sequences(value: &Value) -> Result<Value, TranslateError> {
         }
         other => Err(TranslateError::Malformed(format!(
             "stop sequences must be a string or an array of strings, got {}",
-            kind_of(other)
+            common::kind_of(other)
         ))),
     }
 }

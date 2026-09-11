@@ -63,6 +63,8 @@ export interface AuthFileItem {
   location?: string
   state?: string
   models?: string[]
+  /** 账号并发上限，0 = 不限制 */
+  max_concurrent?: number
   [key: string]: unknown
 }
 
@@ -78,6 +80,8 @@ export interface AuthFileEditFields {
   refresh_token?: string
   id_token?: string
   service_account?: string
+  /** 账号并发上限，0 = 不限制 */
+  max_concurrent?: number
 }
 
 export type SmartView = 'all' | 'healthy' | 'warning' | 'disabled'

@@ -19,7 +19,6 @@ fn provider(base_url: &str, api_key: &str) -> GeminiProvider {
         &ProviderConfig {
             base_url: base_url.to_owned(),
             api_key: api_key.to_owned(),
-            enabled: true,
         },
         0,
     )
@@ -109,7 +108,6 @@ fn a_base_url_without_a_host_is_rejected() {
             &ProviderConfig {
                 base_url: "gl.example.com".to_owned(),
                 api_key: String::new(),
-                enabled: true,
             },
             0
         )

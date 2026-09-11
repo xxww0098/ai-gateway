@@ -11,7 +11,7 @@
 - **安全** — JWT + API Key 双鉴权、登录限流、上游凭证 AES-GCM 落库加密、JWT 全端登出撤销。
 - **运营面板** — 用户/分组/订阅/兑换码/退款/公告/定价/审计，支付充值（人工确认即可收款）。
 
-实践与禁令、计费与停机不变量见 [`AGENTS.md`](AGENTS.md)；工程规范 [`docs/rust-engineering.md`](docs/rust-engineering.md)。
+工程约束见 [`CONTRACT.md`](CONTRACT.md)，架构与目录落点见 [`docs/architecture.md`](docs/architecture.md)；调研、运维与审查记录从[文档导航](docs/README.md)进入。
 
 DeepSeek Harness 用户可用 [`plugins/agw-oauth`](plugins/agw-oauth)（AGW-Oauth）OAuth 登录 AI-GateWay，无需手写模型配置。
 
@@ -25,19 +25,23 @@ ai-gateway/
 ├── migrations/             # sqlx SQL 迁移（对既有 schema 幂等）
 ├── crates/                 # 平铺，目录名 = crate 名（规则 1.3）
 │   ├── gw-config/          #   YAML + 环境变量配置
-│   ├── gw-model/           #   实体、迁移、种子、列解码适配器（compat）
+│   ├── gw-model/           #   实体、迁移、种子、列解码与订阅日历
+│   ├── gw-role/            #   角色语义的叶子 crate
 │   ├── gw-infra/           #   PG 池、Redis、缓存、限流、熔断
 │   ├── gw-authcore/        #   JWT、API Key、AES-GCM 凭证加密、AuthStore
 │   ├── gw-pricing/         #   ModelPriceCache + 四列单价 Calculator
 │   ├── gw-ledger/          #   Hold/Settle/Release 账本（Redis Lua + PG）
-│   ├── gw-provider/        #   5 个上游 executor + 协议翻译 + usage 解析
+│   ├── gw-oauth/           #   上游 OAuth 家族（一家一目录，缓存隔离）
+│   ├── gw-provider/        #   上游 executor、协议适配装配与 usage 解析
 │   ├── gw-proxy/           #   /v1/* 代理内核（无 /v1beta）
 │   ├── gw-panel/           #   /api/panel/** 运营面板，按业务域切分
-│   ├── gw-relay/           #   纯字节中继内核
+│   ├── gw-relay/           #   字节转发 engine + 端点规范与协议转换
 │   └── gw-server/          #   组合根：装配、迁移、种子、优雅停机
 ├── tools/xtask/            # 架构门禁（cargo xtask ci）
 ├── plugins/agw-oauth/      # DeepSeek Harness：设备码登录 AI-GateWay
-├── docs/                   # 工程规范与调研文档
+├── docs/                   # 架构、审查、运维与性能证据（README 导航）
+├── specs/                  # 待实施方案，与已落地保证区分
+├── scripts/                # 开发与发布操作脚本
 ├── frontend/               # React 前端（独立构建）
 ├── deploy/                 # Dockerfile + compose
 ├── config.yaml             # 运行时配置（不入库）
@@ -101,7 +105,7 @@ make run           # 构建并以 config.yaml 启动
 ./ai-gateway --health-check   # 探针：ready → 0，否则 1
 ```
 
-计费与停机不变量、外部测试 fail-loud / `#[ignore]`、测试不许复述源码字面量，见 [`AGENTS.md`](AGENTS.md)。
+测试分层与约束见 [`CONTRACT.md`](CONTRACT.md)；资金一致性的已知风险与待实施工作见[计费加固方案](specs/billing-hardening/README.md)。架构门禁通过不代表计费竞态已经解决。
 
 ## 上线
 
@@ -117,5 +121,5 @@ docker compose --env-file /opt/ai-gateway/.env -f deploy/docker-compose.vps.yml 
 
 `scripts/deploy-vps.sh` 是 musl 二进制部署示例，和上面的 Docker 栈二选一。
 
-**支付**：订单已持久化、入账幂等，当前可通过管理员人工确认（`PUT /api/panel/admin/orders/:id/confirm`）
-收款；接入 Stripe/支付宝/微信**实时结算**需各渠道商户账号与密钥。
+**支付**：当前支持订单持久化与管理员人工确认（`PUT /api/panel/admin/orders/:id/confirm`）。
+支付确认现将订单状态、余额与信用流水纳入同一 PostgreSQL 事务，支持重复通知及已确认的历史缺账重试。上线前必须完成[支付迁移与对账检查](docs/payment-settlement.md)，不能新旧支付写入者混跑；其余资金一致性工作见[计费加固方案](specs/billing-hardening/README.md)。接入 Stripe/支付宝/微信**实时结算**仍需各渠道商户账号与密钥。

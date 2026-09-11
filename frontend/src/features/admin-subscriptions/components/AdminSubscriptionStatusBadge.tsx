@@ -8,7 +8,7 @@ interface Props {
 export const AdminSubscriptionStatusBadge = memo(function AdminSubscriptionStatusBadge({ status }: Props) {
   switch (status) {
     case "active":
-      return <Badge className="bg-emerald-500 hover:bg-emerald-600 text-white border-transparent">活跃</Badge>
+      return <Badge className="bg-emerald-700 hover:bg-emerald-800 text-white border-transparent">活跃</Badge>
     case "expired":
       return <Badge variant="secondary">已过期</Badge>
     case "suspended":

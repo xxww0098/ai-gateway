@@ -1,10 +1,11 @@
+import { lazy, Suspense } from 'react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/shared/components/ui/tabs'
 import { Layers, CreditCard, Crown } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 
-import Pricing from '../pricing/AdminPricingPage'
-import RedeemCodes from '../redeem-codes/AdminRedeemCodesPage'
-import Subscriptions from '../subscriptions/AdminSubscriptionsPage'
+const Pricing = lazy(() => import('../pricing/AdminPricingPage'))
+const RedeemCodes = lazy(() => import('../redeem-codes/AdminRedeemCodesPage'))
+const Subscriptions = lazy(() => import('../subscriptions/AdminSubscriptionsPage'))
 
 const tabs = [
   { id: 'pricing', label: '分组倍率', icon: Layers },
@@ -24,14 +25,7 @@ export default function Billing() {
   }
 
   return (
-    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-6xl mx-auto">
-      <div>
-        <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">计费</h2>
-        <p className="text-gray-500 dark:text-dark-300 mt-1 text-sm">
-          分组倍率、兑换卡密与订阅套餐。模型基础价在「模型」页编辑。
-        </p>
-      </div>
-
+    <div className="mx-auto max-w-6xl space-y-6">
       <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
         <TabsList className="grid h-auto w-full max-w-md grid-cols-3 gap-1 p-1 bg-muted rounded-xl mb-6">
           {tabs.map((tab) => (
@@ -47,17 +41,25 @@ export default function Billing() {
         </TabsList>
 
         <div className="w-full">
-          <TabsContent value="pricing" className="mt-0 focus-visible:outline-none">
-            <Pricing />
-          </TabsContent>
-          <TabsContent value="redeem" className="mt-0 focus-visible:outline-none">
-            <RedeemCodes />
-          </TabsContent>
-          <TabsContent value="subscriptions" className="mt-0 focus-visible:outline-none">
-            <Subscriptions />
+          <TabsContent value={activeTab} className="mt-0 focus-visible:outline-none">
+            <Suspense fallback={<TabFallback />}>
+              {activeTab === 'pricing' && <Pricing />}
+              {activeTab === 'redeem' && <RedeemCodes />}
+              {activeTab === 'subscriptions' && <Subscriptions />}
+            </Suspense>
           </TabsContent>
         </div>
       </Tabs>
+    </div>
+  )
+}
+
+function TabFallback() {
+  return (
+    <div className="space-y-3 py-6" role="status" aria-label="加载中">
+      <div className="h-10 rounded-xl bg-muted animate-pulse" />
+      <div className="h-10 rounded-xl bg-muted/70 animate-pulse" />
+      <div className="h-32 rounded-xl bg-muted/50 animate-pulse" />
     </div>
   )
 }

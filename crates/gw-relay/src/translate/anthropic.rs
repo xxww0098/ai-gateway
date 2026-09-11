@@ -102,46 +102,10 @@ mod to_openai;
 pub use to_anthropic::{DEFAULT_MAX_TOKENS, OpenAiToAnthropic};
 pub use to_openai::AnthropicToOpenAi;
 
-// ============================================================ 共享的 JSON 入口
-
-/// 把请求/响应体解析成顶层 JSON 对象。
-///
-/// 非对象一律 [`TranslateError::Malformed`] —— 三个入口的 body 在协议上都必须是
-/// 一个 JSON object，数组或裸标量不是「我们不支持」，是客户端发错了。
-fn parse_object(body: &[u8]) -> Result<Map<String, Value>, TranslateError> {
-    match serde_json::from_slice::<Value>(body) {
-        Ok(Value::Object(map)) => Ok(map),
-        Ok(other) => Err(TranslateError::Malformed(format!(
-            "顶层必须是 JSON object，收到 {}",
-            kind_of(&other)
-        ))),
-        Err(e) => Err(TranslateError::Malformed(e.to_string())),
-    }
-}
-
-/// 同上，但用于**上游响应** —— 上游给了不认识的形状是上游或转义器的 bug，
-/// 不是客户端的错，所以错误类型不同（[`TranslateError::UpstreamShape`]）。
-fn parse_upstream_object(body: &[u8]) -> Result<Map<String, Value>, TranslateError> {
-    match serde_json::from_slice::<Value>(body) {
-        Ok(Value::Object(map)) => Ok(map),
-        Ok(other) => Err(TranslateError::UpstreamShape(format!(
-            "顶层必须是 JSON object，收到 {}",
-            kind_of(&other)
-        ))),
-        Err(e) => Err(TranslateError::UpstreamShape(e.to_string())),
-    }
-}
-
-fn kind_of(v: &Value) -> &'static str {
-    match v {
-        Value::Null => "null",
-        Value::Bool(_) => "bool",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
-}
+// ============================================================ 共享的小工具
+//
+// 顶层对象解析 / SSE `data:` 提取 / 帧构造这些**与方言无关**的原语在
+// [`crate::translate`] 的 `common` 模块里，两个转义器家族共用。
 
 /// `Some` 当且仅当键存在且不是 `null`。
 ///
@@ -217,54 +181,6 @@ fn find_event_end(buf: &[u8]) -> Option<(usize, usize)> {
         }
     }
     None
-}
-
-/// 取出一个 SSE 事件里的 `data:` 载荷（多行 `data:` 按 SSE 规范用 `\n` 拼接）。
-///
-/// 没有 `data:` 字段返回 `None` —— 注释帧（`: keep-alive`）与只有 `event:` 的帧
-/// 都走这条路，调用方据此跳过。
-fn sse_data(event: &[u8]) -> Option<Vec<u8>> {
-    let mut data: Option<Vec<u8>> = None;
-    for line in event.split(|b| *b == b'\n') {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        let Some(rest) = line.strip_prefix(b"data:") else {
-            continue;
-        };
-        // SSE 规范：字段值前的**一个**空格是分隔符，不是数据。
-        let rest = rest.strip_prefix(b" ").unwrap_or(rest);
-        let slot = data.get_or_insert_with(Vec::new);
-        if !slot.is_empty() {
-            slot.push(b'\n');
-        }
-        slot.extend_from_slice(rest);
-    }
-    data
-}
-
-// ================================================================= SSE 帧构造
-
-/// Anthropic 的 SSE 帧：`event:` 与 `data:` **都要**。
-///
-/// Anthropic 官方 SDK 按 `event:` 行分派事件类型，只发 `data:` 会让它把每一帧
-/// 都当成未知事件丢掉 —— 表现为「流跑完了但一个字都没显示」。
-fn anthropic_frame(event: &str, data: &Value) -> Bytes {
-    let mut out = Vec::with_capacity(64);
-    out.extend_from_slice(b"event: ");
-    out.extend_from_slice(event.as_bytes());
-    out.extend_from_slice(b"\ndata: ");
-    // Value 序列化不会失败（不存在非字符串 map key / 非有限浮点的来源）。
-    serde_json::to_writer(&mut out, data).unwrap_or_default();
-    out.extend_from_slice(b"\n\n");
-    Bytes::from(out)
-}
-
-/// OpenAI 的 SSE 帧：只有 `data:`，没有 `event:`。
-fn openai_frame(data: &Value) -> Bytes {
-    let mut out = Vec::with_capacity(64);
-    out.extend_from_slice(b"data: ");
-    serde_json::to_writer(&mut out, data).unwrap_or_default();
-    out.extend_from_slice(b"\n\n");
-    Bytes::from(out)
 }
 
 /// OpenAI 流的终止帧。**必须最后且只有一次**。

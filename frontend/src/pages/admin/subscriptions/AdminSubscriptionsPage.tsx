@@ -1,7 +1,7 @@
 import { useState, useCallback } from "react"
 import { Button } from "@/shared/components/ui/button"
-import { Card, CardContent } from "@/shared/components/ui/card"
-import { Crown, PackagePlus } from "lucide-react"
+import { PackagePlus } from "lucide-react"
+import { EmptyState } from "@/shared/components/EmptyState"
 import {
   useSubscriptions,
   useGroupCrud,
@@ -30,14 +30,11 @@ export default function Subscriptions() {
   }, [])
 
   return (
-    <div className="space-y-6 animate-in fade-in duration-500" style={{ willChange: 'transform, opacity' }}>
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+    <div className="space-y-6">
+      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
         <div className="space-y-1">
-          <h3 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
-            <Crown className="w-5 h-5 text-amber-500" />
-            订阅套餐管理
-          </h3>
-          <p className="text-sm text-gray-500 max-w-2xl">
+          <h2 className="text-xl font-bold text-foreground">订阅套餐管理</h2>
+          <p className="max-w-2xl text-sm text-muted-foreground">
             管理订阅套餐及其配额规则。用户开通订阅后可在周期内享受独立配额。
           </p>
         </div>
@@ -68,19 +65,14 @@ export default function Subscriptions() {
       )}
 
       {groups.length === 0 && !loading && (
-        <Card className="border-dashed border-2 border-amber-200 dark:border-amber-800/40 bg-amber-50/30 dark:bg-amber-950/10">
-          <CardContent className="flex flex-col items-center justify-center py-12 text-center">
-            <PackagePlus className="w-12 h-12 text-amber-300 dark:text-amber-700 mb-4" />
-            <h4 className="text-lg font-semibold text-gray-700 dark:text-gray-300 mb-2">暂无订阅套餐</h4>
-            <p className="text-sm text-gray-500 max-w-md mb-4">
-              创建订阅套餐后，用户即可在前端订阅页面开通对应周期的额度权益。
-            </p>
-            <Button className="gap-2 bg-amber-600 hover:bg-amber-700 text-white" onClick={openCreateGroup}>
-              <PackagePlus className="h-4 w-4" />
-              新建套餐
-            </Button>
-          </CardContent>
-        </Card>
+        <EmptyState
+          bordered
+          tone="first-use"
+          icon={PackagePlus}
+          title="还没有订阅套餐"
+          description="创建套餐后，用户即可在订阅页用余额开通对应周期的额度。"
+          action={{ label: "新建套餐", onClick: openCreateGroup }}
+        />
       )}
 
       {/* ── Subscription Table ── */}

@@ -63,7 +63,7 @@ fn compute_returns_the_number_that_gets_debited() {
         reasoning: 0,
     };
     let debited = calc.compute("gpt-4o", tokens, 1.0);
-    let breakdown = calc.inner().compute("gpt-4o", into_pricing(tokens), 1.0);
+    let breakdown = calc.0.compute("gpt-4o", into_pricing(tokens), 1.0);
     assert_eq!(
         debited, breakdown.total_cost,
         "the port must surface the total, not one of the itemised columns",

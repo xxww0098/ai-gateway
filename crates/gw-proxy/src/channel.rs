@@ -16,7 +16,7 @@ use dashmap::DashMap;
 use gw_authcore::AuthRecord;
 use parking_lot::{Mutex, RwLock};
 
-use crate::ports::{ChannelPolicy, ChannelPolicyStore};
+use crate::ports::{ChannelPolicy, ChannelPolicyStore, RateLimiter};
 
 /// Consecutive failures before an account is benched.
 pub const DEFAULT_FAILURE_THRESHOLD: u32 = 3;
@@ -168,12 +168,17 @@ impl ChannelPolicyCache {
             .read()
             .get(auth_id)
             .cloned()
-            .unwrap_or_else(|| ChannelPolicy {
-                auth_id: auth_id.to_owned(),
-                weight: 1,
-                priority: 0,
-                enabled: true,
-            })
+            .unwrap_or_else(|| ChannelPolicy::default_for(auth_id))
+    }
+
+    /// Overwrites the in-memory snapshot. Tests use this so they do not wait
+    /// for the refresh ticker.
+    pub fn seed(&self, policies: Vec<ChannelPolicy>) {
+        let next = policies
+            .into_iter()
+            .map(|p| (p.auth_id.clone(), p))
+            .collect();
+        *self.snapshot.write() = next;
     }
 
     /// Refreshes on a ticker until the task is dropped.
@@ -232,15 +237,22 @@ impl ChannelPool {
     fn policy(&self, auth_id: &str) -> ChannelPolicy {
         let mut policy = match &self.policies {
             Some(cache) => cache.lookup(auth_id),
-            None => ChannelPolicy {
-                auth_id: auth_id.to_owned(),
-                weight: 1,
-                priority: 0,
-                enabled: true,
-            },
+            None => ChannelPolicy::default_for(auth_id),
         };
         policy.weight = policy.weight.clamp(1, MAX_WEIGHT);
         policy
+    }
+
+    /// In-flight cap for `auth_id`. `<= 0` means unlimited.
+    #[must_use]
+    pub fn max_concurrent(&self, auth_id: &str) -> i64 {
+        self.policy(auth_id).max_concurrent.max(0)
+    }
+
+    /// Snapshot source, so tests can seed policies without a ticker.
+    #[must_use]
+    pub fn policy_cache(&self) -> Option<&Arc<ChannelPolicyCache>> {
+        self.policies.as_ref()
     }
 
     /// Picks one account for `(provider, model)`.
@@ -348,6 +360,49 @@ impl ChannelPool {
         }
         let n = self.cursor.fetch_add(1, Ordering::Relaxed);
         items.get(n % items.len())
+    }
+}
+
+/// An in-flight reservation against one upstream account.
+///
+/// Dropping it frees the Redis slot. Unary drops immediately after the
+/// upstream returns; a stream holds the slot until the body finishes or the
+/// client hangs up.
+pub struct ChannelSlot {
+    limiter: Arc<dyn RateLimiter>,
+    auth_id: String,
+    release_id: String,
+}
+
+impl ChannelSlot {
+    /// Builds a slot that [`Drop`] will release.
+    #[must_use]
+    pub fn new(limiter: Arc<dyn RateLimiter>, auth_id: String, release_id: String) -> Self {
+        Self {
+            limiter,
+            auth_id,
+            release_id,
+        }
+    }
+}
+
+impl Drop for ChannelSlot {
+    fn drop(&mut self) {
+        if self.release_id.is_empty() {
+            return;
+        }
+        let limiter = Arc::clone(&self.limiter);
+        let auth_id = std::mem::take(&mut self.auth_id);
+        let release_id = std::mem::take(&mut self.release_id);
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(async move {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    limiter.release_channel(&auth_id, &release_id),
+                )
+                .await;
+            });
+        }
     }
 }
 

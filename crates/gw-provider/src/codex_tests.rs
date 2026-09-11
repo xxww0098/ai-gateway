@@ -14,7 +14,6 @@ fn config(base_url: &str) -> ProviderConfig {
     ProviderConfig {
         base_url: base_url.to_owned(),
         api_key: "config-token".to_owned(),
-        enabled: true,
     }
 }
 
@@ -259,13 +258,10 @@ fn streaming_requests_force_include_usage_like_the_openai_executor() {
         .unwrap()
         .parse()
         .unwrap();
+    // Cache rewrite may grow the JSON; include_usage still has to be spliced
+    // on top of that rewritten body, so the declared length is strictly larger
+    // than the inbound payload.
     assert!(declared > req.payload.len());
-    assert_eq!(
-        declared,
-        crate::common::ensure_include_usage(&req.payload, Surface::OpenAiCompletions)
-            .expect("fixture must be spliceable")
-            .len()
-    );
 }
 
 // --- OAuth token rotation ------------------------------------------------------

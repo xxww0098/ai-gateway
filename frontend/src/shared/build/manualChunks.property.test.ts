@@ -14,25 +14,17 @@ import { manualChunks } from './manualChunks'
 /**
  * Known library path patterns and their expected chunk names.
  * This mirrors the actual mapping in vite.config.ts.
- *
- * Note: react-hook-form matches the `/node_modules/react` check first,
- * so it is categorized as 'react' in the current implementation.
  */
 const LIBRARY_CHUNK_MAP: Record<string, string> = {
   '/node_modules/react': 'react',
   '/node_modules/react-dom': 'react',
   '/node_modules/react-router-dom': 'react',
-  '/node_modules/react-hook-form': 'react', // matches /node_modules/react prefix first
-  '/node_modules/recharts': 'charts',
   '/node_modules/@radix-ui': 'radix',
-  '/node_modules/@stripe': 'payments',
-  '/node_modules/zod': 'validation',
-  '/node_modules/lucide-react': 'icons',
   '/node_modules/@tanstack': 'query',
 }
 
 /** All valid chunk names that can be returned */
-const VALID_CHUNK_NAMES = ['react', 'charts', 'radix', 'payments', 'validation', 'forms', 'icons', 'query']
+const VALID_CHUNK_NAMES = ['react', 'radix', 'query']
 
 // ---------------------------------------------------------------------------
 // Property 7: Chunk Splitting Categorization
@@ -70,12 +62,7 @@ describe('Property 7: Chunk Splitting Categorization', () => {
     // Known substrings that would trigger a match
     const knownPatterns = [
       '/node_modules/react',
-      '/node_modules/recharts',
       '/node_modules/@radix-ui',
-      '/node_modules/@stripe',
-      '/node_modules/zod',
-      '/node_modules/lucide-react',
-      '/node_modules/react-hook-form',
       '/node_modules/@tanstack',
     ]
 

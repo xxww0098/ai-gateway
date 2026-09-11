@@ -45,11 +45,10 @@ use gw_relay::endpoint::spec::RequestSpec;
 use gw_relay::endpoint::upstream::ChannelResolver;
 
 use crate::ProxyState;
-use crate::channel::ChannelPool;
+use crate::channel::{ChannelPool, ChannelSlot};
 use crate::error::{DispatchError, HoldRejection};
 use crate::hold::PeekedBody;
-use crate::kernel::{Phase, RelayCtx};
-use crate::ports::{CircuitBreaker, ModelCatalog};
+use crate::ports::{AccessMetadata, CircuitBreaker, ModelCatalog, RateLimiter};
 use crate::settlectx::BillingHandle;
 use crate::usage::Settlement;
 
@@ -87,6 +86,7 @@ pub struct Dispatcher {
     channels: Arc<ChannelPool>,
     settlement: Arc<Settlement>,
     circuit_breaker: Option<Arc<dyn CircuitBreaker>>,
+    rate_limiter: Option<Arc<dyn RateLimiter>>,
     catalog: Option<Arc<dyn ModelCatalog>>,
     /// 四级链的 L1/L2/L3 数据源。`None` = 一键回滚到纯前缀猜测（L4）。
     resolver: Option<Arc<dyn ChannelResolver>>,
@@ -149,6 +149,7 @@ impl Dispatcher {
             channels,
             settlement,
             circuit_breaker: None,
+            rate_limiter: None,
             catalog: None,
             resolver: None,
         }
@@ -158,6 +159,13 @@ impl Dispatcher {
     #[must_use]
     pub fn with_circuit_breaker(mut self, cb: Arc<dyn CircuitBreaker>) -> Self {
         self.circuit_breaker = Some(cb);
+        self
+    }
+
+    /// Hands the same limiter to hold (tenant caps) and dispatch (account caps).
+    #[must_use]
+    pub fn with_rate_limiter(mut self, rl: Arc<dyn RateLimiter>) -> Self {
+        self.rate_limiter = Some(rl);
         self
     }
 
@@ -254,13 +262,6 @@ impl Dispatcher {
                 .or_default()
                 .push(record);
         }
-        // xAI Grok OAuth credentials are stored as provider `xai` but speak
-        // the OpenAI-compatible wire. Attach them to the openai bucket so the
-        // existing OpenAI executor can use them (with the record's base_url).
-        // Do not merge `kiro` — that API is not OpenAI-compatible.
-        if let Some(xai) = grouped.get("xai").cloned() {
-            grouped.entry("openai".to_owned()).or_default().extend(xai);
-        }
         let snapshot = Arc::new(AuthSnapshot {
             by_provider: grouped
                 .into_iter()
@@ -313,14 +314,11 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
         return dialect_error(status, body);
     }
 
-    if let Some(ctx) = inbound.relay.as_mut() {
-        ctx.advance(Phase::Routed);
-    }
-
     let user_id = billing.as_ref().map(|b| b.ctx.user_id).unwrap_or(0);
     let preferred = dispatcher.channels.preferred(user_id, &model);
     let mut tried: Vec<String> = Vec::new();
     let mut last_error: Option<DispatchError> = None;
+    let mut skipped_busy = false;
 
     for provider_name in candidates {
         let Some(provider) = dispatcher.provider(provider_name) else {
@@ -333,17 +331,29 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
         }
 
         while tried.len() < MAX_UPSTREAM_ATTEMPTS {
-            if let Some(ctx) = inbound.relay.as_mut() {
-                ctx.advance(Phase::Attempting);
-            }
+            // 只借用不克隆：AuthRecord 带着解密后的整份凭证 JSON，
+            // 热路径上再 memcpy 一遍没有意义（见 `channel::pick_sticky` 的合同）。
             let Some(auth) = dispatcher
                 .channels
                 .pick_sticky(&auths, preferred.as_deref(), &tried)
             else {
                 break; // this provider's accounts are exhausted for this request
             };
-            let auth = auth.clone();
             tried.push(auth.id.clone());
+
+            let slot = match acquire_channel_slot(
+                dispatcher.rate_limiter.as_ref(),
+                &dispatcher.channels,
+                &auth.id,
+            )
+            .await
+            {
+                Ok(slot) => slot,
+                Err(()) => {
+                    skipped_busy = true;
+                    continue;
+                }
+            };
 
             let request = ProviderRequest {
                 model: model.clone(),
@@ -358,25 +368,24 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
             let started = Instant::now();
 
             if stream {
-                match provider.execute_stream(&auth, request).await {
+                match provider.execute_stream(auth, request).await {
                     Ok(upstream) => {
                         // The connection stood up, so the account is working;
                         // a mid-stream failure is reported through the usage
                         // outcome instead.
                         record_success(state, provider_name, &auth.id, user_id, &model).await;
-                        if let Some(ctx) = inbound.relay.as_mut() {
-                            ctx.advance(Phase::Relaying);
-                        }
                         return stream_response(
                             state,
                             upstream,
                             billing,
-                            auth.id,
+                            auth.id.clone(),
                             provider_name,
                             started,
+                            slot,
                         );
                     }
                     Err(err) => {
+                        drop(slot);
                         record_failure(state, provider_name, &auth.id).await;
                         if !is_retryable(&err) {
                             return finish_error(state, billing.as_ref(), map_error(err));
@@ -385,12 +394,13 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
                     }
                 }
             } else {
-                match provider.execute(&auth, request).await {
+                match provider.execute(auth, request).await {
                     // An error status the provider relayed rather than raised
                     // is still that account failing: fail over to the next one
                     // instead of handing the client a 503 another credential
                     // would have served.
                     Ok(response) if is_retryable_status(response.status) => {
+                        drop(slot);
                         record_failure(state, provider_name, &auth.id).await;
                         last_error = Some(DispatchError::Upstream {
                             status: StatusCode::from_u16(response.status)
@@ -399,20 +409,19 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
                         });
                     }
                     Ok(response) => {
+                        drop(slot);
                         record_success(state, provider_name, &auth.id, user_id, &model).await;
-                        if let Some(ctx) = inbound.relay.as_mut() {
-                            ctx.advance(Phase::Relaying);
-                        }
                         return unary_response(
                             state,
                             response,
                             billing,
-                            auth.id,
+                            auth.id.clone(),
                             provider_name,
                             started,
                         );
                     }
                     Err(err) => {
+                        drop(slot);
                         record_failure(state, provider_name, &auth.id).await;
                         if !is_retryable(&err) {
                             return finish_error(state, billing.as_ref(), map_error(err));
@@ -424,16 +433,14 @@ async fn dispatch(state: &ProxyState, surface: Surface, mut inbound: Inbound) ->
         }
     }
 
-    let err = last_error.unwrap_or_else(|| DispatchError::NoUpstream(model));
+    let err = last_error.unwrap_or_else(|| {
+        if skipped_busy {
+            DispatchError::ChannelBusy
+        } else {
+            DispatchError::NoUpstream(model)
+        }
+    });
     finish_error(state, billing.as_ref(), err)
-}
-
-/// 终止一个还没到上游就被网关拒掉的请求的计费：**释放，不结算**。
-///
-/// 账本写入走 [`schedule_release`]（`StreamSettler` → `ProxyState::drain`），
-/// 不挡错误响应回给客户端。
-fn finish_billing_failed(state: &ProxyState, billing: Option<&BillingHandle>) {
-    schedule_release(state, billing);
 }
 
 /// Whether a failure is worth trying on a different account.
@@ -493,6 +500,33 @@ fn request_metadata(
     meta
 }
 
+async fn acquire_channel_slot(
+    limiter: Option<&Arc<dyn RateLimiter>>,
+    channels: &ChannelPool,
+    auth_id: &str,
+) -> Result<Option<ChannelSlot>, ()> {
+    let max = channels.max_concurrent(auth_id);
+    if max <= 0 {
+        return Ok(None);
+    }
+    let Some(rl) = limiter else {
+        return Ok(None);
+    };
+    match rl.acquire_channel(auth_id, max).await {
+        Ok((true, Some(release_id))) if !release_id.is_empty() => Ok(Some(ChannelSlot::new(
+            Arc::clone(rl),
+            auth_id.to_owned(),
+            release_id,
+        ))),
+        Ok((true, _)) => Ok(None),
+        Ok((false, _)) => Err(()),
+        Err(err) => {
+            tracing::warn!(%err, auth_id, "channel limiter unavailable; failing open");
+            Ok(None)
+        }
+    }
+}
+
 async fn record_success(
     state: &ProxyState,
     provider: &str,
@@ -522,13 +556,17 @@ async fn record_failure(state: &ProxyState, provider: &str, auth_id: &str) {
     }
 }
 
-/// Terminates billing for a request that never reached an upstream.
+/// Terminates billing for a request that never reached an upstream：
+/// **释放，不结算**。
+///
+/// 账本写入走 [`schedule_release`]（`StreamSettler` → `ProxyState::drain`），
+/// 不挡错误响应回给客户端。
 fn finish_error(
     state: &ProxyState,
     billing: Option<&BillingHandle>,
     err: DispatchError,
 ) -> Response {
-    finish_billing_failed(state, billing);
+    schedule_release(state, billing);
     err.into_response()
 }
 
@@ -546,7 +584,6 @@ struct Inbound {
     /// duplicates are both significant, hence a `Vec`.
     query: Vec<(String, String)>,
     billing: Option<BillingHandle>,
-    relay: Option<RelayCtx>,
 }
 
 /// Reuses the body the hold layer already buffered, or reads it directly when
@@ -573,7 +610,6 @@ struct Inbound {
 async fn inbound(req: Request, surface: Surface) -> Result<Inbound, Response> {
     let (mut parts, body) = req.into_parts();
     let billing = parts.extensions.remove::<BillingHandle>();
-    let relay = parts.extensions.remove::<RelayCtx>();
     let peeked = parts.extensions.remove::<PeekedBody>();
     let spec = parts.extensions.remove::<RequestSpec>();
     let headers = parts.headers;
@@ -599,7 +635,6 @@ async fn inbound(req: Request, surface: Surface) -> Result<Inbound, Response> {
         headers,
         query,
         billing,
-        relay,
     })
 }
 
@@ -721,11 +756,7 @@ pub async fn models(State(state): State<ProxyState>) -> Response {
 /// 响应是裸 JSON（与 `GET /v1/models` 一样），不是面板 `{code,data}` 信封。
 /// 账本 / 用量读失败走内部错误，不 402 —— 这条路径不进预扣，402 会误导客户端以为被拒付。
 pub async fn usage(State(state): State<ProxyState>, req: Request) -> Response {
-    let Some(meta) = req
-        .extensions()
-        .get::<RelayCtx>()
-        .map(|ctx| ctx.access.clone())
-    else {
+    let Some(meta) = req.extensions().get::<AccessMetadata>().cloned() else {
         return HoldRejection::MissingAccessContext.into_response();
     };
 

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { Loader2, Inbox, AlertCircle } from 'lucide-react'
+import { Inbox, AlertCircle } from 'lucide-react'
 import { EmptyState, type EmptyStateProps } from '@/shared/components/EmptyState'
 
 export interface QueryStateWrapperProps {
@@ -48,9 +48,15 @@ export function QueryStateWrapper({
 }: QueryStateWrapperProps) {
   if (isLoading) {
     return (
-      <div className={className ?? 'flex flex-col items-center justify-center py-16 gap-3'}>
-        <Loader2 className="h-8 w-8 animate-spin text-primary" />
-        <p className="text-sm text-muted-foreground">{loadingMessage}</p>
+      <div
+        className={className ?? 'space-y-3 py-6'}
+        role="status"
+        aria-busy="true"
+        aria-label={loadingMessage}
+      >
+        <div className="h-10 rounded-xl bg-muted animate-pulse" />
+        <div className="h-10 rounded-xl bg-muted/70 animate-pulse" />
+        <div className="h-10 rounded-xl bg-muted/50 animate-pulse" />
       </div>
     )
   }

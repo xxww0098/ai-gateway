@@ -6,8 +6,6 @@ import { ErrorBoundary } from '@/shared/components/ErrorBoundary'
 import { adminRoutes, adminBillingTab, adminCommerceTab } from '@/shared/routes/admin'
 import { userRoutes } from '@/shared/routes/user'
 import { docsRoutes } from '@/shared/routes/docs'
-import { AuthLayout } from './pages/public/AuthLayout'
-import UserLayout from './pages/user/UserLayout'
 
 /** Client redirect that keeps ?query (e.g. tab= on billing/settings/channels). */
 function RedirectWithSearch({ to }: { to: string }) {
@@ -15,6 +13,10 @@ function RedirectWithSearch({ to }: { to: string }) {
   return <Navigate to={`${to}${search}`} replace />
 }
 
+const AuthLayout = lazy(() =>
+  import('./pages/public/AuthLayout').then(m => ({ default: m.AuthLayout })),
+)
+const UserLayout = lazy(() => import('./pages/user/UserLayout'))
 const Home = lazy(() => import('./pages/public/HomePage'))
 const Docs = lazy(() => import('./pages/docs/DocsPage'))
 const Login = lazy(() => import('./pages/public/LoginPage'))
@@ -30,8 +32,8 @@ const Refunds = lazy(() => import('./pages/user/refunds/RefundsPage'))
 const RefundApply = lazy(() => import('./pages/user/refunds/RefundApplyPage'))
 const Tickets = lazy(() => import('./pages/user/tickets/TicketsPage'))
 
-const AdminUsers = lazy(() => import('./pages/admin/users/AdminUsersPage'))
 const AdminChannels = lazy(() => import('./pages/admin/proxy/AdminProxyChannelsPage'))
+const AdminCredentials = lazy(() => import('./pages/admin/proxy/AdminProxyCredentialsPage'))
 const AdminBilling = lazy(() => import('./pages/admin/billing/AdminBillingPage'))
 const AdminUsageLogs = lazy(() => import('./pages/admin/usage-logs/AdminUsageLogsPage'))
 const AdminSettings = lazy(() => import('./pages/admin/settings/AdminSettingsPage'))
@@ -41,8 +43,12 @@ const AdminAuditLogs = lazy(() => import('./pages/admin/audit-logs/AdminAuditLog
 
 function PageFallback() {
   return (
-    <div className="flex min-h-[240px] items-center justify-center text-sm text-muted-foreground">
-      页面加载中...
+    <div className="flex min-h-[240px] items-center justify-center" role="status" aria-label="页面加载中">
+      <div className="w-full max-w-md space-y-3 px-6">
+        <div className="h-8 w-40 rounded-xl bg-muted animate-pulse" />
+        <div className="h-4 w-72 max-w-full rounded-lg bg-muted/70 animate-pulse" />
+        <div className="h-32 rounded-xl bg-muted/50 animate-pulse" />
+      </div>
     </div>
   )
 }
@@ -92,8 +98,8 @@ function App() {
             <Route path="/refund/apply" element={<RedirectWithSearch to={userRoutes.refundApply} />} />
 
             {/* ── Admin routes (canonical /admin/*) ── */}
-            <Route path={adminRoutes.users} element={eb(<AdminUsers />)} />
             <Route path={adminRoutes.channels} element={eb(<AdminChannels />)} />
+            <Route path={adminRoutes.credentials} element={eb(<AdminCredentials />)} />
             <Route path={adminRoutes.billing} element={eb(<AdminBilling />)} />
             <Route path={adminRoutes.usageLogs} element={eb(<AdminUsageLogs />)} />
             <Route path={adminRoutes.commerce} element={eb(<AdminCommerce />)} />
@@ -103,8 +109,8 @@ function App() {
             <Route path={adminRoutes.auditLogs} element={eb(<AdminAuditLogs />)} />
 
             {/* Legacy admin paths → canonical (bookmarks / deep links) */}
-            <Route path="/users" element={<Navigate to={adminRoutes.users} replace />} />
             <Route path="/channels" element={<RedirectWithSearch to={adminRoutes.channels} />} />
+            <Route path="/credentials" element={<RedirectWithSearch to={adminRoutes.credentials} />} />
             <Route path="/billing" element={<RedirectWithSearch to={adminRoutes.billing} />} />
             <Route path="/usage-logs" element={<Navigate to={adminRoutes.usageLogs} replace />} />
             <Route path="/settings" element={<RedirectWithSearch to={adminRoutes.settings} />} />

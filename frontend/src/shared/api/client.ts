@@ -1,5 +1,5 @@
 import { useAuthStore } from "@/features/auth/auth_store"
-import { extractErrorMessage } from "./errors"
+import { extractErrorMessage, httpFallbackMessage, GATEWAY_UNREACHABLE } from "./errors"
 import { unwrapResponse } from "./unwrap"
 
 // Re-export utilities for convenience
@@ -59,12 +59,21 @@ export function createApiClient(config: ClientConfig = { basePrefix: '/api/panel
   async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
     const token = useAuthStore.getState().token
     const headers = new Headers(options.headers || {})
-    headers.set('Content-Type', 'application/json')
+    // 只有真带 body 才声明 JSON：axum 的 `Option<Json<T>>` 见到
+    // `Content-Type: application/json` 就必须解析出 JSON，空 body 会被判 400。
+    if (options.body != null) {
+      headers.set('Content-Type', 'application/json')
+    }
     if (token) {
       headers.set('Authorization', `Bearer ${token}`)
     }
 
-    const response = await fetch(buildUrl(basePrefix, endpoint), { ...options, headers })
+    let response: Response
+    try {
+      response = await fetch(buildUrl(basePrefix, endpoint), { ...options, headers })
+    } catch {
+      throw new ApiError(GATEWAY_UNREACHABLE, 0)
+    }
     const rawText = await response.text()
     let data: unknown
     try { data = JSON.parse(rawText) } catch { data = null }
@@ -73,7 +82,10 @@ export function createApiClient(config: ClientConfig = { basePrefix: '/api/panel
       if (response.status === 401) {
         useAuthStore.getState().logout()
       }
-      const message = extractErrorMessage(data, response.statusText || '请求异常')
+      const message = extractErrorMessage(
+        data,
+        httpFallbackMessage(response.status, response.statusText),
+      )
       throw new ApiError(message, response.status)
     }
 
@@ -115,9 +127,11 @@ export function isAbortError(err: unknown): boolean {
  */
 export async function fetchApi(endpoint: string, options: RequestInit = {}) {
   const token = useAuthStore.getState().token
-  
+
   const headers = new Headers(options.headers || {})
-  headers.set('Content-Type', 'application/json')
+  if (options.body != null) {
+    headers.set('Content-Type', 'application/json')
+  }
   if (token) {
     headers.set('Authorization', `Bearer ${token}`)
   }

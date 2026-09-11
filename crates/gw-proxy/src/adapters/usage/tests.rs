@@ -29,7 +29,6 @@ fn commit(user_id: Id, request_id: &str, cost: f64) -> SettlementCommit {
         actual_cost: cost,
         entry: entry(user_id, request_id, cost),
         subscription_id: None,
-        skip_if_already_logged: false,
     }
 }
 
@@ -81,6 +80,7 @@ async fn a_settlement_debits_and_logs_in_one_go() {
         shortfall,
         balance_before,
         balance_after,
+        ..
     } = receipt
     else {
         panic!("expected a commit, got {receipt:?}");
@@ -173,8 +173,7 @@ async fn the_reconcile_guard_makes_a_second_run_a_no_op() {
     seed_user(&pool, 7, 10.0).await;
     let store = store(&pool);
 
-    let mut first = commit(7, "req-1", 1.0);
-    first.skip_if_already_logged = true;
+    let first = commit(7, "req-1", 1.0);
     assert!(matches!(
         store.commit_settlement(&first).await.expect("first run"),
         SettleReceipt::Committed { .. }
@@ -330,4 +329,115 @@ async fn model_usage_since_sums_today_and_ignores_other_users_and_older_rows() {
         alpha.output_tokens + alpha_again.output_tokens
     );
     assert_eq!(rows[0].requests, 2);
+}
+
+fn success_usage_count(rows: &[(f64, bool, Option<serde_json::Value>)]) -> usize {
+    rows.iter().filter(|row| !row.1).count()
+}
+
+async fn second_pool(pool: &sqlx::PgPool) -> sqlx::PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(8)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .expect("second pool to the same database")
+}
+
+/// A0a: the hot path does not skip, so a serial replay of the same request id
+/// currently charges twice. The contract is one debit and one success usage row.
+#[tokio::test]
+#[ignore = "needs a local Postgres: see testsupport::PG_HOWTO"]
+async fn serial_hot_path_replays_must_debit_once() {
+    let pool = fresh_db("settle_a0a").await;
+    seed_user(&pool, 7, 10.0).await;
+    let store = store(&pool);
+
+    store
+        .commit_settlement(&commit(7, "req-1", 2.5))
+        .await
+        .expect("first settle");
+    store
+        .commit_settlement(&commit(7, "req-1", 2.5))
+        .await
+        .expect("replay settle");
+
+    assert!(
+        (balance_of(&pool, 7).await - 7.5).abs() < 1e-9,
+        "the same request id must reduce the balance once"
+    );
+    assert_eq!(
+        success_usage_count(&usage_rows(&pool, "req-1").await),
+        1,
+        "a replay must not insert a second success usage row"
+    );
+}
+
+/// A0b: two pools, skip=true, concurrent READ COMMITTED check-then-insert.
+/// Desired: one winner, one debit. Current code can charge every racer.
+#[tokio::test]
+#[ignore = "needs a local Postgres: see testsupport::PG_HOWTO"]
+async fn concurrent_reconcile_settles_must_debit_once() {
+    let pool_a = fresh_db("settle_a0b").await;
+    let pool_b = second_pool(&pool_a).await;
+    seed_user(&pool_a, 7, 10.0).await;
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let mut handles = Vec::new();
+    for i in 0..8 {
+        let pool = if i % 2 == 0 {
+            pool_a.clone()
+        } else {
+            pool_b.clone()
+        };
+        let barrier = barrier.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store(&pool)
+                .commit_settlement(&commit(7, "req-1", 2.5))
+                .await
+        }));
+    }
+
+    let mut committed = 0usize;
+    for handle in handles {
+        match handle.await.expect("join").expect("settle") {
+            SettleReceipt::Committed { .. } => committed += 1,
+            SettleReceipt::AlreadySettled => {}
+        }
+    }
+
+    assert_eq!(committed, 1, "exactly one racer may debit");
+    assert!(
+        (balance_of(&pool_a, 7).await - 7.5).abs() < 1e-9,
+        "concurrent skip=true must not stack debits"
+    );
+    assert_eq!(success_usage_count(&usage_rows(&pool_a, "req-1").await), 1);
+}
+
+/// A0c: a failed usage audit row is not a successful settlement.
+/// Desired: a later skip=true settle still debits once.
+#[tokio::test]
+#[ignore = "needs a local Postgres: see testsupport::PG_HOWTO"]
+async fn a_failed_usage_row_must_not_block_a_successful_settle() {
+    let pool = fresh_db("settle_a0c").await;
+    seed_user(&pool, 7, 10.0).await;
+    let store = store(&pool);
+
+    let mut failed = entry(7, "req-1", 0.0);
+    failed.failed = true;
+    store
+        .insert_usage_log(&failed)
+        .await
+        .expect("failed audit row");
+
+    let receipt = store
+        .commit_settlement(&commit(7, "req-1", 2.5))
+        .await
+        .expect("success after failure");
+    assert!(
+        matches!(receipt, SettleReceipt::Committed { .. }),
+        "a failed row must not be treated as AlreadySettled: {receipt:?}"
+    );
+    assert!((balance_of(&pool, 7).await - 7.5).abs() < 1e-9);
+    assert_eq!(success_usage_count(&usage_rows(&pool, "req-1").await), 1);
 }

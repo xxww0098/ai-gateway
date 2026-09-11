@@ -100,14 +100,11 @@ export default function RedeemCodes() {
   }
 
   return (
-    <div className="space-y-6 animate-in fade-in duration-500" style={{ willChange: 'transform, opacity' }}>
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+    <div className="space-y-6">
+      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
         <div className="space-y-1">
-          <h3 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
-            <Gift className="w-5 h-5 text-purple-500" />
-            充值卡密
-          </h3>
-          <p className="text-sm text-gray-500 max-w-2xl">
+          <h2 className="text-xl font-bold text-foreground">充值卡密</h2>
+          <p className="max-w-2xl text-sm text-muted-foreground">
             批量生成指定面值的充值卡密。用户可在充值页面输入卡密兑换余额。
           </p>
         </div>
@@ -181,7 +178,7 @@ export default function RedeemCodes() {
                     size="compact"
                     tone="first-use"
                     icon={Gift}
-                    title="暂无充值卡密"
+                    title="还没有充值卡密"
                     description="卡密可用于线下分发、活动赠送或用户补偿。点击上方「批量生成卡密」开始创建。"
                   />
                 </TableCell>
@@ -205,7 +202,7 @@ export default function RedeemCodes() {
                   <TableCell className="font-medium text-purple-600 dark:text-purple-400">${c.amount.toFixed(4)}</TableCell>
                   <TableCell>
                      <Badge variant={c.status === 'active' ? 'default' : (c.status === 'exhausted' ? 'secondary' : 'destructive')} 
-                            className={c.status === 'active' ? 'bg-emerald-500 hover:bg-emerald-600 text-white border-transparent' : 'font-normal'}>
+                            className={c.status === 'active' ? 'bg-emerald-700 hover:bg-emerald-800 text-white border-transparent' : 'font-normal'}>
                         {c.status === 'active' ? '未兑换 (Active)' : (c.status === 'exhausted' ? '已使用 (Redeemed)' : '已禁用')}
                      </Badge>
                   </TableCell>

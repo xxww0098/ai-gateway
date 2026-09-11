@@ -396,6 +396,9 @@ pub fn serialize_auth_file(record: &AuthRecord, index: usize) -> Value {
     let mut item = json!({
         "id": record.id,
         "auth_id": record.id,
+        "auth_index": record.id,
+        "authIndex": record.id,
+        "index": index,
         "name": stable_name(record, index),
         "label": record.label,
         "provider": record.provider,

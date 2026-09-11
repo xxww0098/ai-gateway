@@ -13,8 +13,13 @@ mod tests;
 
 /// Idle-connection default (`pool_value_or_default(_, 25)`).
 pub const DEFAULT_MAX_IDLE_CONNS: u32 = 25;
-/// Open-connection default (`pool_value_or_default(_, 200)`).
-pub const DEFAULT_MAX_OPEN_CONNS: u32 = 200;
+/// Open-connection default (`pool_value_or_default(_, 50)`).
+///
+/// Sized under a stock Postgres `max_connections = 100`: 50 leaves headroom
+/// for the panel, migrations, and admin clients, and two gateway instances
+/// still fit on one default Postgres. Operators running a raised
+/// `max_connections` or a pooler can widen `database.max_open_conns`.
+pub const DEFAULT_MAX_OPEN_CONNS: u32 = 50;
 /// Connection-lifetime default (`pool_value_or_default(_, 30)`).
 pub const DEFAULT_CONN_MAX_LIFETIME_MINUTES: u32 = 30;
 
@@ -94,21 +99,6 @@ pub struct PoolSizing {
 }
 
 impl DbSettings {
-    /// The libpq keyword/value connection string.
-    ///
-    /// [`init_db`] does *not* go through this — it builds [`PgConnectOptions`]
-    /// programmatically so a password containing spaces or quotes cannot break
-    /// the string. The DSN is kept for tooling that wants a connection string
-    /// (psql, migration runners).
-    ///
-    /// **Contains the password in clear text — never log the result.**
-    pub fn dsn(&self) -> String {
-        format!(
-            "host={} port={} user={} password={} dbname={} sslmode={}",
-            self.host, self.port, self.user, self.password, self.dbname, self.sslmode
-        )
-    }
-
     /// Resolves the three pool knobs, applying the gateway defaults for
     /// non-positive values.
     ///

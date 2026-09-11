@@ -41,8 +41,23 @@ export interface ApiKey {
 
 // ── Component prop types ────────────────────────────────────────────────────
 
+export interface UsageTrendPoint {
+  date: string
+  requests: number
+  tokens: number
+  cost: number
+}
+
+export interface UsageModelStat {
+  model: string
+  requests: number
+  tokens: number
+  cost: number
+}
+
 export interface UsageStatsCardsProps {
   stats: UsageStats | null
+  topModel: UsageModelStat | null
 }
 
 export interface UsageFilterBarProps {

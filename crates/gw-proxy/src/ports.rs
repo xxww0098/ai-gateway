@@ -7,7 +7,6 @@
 //! traits while `gw-ledger` / `gw-pricing` / `gw-infra` are written in
 //! parallel.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -34,16 +33,14 @@ pub struct TokenUsage {
 /// Why a ledger operation refused.
 ///
 /// A typed enum distinguishes the structured 402 from the generic one without
-/// the string matching; it mirrors the failure modes of `Ledger::hold` /
-/// `Ledger::settle`.
+/// the string matching; it mirrors the failure modes the hold pre-flight
+/// branches on.
 #[derive(Debug, thiserror::Error)]
 pub enum BillingError {
     #[error("insufficient balance")]
     InsufficientBalance,
     #[error("outstanding debt")]
     OutstandingDebt,
-    #[error("hold not found")]
-    HoldNotFound,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -54,25 +51,6 @@ pub enum BillingError {
 /// A 1:1 narrowing of `gw_ledger::Ledger`.
 #[async_trait]
 pub trait BillingLedger: Send + Sync {
-    /// Reserves `amount` against `user_id` for `request_id`, valid for `ttl`.
-    async fn hold(
-        &self,
-        user_id: Id,
-        amount: f64,
-        request_id: &str,
-        ttl: Duration,
-    ) -> Result<(), BillingError>;
-
-    /// Clears the outstanding hold for `request_id` and debits
-    /// `min(balance, actual_amount)`, returning the un-debited shortfall.
-    /// A non-positive `actual_amount` only clears the hold.
-    async fn settle(
-        &self,
-        user_id: Id,
-        request_id: &str,
-        actual_amount: f64,
-    ) -> Result<f64, BillingError>;
-
     /// Clears the hold without touching the persistent balance. Used when the
     /// upstream request failed.
     async fn release(&self, user_id: Id, request_id: &str) -> Result<(), BillingError>;
@@ -102,9 +80,9 @@ pub trait BillingLedger: Send + Sync {
     /// not create a reservation — that is what keeps a 402
     /// `insufficient_balance` from leaving a Redis hold behind.
     ///
-    /// Default implementation: one available-balance peek, then [`Self::hold`].
-    /// Production overrides this with a single Lua script so the peek and the
-    /// reservation share one Redis RTT.
+    /// Production implements this with a single Lua script so the balance peek
+    /// and the reservation share one Redis RTT. A balance peek that fails must
+    /// fail closed (treat as insufficient), never as spendable.
     async fn hold_gated(
         &self,
         user_id: Id,
@@ -112,13 +90,19 @@ pub trait BillingLedger: Send + Sync {
         min_available: f64,
         request_id: &str,
         ttl: Duration,
-    ) -> Result<HoldAdmit, BillingError> {
-        let available = self.available_balance(user_id).await.unwrap_or(0.0);
-        if available < min_available {
-            return Ok(HoldAdmit::Insufficient { available });
-        }
-        self.hold(user_id, amount, request_id, ttl).await?;
-        Ok(HoldAdmit::Reserved)
+    ) -> Result<HoldAdmit, BillingError>;
+
+    /// Persist the Redis hold as a SQL pending intent. Failure must release
+    /// the hold and fail closed before upstream dispatch. Default is a no-op
+    /// for in-memory test ledgers.
+    async fn record_pending_hold(
+        &self,
+        user_id: Id,
+        request_id: &str,
+        amount: f64,
+    ) -> Result<(), BillingError> {
+        let _ = (user_id, request_id, amount);
+        Ok(())
     }
 }
 
@@ -235,8 +219,22 @@ pub trait TenantDirectory: Send + Sync {
     /// Newest `status = 'active' AND expires_at > now()` subscription.
     async fn active_subscription(&self, user_id: Id) -> anyhow::Result<Option<SubscriptionQuota>>;
 
+    /// `users.concurrency` for the tenant. `None` means the row is absent.
+    ///
+    /// Default: `Ok(None)` so doubles that only model status still compile.
+    async fn user_concurrency(&self, user_id: Id) -> anyhow::Result<Option<i64>> {
+        let _ = user_id;
+        Ok(None)
+    }
+
     /// Whether the user holds a live subscription bound to `group_id`.
     async fn holds_group_entitlement(&self, user_id: Id, group_id: Id) -> anyhow::Result<bool>;
+
+    /// Current session epoch in `user_token_versions`. Missing row is `0`.
+    ///
+    /// A lookup error must be propagated so [`crate::access`] can fail closed:
+    /// treating a failed read as `0` would un-revoke every outstanding JWT.
+    async fn token_version(&self, user_id: Id) -> anyhow::Result<i64>;
 
     /// Fire-and-forget `UPDATE api_keys SET last_used_at = now()`.
     async fn touch_api_key(&self, api_key_id: Id);
@@ -315,10 +313,6 @@ pub struct SettlementCommit {
     /// Accumulate the three usage counters on this subscription when the cost
     /// is positive and the row is still active.
     pub subscription_id: Option<Id>,
-    /// Re-check `usage_logs.request_id` INSIDE the transaction and abort with
-    /// [`SettleReceipt::AlreadySettled`] if a row exists. Used by
-    /// [`crate::reconcile`] so an orphaned hold can never be double-charged.
-    pub skip_if_already_logged: bool,
 }
 
 /// Outcome of [`UsageStore::commit_settlement`].
@@ -329,8 +323,11 @@ pub enum SettleReceipt {
         shortfall: f64,
         balance_before: f64,
         balance_after: f64,
+        /// `users.balance_version` after this debit. `None` on the zero-amount
+        /// path, which must not publish the cache.
+        balance_version: Option<i64>,
     },
-    /// `skip_if_already_logged` was set and a `usage_logs` row already existed.
+    /// This gateway request id already completed a successful settle.
     AlreadySettled,
 }
 
@@ -353,7 +350,16 @@ pub trait UsageStore: Send + Sync {
     async fn insert_balance_event(&self, event: &BalanceEvent) -> anyhow::Result<()>;
 
     /// Releases the Redis reservation after the settle transaction commits.
-    async fn clear_hold(&self, user_id: Id, request_id: &str) -> anyhow::Result<()>;
+    ///
+    /// `published` is `(balance_after, balance_version)` from the commit.
+    /// When present it is written through with a version check. `None` only
+    /// drops the hold members and leaves the cache alone.
+    async fn clear_hold(
+        &self,
+        user_id: Id,
+        request_id: &str,
+        published: Option<(f64, i64)>,
+    ) -> anyhow::Result<()>;
 
     /// 当地今日零点以来、按模型折叠的 token 消耗。供 `GET /v1/usage`。
     async fn model_usage_since(
@@ -380,39 +386,6 @@ impl ModelTokenUsage {
     }
 }
 
-/// 把逐条 usage 折成按模型的 token 小计。空模型名变成 `unknown`。
-///
-/// 排序与面板 `buildUsageModels` 同口径：请求数降序，同数按模型名升序。
-#[must_use]
-pub fn fold_model_usage<'a>(
-    logs: impl IntoIterator<Item = &'a UsageLogEntry>,
-) -> Vec<ModelTokenUsage> {
-    let mut table: HashMap<String, ModelTokenUsage> = HashMap::new();
-    for entry in logs {
-        let name = entry.model.trim();
-        let name = if name.is_empty() { "unknown" } else { name };
-        let point = table
-            .entry(name.to_owned())
-            .or_insert_with(|| ModelTokenUsage {
-                model: name.to_owned(),
-                requests: 0,
-                tokens_in: 0,
-                tokens_out: 0,
-            });
-        point.requests += 1;
-        point.tokens_in += entry.input_tokens;
-        point.tokens_out += entry.output_tokens;
-    }
-    let mut items: Vec<ModelTokenUsage> = table.into_values().collect();
-    items.sort_by(|left, right| {
-        right
-            .requests
-            .cmp(&left.requests)
-            .then_with(|| left.model.cmp(&right.model))
-    });
-    items
-}
-
 // ---------------------------------------------------------------- infra
 
 /// Distributed rate limiter.
@@ -426,10 +399,30 @@ pub trait RateLimiter: Send + Sync {
         tokens: i64,
         model: &str,
         group_id: Option<Id>,
+        user_concurrency: i64,
     ) -> anyhow::Result<(bool, Option<String>)>;
 
     /// Frees a reserved concurrency slot.
     async fn release_concurrency(&self, identity: &str, release_id: &str) -> anyhow::Result<()>;
+
+    /// Reserves one in-flight slot on an upstream account.
+    ///
+    /// `max_concurrent <= 0` is unlimited. Default fail-open so doubles that
+    /// only model the tenant limiter still compile.
+    async fn acquire_channel(
+        &self,
+        auth_id: &str,
+        max_concurrent: i64,
+    ) -> anyhow::Result<(bool, Option<String>)> {
+        let _ = (auth_id, max_concurrent);
+        Ok((true, None))
+    }
+
+    /// Frees a slot reserved by [`Self::acquire_channel`].
+    async fn release_channel(&self, auth_id: &str, release_id: &str) -> anyhow::Result<()> {
+        let _ = (auth_id, release_id);
+        Ok(())
+    }
 }
 
 /// Per-upstream circuit breaker.
@@ -464,6 +457,22 @@ pub struct ChannelPolicy {
     pub weight: i64,
     pub priority: i64,
     pub enabled: bool,
+    /// `<= 0` means unlimited.
+    pub max_concurrent: i64,
+}
+
+impl ChannelPolicy {
+    /// Missing-row default: weight 1 / priority 0 / enabled / unlimited.
+    #[must_use]
+    pub fn default_for(auth_id: impl Into<String>) -> Self {
+        Self {
+            auth_id: auth_id.into(),
+            weight: 1,
+            priority: 0,
+            enabled: true,
+            max_concurrent: 0,
+        }
+    }
 }
 
 /// Source of [`ChannelPolicy`] rows.
@@ -548,39 +557,12 @@ pub trait ModelCatalog: Send + Sync {
             .into_iter()
             .find(|model| model.id == id))
     }
-
-    /// **路由用**的 `model_id → channel_key[]`，顺序即优先级。
-    ///
-    /// 这是 `gw_relay::endpoint::upstream` 四级链 L2 的数据源，喂给
-    /// [`crate::adapters::catalog::CatalogChannelResolver`]。
-    ///
-    /// # 为什么不能复用 [`Self::list_models`]
-    ///
-    /// 那条查询带 `WHERE visible = TRUE`，而 `visible` 是**「对租户展示」**开关，
-    /// 不是**「允许调用」**开关 —— 今天一个 `visible = false` 的模型照样能被调用
-    /// （前缀猜测根本不看这张表）。路由查询若继承了它，会**静默地**把所有隐藏模型
-    /// 变成不可调用，表现为「某些模型突然 503」，极难归因。
-    /// 所以这是**独立的一条 SQL**，不是给 `list_models` 加参数。
-    ///
-    /// 默认实现返回空 —— 对不提供路由数据的实现，四级链直接落 L4 兜底，
-    /// 行为与收敛前逐字节相同。
-    async fn resolve_channels(&self, _model_id: &str) -> anyhow::Result<Vec<String>> {
-        Ok(Vec::new())
-    }
-
-    /// 全量的 `model_id → channel_key[]`，供快照式缓存一次拉完。
-    ///
-    /// 默认实现返回空，理由同 [`Self::resolve_channels`]。
-    async fn model_routes(&self) -> anyhow::Result<Vec<(String, Vec<String>)>> {
-        Ok(Vec::new())
-    }
 }
 
 /// Access metadata handed from [`crate::access`] to [`crate::hold`].
 ///
 /// The fields keep their types (no stringification) because the boundary is
-/// in-process. [`AccessMetadata::to_map`] reproduces the wire shape for logging
-/// and parity tests.
+/// in-process.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AccessMetadata {
     pub user_id: Id,
@@ -588,47 +570,6 @@ pub struct AccessMetadata {
     pub group_id: Option<Id>,
     pub rate_mult: f64,
     pub subscription: Option<SubscriptionQuota>,
-}
-
-impl AccessMetadata {
-    /// Reproduces the `map[string]string` metadata payload.
-    pub fn to_map(&self) -> HashMap<String, String> {
-        let mut meta = HashMap::new();
-        meta.insert("user_id".to_owned(), self.user_id.to_string());
-        meta.insert("rate_mult".to_owned(), fmt_float(self.rate_mult));
-        if self.api_key_id != 0 {
-            meta.insert("api_key_id".to_owned(), self.api_key_id.to_string());
-        }
-        if let Some(gid) = self.group_id {
-            meta.insert("group_id".to_owned(), gid.to_string());
-        }
-        if let Some(sub) = &self.subscription {
-            meta.insert("subscription_id".to_owned(), sub.id.to_string());
-            meta.insert("subscription_group_id".to_owned(), sub.group_id.to_string());
-            if let Some(v) = sub.daily_limit_usd {
-                meta.insert("daily_limit".to_owned(), fmt_float(v));
-            }
-            if let Some(v) = sub.weekly_limit_usd {
-                meta.insert("weekly_limit".to_owned(), fmt_float(v));
-            }
-            if let Some(v) = sub.monthly_limit_usd {
-                meta.insert("monthly_limit".to_owned(), fmt_float(v));
-            }
-            meta.insert("daily_used".to_owned(), fmt_float(sub.daily_usage_usd));
-            meta.insert("weekly_used".to_owned(), fmt_float(sub.weekly_usage_usd));
-            meta.insert("monthly_used".to_owned(), fmt_float(sub.monthly_usage_usd));
-        }
-        meta
-    }
-}
-
-/// Shortest decimal round-trip, never exponent notation for the magnitudes
-/// this codebase deals in.
-fn fmt_float(f: f64) -> String {
-    let s = format!("{f}");
-    if s.contains(['e', 'E']) {
-        format!("{f:.10}")
-    } else {
-        s
-    }
+    /// `users.concurrency`. `<= 0` means the limiter uses its configured default.
+    pub concurrency: i64,
 }

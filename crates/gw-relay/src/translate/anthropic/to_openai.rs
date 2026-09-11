@@ -15,13 +15,11 @@
 use bytes::Bytes;
 use serde_json::{Map, Value, json};
 
-use super::{
-    SseSplit, anthropic_frame, parse_object, parse_upstream_object, present, sse_data, str_at,
-    to_bytes,
-};
+use super::{SseSplit, present, str_at, to_bytes};
 use crate::contract::{
     RelayUsage, StreamTranslator, Surface, TranslateError, Translator, UpstreamDialect,
 };
+use crate::translate::common::{anthropic_frame, parse_object, parse_upstream_object, sse_data};
 
 /// `anthropic-messages` → `{openai, codex}` 的转义器。
 ///

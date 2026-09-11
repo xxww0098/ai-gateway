@@ -74,7 +74,6 @@ fn build_state(upstream: &str, idempotency: bool) -> anyhow::Result<ProxyState> 
         &ProviderConfig {
             base_url: upstream.to_owned(),
             api_key: "perf-upstream-key".to_owned(),
-            enabled: true,
         },
         60,
     )

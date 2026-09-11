@@ -16,90 +16,17 @@ use sha2::{Digest, Sha256};
 
 use super::SessionConfig;
 
+pub use gw_oauth::Family as Provider;
+pub(super) use gw_oauth::claude::{CLIENT_ID as CLAUDE_CLIENT_ID, TOKEN_URL as CLAUDE_TOKEN_URL};
+pub(super) use gw_oauth::codex::{CLIENT_ID as CODEX_CLIENT_ID, TOKEN_URL as CODEX_TOKEN_URL};
+
 #[cfg(test)]
 mod tests;
 
-// The endpoints and client ids below are the public, first-party values the
-// gateway ships; they identify the *gateway* to each provider, not any operator.
-const GEMINI_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/auth";
-pub(super) const GEMINI_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-pub(super) const GEMINI_USERINFO_URL: &str =
-    "https://www.googleapis.com/oauth2/v1/userinfo?alt=json";
-pub(super) const GEMINI_CLIENT_ID: &str =
-    "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
-pub(super) const GEMINI_SCOPES: &str = "https://www.googleapis.com/auth/cloud-platform \
-     https://www.googleapis.com/auth/userinfo.email \
-     https://www.googleapis.com/auth/userinfo.profile";
-
-const CLAUDE_AUTH_URL: &str = "https://claude.ai/oauth/authorize";
-pub(super) const CLAUDE_TOKEN_URL: &str = "https://api.anthropic.com/v1/oauth/token";
-pub(super) const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-const CLAUDE_SCOPES: &str =
-    "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
-
-const CODEX_AUTH_URL: &str = "https://auth.openai.com/oauth/authorize";
-pub(super) const CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-pub(super) const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-const CODEX_SCOPES: &str = "openid email profile offline_access";
-
-/// The providers with a panel-driven OAuth flow.
-///
-/// `anthropic` is accepted as an inbound alias for `claude` in the auth-url key
-/// but the credential is always stored under `claude`, so one provider never
-/// ends up with two spellings in `auth_records`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Provider {
-    Gemini,
-    Claude,
-    Codex,
-    /// xAI Grok — device-code (RFC 8628), stored as `xai`.
-    Xai,
-    /// Kiro / AWS Builder ID — device-code, auth-code, or IDC.
-    Kiro,
-}
-
-impl Provider {
-    /// 对应 `sdkMgmtCanonicalOAuthProvider`。
-    #[must_use]
-    pub fn parse(raw: &str) -> Option<Self> {
-        match raw.trim().to_lowercase().as_str() {
-            "gemini" => Some(Self::Gemini),
-            "claude" => Some(Self::Claude),
-            "codex" => Some(Self::Codex),
-            "xai" | "grok" => Some(Self::Xai),
-            "kiro" => Some(Self::Kiro),
-            _ => None,
-        }
-    }
-
-    /// The `auth_records.provider` value.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Gemini => "gemini",
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-            Self::Xai => "xai",
-            Self::Kiro => "kiro",
-        }
-    }
-
-    /// Maps endpoint key to provider.
-    ///
-    /// `antigravity-`/`kimi-auth-url` are deliberately absent: they have no
-    /// backend anymore, so they fall through to the 404 branch.
-    #[must_use]
-    pub fn from_auth_url_key(endpoint: &str) -> Option<Self> {
-        match endpoint.trim() {
-            "gemini-cli-auth-url" => Some(Self::Gemini),
-            "anthropic-auth-url" => Some(Self::Claude),
-            "codex-auth-url" => Some(Self::Codex),
-            "xai-auth-url" | "grok-auth-url" => Some(Self::Xai),
-            "kiro-auth-url" => Some(Self::Kiro),
-            _ => None,
-        }
-    }
-}
+const CLAUDE_AUTH_URL: &str = gw_oauth::claude::AUTHORIZE_URL;
+const CLAUDE_SCOPES: &str = gw_oauth::claude::SCOPE;
+const CODEX_AUTH_URL: &str = gw_oauth::codex::AUTHORIZE_URL;
+const CODEX_SCOPES: &str = gw_oauth::codex::SCOPE;
 
 /// Where the provider sends the operator back to.
 ///
@@ -153,15 +80,6 @@ pub fn build_authorize_url(
     config: &mut SessionConfig,
 ) -> Result<String, rand::Error> {
     let params: Vec<(&str, String)> = match provider {
-        Provider::Gemini => vec![
-            ("client_id", GEMINI_CLIENT_ID.to_owned()),
-            ("response_type", "code".to_owned()),
-            ("redirect_uri", config.redirect_uri.clone()),
-            ("scope", GEMINI_SCOPES.to_owned()),
-            ("state", state.to_owned()),
-            ("access_type", "offline".to_owned()),
-            ("prompt", "consent".to_owned()),
-        ],
         Provider::Claude => {
             let challenge = set_pkce(config)?;
             vec![
@@ -190,15 +108,35 @@ pub fn build_authorize_url(
                 ("codex_cli_simplified_flow", "true".to_owned()),
             ]
         }
-        // Device / dynamic-client flows build their URL elsewhere.
-        Provider::Xai | Provider::Kiro => return Ok(String::new()),
+        Provider::Antigravity => vec![
+            ("client_id", gw_oauth::antigravity::CLIENT_ID.to_owned()),
+            ("response_type", "code".to_owned()),
+            ("redirect_uri", config.redirect_uri.clone()),
+            ("state", state.to_owned()),
+            ("access_type", "offline".to_owned()),
+            ("prompt", "consent".to_owned()),
+        ],
+        // Device / CLI-poll / import families build their URL in `gw_oauth::start`.
+        Provider::Grok
+        | Provider::Glm
+        | Provider::Kiro
+        | Provider::Cursor
+        | Provider::Ollama
+        | Provider::Kimi
+        | Provider::Copilot => return Ok(String::new()),
     };
 
     let base = match provider {
-        Provider::Gemini => GEMINI_AUTH_URL,
         Provider::Claude => CLAUDE_AUTH_URL,
         Provider::Codex => CODEX_AUTH_URL,
-        Provider::Xai | Provider::Kiro => "",
+        Provider::Antigravity => "https://accounts.google.com/o/oauth2/v2/auth",
+        Provider::Grok
+        | Provider::Glm
+        | Provider::Kiro
+        | Provider::Cursor
+        | Provider::Ollama
+        | Provider::Kimi
+        | Provider::Copilot => "",
     };
     Ok(format!("{base}?{}", form_encode(&params)))
 }

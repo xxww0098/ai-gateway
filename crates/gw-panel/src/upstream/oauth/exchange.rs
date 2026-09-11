@@ -16,10 +16,7 @@ use chrono::{DateTime, Duration, Utc};
 use gw_authcore::AuthRecord;
 use serde_json::{Map, Value, json};
 
-use super::flow::{
-    self, CLAUDE_CLIENT_ID, CLAUDE_TOKEN_URL, CODEX_CLIENT_ID, CODEX_TOKEN_URL, GEMINI_CLIENT_ID,
-    GEMINI_SCOPES, GEMINI_TOKEN_URL, GEMINI_USERINFO_URL, Provider,
-};
+use super::flow::{self, CLAUDE_CLIENT_ID, CLAUDE_TOKEN_URL, CODEX_CLIENT_ID, CODEX_TOKEN_URL, Provider};
 use super::{SessionConfig, rfc3339};
 
 #[cfg(test)]
@@ -27,8 +24,6 @@ mod tests;
 
 /// Token exchange budget（对应 30 秒超时）。
 const TOKEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-/// Userinfo budget（对应 15 秒超时）。
-const USERINFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// What a provider's token endpoint returned.
 #[derive(Debug, Default, Clone)]
@@ -59,20 +54,6 @@ pub async fn exchange(
     config: &SessionConfig,
 ) -> anyhow::Result<TokenResponse> {
     match provider {
-        Provider::Gemini => {
-            let mut tokens = post_form(
-                GEMINI_TOKEN_URL,
-                &[
-                    ("grant_type", "authorization_code".to_owned()),
-                    ("client_id", GEMINI_CLIENT_ID.to_owned()),
-                    ("code", code.to_owned()),
-                    ("redirect_uri", config.redirect_uri.clone()),
-                ],
-            )
-            .await?;
-            tokens.email = fetch_email(GEMINI_USERINFO_URL, &tokens.access_token).await;
-            Ok(tokens)
-        }
         Provider::Claude => {
             anyhow::ensure!(
                 !config.code_verifier.trim().is_empty(),
@@ -144,9 +125,28 @@ pub async fn exchange(
             })
         }
         Provider::Kiro => super::device::exchange_kiro_code(config, code).await,
-        Provider::Xai => anyhow::bail!(
-            "xAI uses the device-code flow, not an authorization-code callback"
-        ),
+        Provider::Antigravity => {
+            let tokens = post_form(
+                "https://oauth2.googleapis.com/token",
+                &[
+                    ("grant_type", "authorization_code".to_owned()),
+                    ("client_id", gw_oauth::antigravity::CLIENT_ID.to_owned()),
+                    ("client_secret", gw_oauth::antigravity::CLIENT_SECRET.to_owned()),
+                    ("code", code.to_owned()),
+                    ("redirect_uri", config.redirect_uri.clone()),
+                ],
+            )
+            .await?;
+            Ok(tokens)
+        }
+        Provider::Grok
+        | Provider::Glm
+        | Provider::Cursor
+        | Provider::Ollama
+        | Provider::Kimi
+        | Provider::Copilot => {
+            anyhow::bail!("{} uses a family-owned flow, not this authorization-code callback", provider.as_str())
+        }
     }
 }
 
@@ -230,39 +230,6 @@ pub fn parse_token_body(raw: Map<String, Value>) -> TokenResponse {
     }
 }
 
-/// Best-effort userinfo lookup. 对应 `sdkMgmtFetchOAuthEmail`。
-///
-/// Every failure yields `""`: a credential without an email is still usable,
-/// and failing the whole flow over a cosmetic field would be worse.
-async fn fetch_email(endpoint: &str, access_token: &str) -> String {
-    if access_token.trim().is_empty() {
-        return String::new();
-    }
-    let Ok(client) = http_client(USERINFO_TIMEOUT) else {
-        return String::new();
-    };
-    let Ok(response) = client
-        .get(endpoint)
-        .header("Authorization", format!("Bearer {access_token}"))
-        .send()
-        .await
-    else {
-        return String::new();
-    };
-    if !response.status().is_success() {
-        return String::new();
-    }
-    let Ok(payload) = response.json::<Value>().await else {
-        return String::new();
-    };
-    payload
-        .get("email")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_owned()
-}
-
 /// Reads the email and account id out of an unverified `id_token`.
 /// 对应 `sdkMgmtClaimsFromJWT`。
 ///
@@ -343,13 +310,10 @@ pub fn oauth_record(provider: Provider, tokens: &TokenResponse, now: DateTime<Ut
     }
     metadata.insert("token_data".to_owned(), Value::Object(token_data));
 
-    if provider == Provider::Gemini {
-        metadata.insert("token".to_owned(), gemini_token_metadata(tokens, now));
-    }
     for (key, value) in &tokens.extra {
         metadata.insert(key.clone(), value.clone());
     }
-    if provider == Provider::Xai && !tokens.access_token.is_empty() {
+    if provider == Provider::Grok && !tokens.access_token.is_empty() {
         metadata.insert("api_key".to_owned(), json!(tokens.access_token));
     }
 
@@ -364,33 +328,8 @@ pub fn oauth_record(provider: Provider, tokens: &TokenResponse, now: DateTime<Ut
     record.metadata = Value::Object(metadata);
     record.last_refreshed_at = Some(now);
     record.set_attribute("oauth", "true");
-    if provider == Provider::Xai {
-        record.set_attribute("base_url", super::device::XAI_API_BASE);
+    if provider == Provider::Grok {
+        record.set_attribute("base_url", gw_oauth::grok::API_URL);
     }
     record
-}
-
-/// The extra blob a Google credential file carries.
-/// 对应 `sdkMgmtGeminiTokenMetadata`。
-fn gemini_token_metadata(tokens: &TokenResponse, now: DateTime<Utc>) -> Value {
-    let mut values = Map::new();
-    values.insert("access_token".to_owned(), json!(tokens.access_token));
-    values.insert("refresh_token".to_owned(), json!(tokens.refresh_token));
-    values.insert("token_type".to_owned(), json!(tokens.token_type));
-    values.insert("token_uri".to_owned(), json!(GEMINI_TOKEN_URL));
-    values.insert("client_id".to_owned(), json!(GEMINI_CLIENT_ID));
-    values.insert(
-        "scopes".to_owned(),
-        json!(GEMINI_SCOPES.split_whitespace().collect::<Vec<_>>()),
-    );
-    values.insert("universe_domain".to_owned(), json!("googleapis.com"));
-    // Omitted rather than set to "now" when the provider gave no lifetime: a
-    // wrong expiry would make the refresher throw away a working token.
-    if tokens.expires_in > 0 {
-        values.insert(
-            "expiry".to_owned(),
-            json!(rfc3339(now + Duration::seconds(tokens.expires_in))),
-        );
-    }
-    Value::Object(values)
 }

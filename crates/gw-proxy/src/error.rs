@@ -8,8 +8,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
-/// Top-up hint returned in structured 402 bodies.
-pub const TOP_UP_URL: &str = "/api/panel/billing/topup";
+/// Top-up hint returned in structured 402 bodies: the panel page where the
+/// tenant actually recharges (same origin as `/v1`).
+pub const TOP_UP_URL: &str = "/finance?tab=topup";
 
 /// Authentication failure shapes produced by [`crate::access`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -96,6 +97,11 @@ pub enum HoldRejection {
     /// `409 {"error":"idempotency_replay_unavailable", ...}`.
     #[error("request already processed; cached response was too large to replay")]
     IdempotencyReplayUnavailable,
+
+    /// The idempotency store could not check or claim the key. Fail closed so
+    /// a Redis blip cannot disable dedup and double-bill.
+    #[error("idempotency store unavailable")]
+    IdempotencyStoreUnavailable,
 }
 
 impl HoldRejection {
@@ -104,7 +110,9 @@ impl HoldRejection {
         match self {
             Self::MissingAccessContext | Self::InvalidUserId => StatusCode::UNAUTHORIZED,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
-            Self::CircuitOpen => StatusCode::SERVICE_UNAVAILABLE,
+            Self::CircuitOpen | Self::IdempotencyStoreUnavailable => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::OutstandingDebt
             | Self::InsufficientBalance { .. }
             | Self::QuotaExceeded(_)
@@ -125,6 +133,7 @@ impl HoldRejection {
             Self::QuotaExceeded(_) | Self::PaymentRequired => "Payment Required",
             Self::IdempotencyConflict => "idempotency_conflict",
             Self::IdempotencyReplayUnavailable => "idempotency_replay_unavailable",
+            Self::IdempotencyStoreUnavailable => "idempotency_unavailable",
         }
     }
 }
@@ -158,6 +167,9 @@ pub enum DispatchError {
     /// No upstream account is registered / enabled for the resolved provider.
     #[error("no upstream credential available for provider {0}")]
     NoUpstream(String),
+    /// Every candidate account is already at its in-flight cap.
+    #[error("upstream account concurrency limit reached")]
+    ChannelBusy,
     /// The model name did not resolve to any known provider.
     #[error("unsupported model: {0}")]
     UnknownModel(String),
@@ -174,6 +186,7 @@ impl DispatchError {
     pub fn status(&self) -> StatusCode {
         match self {
             Self::NoUpstream(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::ChannelBusy => StatusCode::TOO_MANY_REQUESTS,
             Self::UnknownModel(_) => StatusCode::BAD_REQUEST,
             Self::Upstream { status, .. } => *status,
             Self::Internal(_) => StatusCode::BAD_GATEWAY,

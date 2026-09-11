@@ -5,7 +5,6 @@ import {
   pollDeviceOAuth,
   postProviderConfig,
   submitGatewayOAuthCallback,
-  submitSdkOAuthCallback,
 } from '@/features/admin-proxy/api'
 import { parseOAuthCallbackInput } from '@/features/admin-proxy/oauthCallbackUtils'
 import {
@@ -18,42 +17,26 @@ import { Input } from '@/shared/components/ui/input'
 import { toast } from "sonner"
 import {
   Shield, RefreshCw, ExternalLink, Loader2, CheckCircle2,
-  XCircle, KeyRound, Globe, ClipboardPaste
+  KeyRound, Globe, ClipboardPaste
 } from "lucide-react"
 import { Link } from "react-router-dom"
-import { adminChannelsTab } from "@/shared/routes/admin"
+import { adminCredentialsTab } from "@/shared/routes/admin"
 import { OAuthProviderBrandIcon } from '@/features/admin-proxy/components/OAuthProviderBrandIcon'
 import { cn } from '@/shared/utils/utils'
 
-type ManualCallbackMode = 'gateway' | 'sdk' | 'none'
+type ManualCallbackMode = 'gateway' | 'none'
 
 interface OAuthProvider {
   name: string
   key: string
   apiPath: string
-  /** Gateway oauth-callback/:provider path segment (gemini, claude, codex, xai, kiro). */
+  /** Gateway oauth-callback/:provider path segment. */
   gatewayCallbackProvider?: string
   manualCallbackMode: ManualCallbackMode
-  /** Body provider field for SDK redirect_url callback. */
-  sdkCallbackProvider?: string
   deviceFlow?: boolean
 }
 
 const oauthProviders: OAuthProvider[] = [
-  {
-    name: "Gemini CLI",
-    key: "gemini",
-    apiPath: "gemini-cli-auth-url",
-    gatewayCallbackProvider: "gemini",
-    manualCallbackMode: "gateway",
-  },
-  {
-    name: "Claude (Anthropic)",
-    key: "anthropic",
-    apiPath: "anthropic-auth-url",
-    gatewayCallbackProvider: "claude",
-    manualCallbackMode: "gateway",
-  },
   {
     name: "Codex (OpenAI)",
     key: "codex",
@@ -62,23 +45,18 @@ const oauthProviders: OAuthProvider[] = [
     manualCallbackMode: "gateway",
   },
   {
-    name: "Antigravity",
-    key: "antigravity",
-    apiPath: "antigravity-auth-url",
-    manualCallbackMode: "sdk",
-    sdkCallbackProvider: "antigravity",
-  },
-  {
-    name: "Kimi",
-    key: "kimi",
-    apiPath: "kimi-auth-url",
+    name: "Grok (xAI)",
+    key: "grok",
+    apiPath: "grok-auth-url",
+    gatewayCallbackProvider: "grok",
     manualCallbackMode: "none",
+    deviceFlow: true,
   },
   {
-    name: "xAI (Grok)",
-    key: "xai",
-    apiPath: "xai-auth-url",
-    gatewayCallbackProvider: "xai",
+    name: "GLM · Z.ai",
+    key: "glm",
+    apiPath: "glm-auth-url",
+    gatewayCallbackProvider: "glm",
     manualCallbackMode: "none",
     deviceFlow: true,
   },
@@ -90,9 +68,54 @@ const oauthProviders: OAuthProvider[] = [
     manualCallbackMode: "gateway",
     deviceFlow: true,
   },
+  {
+    name: "Antigravity",
+    key: "antigravity",
+    apiPath: "antigravity-auth-url",
+    gatewayCallbackProvider: "antigravity",
+    manualCallbackMode: "gateway",
+  },
+  {
+    name: "Cursor",
+    key: "cursor",
+    apiPath: "cursor-auth-url",
+    gatewayCallbackProvider: "cursor",
+    manualCallbackMode: "none",
+    deviceFlow: true,
+  },
+  {
+    name: "Ollama Cloud",
+    key: "ollama",
+    apiPath: "ollama-auth-url",
+    gatewayCallbackProvider: "ollama",
+    manualCallbackMode: "none",
+  },
+  {
+    name: "Kimi Code",
+    key: "kimi",
+    apiPath: "kimi-auth-url",
+    gatewayCallbackProvider: "kimi",
+    manualCallbackMode: "none",
+    deviceFlow: true,
+  },
+  {
+    name: "GitHub Copilot",
+    key: "copilot",
+    apiPath: "copilot-auth-url",
+    gatewayCallbackProvider: "copilot",
+    manualCallbackMode: "none",
+    deviceFlow: true,
+  },
+  {
+    name: "Claude (Anthropic)",
+    key: "anthropic",
+    apiPath: "anthropic-auth-url",
+    gatewayCallbackProvider: "claude",
+    manualCallbackMode: "gateway",
+  },
 ]
 
-type OAuthSessionState = "idle" | "pending" | "polling" | "success" | "error"
+type OAuthSessionState = "idle" | "pending" | "polling" | "success"
 
 interface ProviderSession {
   state: OAuthSessionState
@@ -138,13 +161,15 @@ export default function AdminProxyOAuthPage() {
     }
   }, [])
 
-  const loadAuthFiles = useCallback(async () => {
+  const loadAuthFiles = useCallback(async (): Promise<AuthFile[]> => {
     try {
       const res = await fetchProviderConfig<{ files?: AuthFile[] }>("/auth-files")
       const files: AuthFile[] = res?.files || []
       setAuthFiles(files)
+      return files
     } catch {
       // auth-files 不可用时静默，不影响 OAuth 发起功能
+      return []
     } finally {
       setLoading(false)
     }
@@ -154,15 +179,36 @@ export default function AdminProxyOAuthPage() {
     loadAuthFiles()
   }, [loadAuthFiles])
 
-  const getProviderAuthFiles = (providerKey: string) => {
-    return authFiles.filter(f => {
+  const matchProviderFiles = (files: AuthFile[], providerKey: string) => {
+    return files.filter(f => {
       const p = (f.provider || f.name || '').toLowerCase()
-      if (providerKey === 'xai') return p.includes('xai') || p.includes('grok')
+      if (providerKey === 'grok') return p.includes('grok') || p.includes('xai')
+      if (providerKey === 'anthropic') return p.includes('claude') || p.includes('anthropic')
       return p.includes(providerKey)
     })
   }
 
+  const getProviderAuthFiles = (providerKey: string) => matchProviderFiles(authFiles, providerKey)
+
+  const resetSession = (key: string) => {
+    if (pollTimerRef.current[key]) {
+      clearTimeout(pollTimerRef.current[key])
+      delete pollTimerRef.current[key]
+    }
+    setSessions(prev => {
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
+  }
+
+  const failOAuth = (provider: OAuthProvider, message: string) => {
+    resetSession(provider.key)
+    toast.error(message)
+  }
+
   const startOAuth = async (provider: OAuthProvider, body?: unknown) => {
+    resetSession(provider.key)
     setSessions(prev => ({
       ...prev,
       [provider.key]: { state: "pending" }
@@ -229,14 +275,7 @@ export default function AdminProxyOAuthPage() {
         pollAuthFilesForCompletion(provider)
       }
     } catch (err: unknown) {
-      setSessions(prev => ({
-        ...prev,
-        [provider.key]: {
-          state: "error",
-          message: err instanceof Error ? err.message : "发起 OAuth 失败"
-        }
-      }))
-      toast.error(err instanceof Error ? err.message : `${provider.name} OAuth 发起失败`)
+      failOAuth(provider, err instanceof Error ? err.message : `${provider.name} OAuth 发起失败`)
     }
   }
 
@@ -265,18 +304,14 @@ export default function AdminProxyOAuthPage() {
 
   const pollOAuthStatus = (provider: OAuthProvider, state: string, deviceFlow: boolean) => {
     const deadline = Date.now() + (deviceFlow ? 30 : 6) * 60 * 1000
-    let pollCount = 0
-    let lastSeenWait = false
     const delay = deviceFlow ? 5000 : 2000
 
     const poll = async () => {
-      pollCount++
-
       if (Date.now() > deadline) {
-        setSessions(prev => ({
-          ...prev,
-          [provider.key]: { state: "error", message: deviceFlow ? "设备码登录超时（30 分钟）" : "OAuth 登录超时（前端 6 分钟限制）" }
-        }))
+        failOAuth(
+          provider,
+          deviceFlow ? `${provider.name}: 设备码登录超时（30 分钟）` : `${provider.name}: OAuth 登录超时（前端 6 分钟限制）`,
+        )
         return
       }
 
@@ -306,23 +341,13 @@ export default function AdminProxyOAuthPage() {
           }))
         }
 
-        if (status === "wait") {
-          lastSeenWait = true
-          pollTimerRef.current[provider.key] = setTimeout(poll, delay)
-          return
-        }
-
         if (status === "error") {
-          setSessions(prev => ({
-            ...prev,
-            [provider.key]: { state: "error", message: data?.message || data?.error || "OAuth 认证失败" }
-          }))
-          toast.error(`${provider.name}: ${data?.message || data?.error || "认证失败"}`)
+          failOAuth(provider, `${provider.name}: ${data?.message || data?.error || "认证失败"}`)
           loadAuthFiles()
           return
         }
 
-        if (status === "success" || lastSeenWait) {
+        if (status === "success") {
           setSessions(prev => ({
             ...prev,
             [provider.key]: { state: "success", message: "OAuth 认证完成" }
@@ -332,17 +357,9 @@ export default function AdminProxyOAuthPage() {
           return
         }
 
-        if (pollCount <= 3) {
-          pollTimerRef.current[provider.key] = setTimeout(poll, delay)
-          return
-        }
-
-        setSessions(prev => ({
-          ...prev,
-          [provider.key]: { state: "success", message: "OAuth 认证完成" }
-        }))
-        toast.success(`${provider.name} 已连接到 AI-GateWay`)
-        loadAuthFiles()
+        // `wait` 与 `missing` 都继续轮询到 deadline 为止：只有网关说 success
+        // 才算成功，猜一个「大概好了」会在没拿到凭证时报连接成功。
+        pollTimerRef.current[provider.key] = setTimeout(poll, delay)
       } catch {
         pollTimerRef.current[provider.key] = setTimeout(poll, deviceFlow ? 5000 : 3000)
       }
@@ -358,16 +375,13 @@ export default function AdminProxyOAuthPage() {
 
     const poll = async () => {
       if (Date.now() > deadline) {
-        setSessions(prev => ({
-          ...prev,
-          [provider.key]: { state: "error", message: "OAuth 登录超时（6分钟）" }
-        }))
+        failOAuth(provider, `${provider.name}: OAuth 登录超时（6分钟）`)
         return
       }
 
       try {
-        await loadAuthFiles()
-        const currentFiles = getProviderAuthFiles(provider.key)
+        const files = await loadAuthFiles()
+        const currentFiles = matchProviderFiles(files, provider.key)
         if (currentFiles.length > initialCount) {
           setSessions(prev => ({
             ...prev,
@@ -397,7 +411,6 @@ export default function AdminProxyOAuthPage() {
     const session = sessions[provider.key]
     const parsed = parseOAuthCallbackInput(rawInput, {
       sessionState: session?.oauthState,
-      isXai: provider.key === 'xai',
     })
 
     if (parsed.error) {
@@ -407,32 +420,16 @@ export default function AdminProxyOAuthPage() {
 
     setManualSubmitting((prev) => ({ ...prev, [provider.key]: true }))
     try {
-      if (provider.manualCallbackMode === 'sdk') {
-        const redirectUrl =
-          parsed.redirectUrl ||
-          (parsed.code && parsed.state
-            ? `http://127.0.0.1/?code=${encodeURIComponent(parsed.code)}&state=${encodeURIComponent(parsed.state)}`
-            : null)
-        if (!redirectUrl) {
-          toast.warning('无法解析回调内容，请粘贴完整回调 URL')
-          return
-        }
-        await submitSdkOAuthCallback({
-          provider: provider.sdkCallbackProvider || provider.key,
-          redirect_url: redirectUrl,
-        })
-      } else {
-        const code = parsed.code?.trim()
-        const state = (parsed.state || session?.oauthState || '').trim()
-        if (!code || !state) {
-          toast.warning('请粘贴包含 code 与 state 的完整回调 URL')
-          return
-        }
-        await submitGatewayOAuthCallback(provider.gatewayCallbackProvider || provider.key, {
-          code,
-          state,
-        })
+      const code = parsed.code?.trim()
+      const state = (parsed.state || session?.oauthState || '').trim()
+      if (!code || !state) {
+        toast.warning('请粘贴包含 code 与 state 的完整回调 URL')
+        return
       }
+      await submitGatewayOAuthCallback(provider.gatewayCallbackProvider || provider.key, {
+        code,
+        state,
+      })
 
       toast.success(`${provider.name} 手动回填已提交，正在完成认证…`)
       setManualInputs((prev) => ({ ...prev, [provider.key]: '' }))
@@ -461,18 +458,6 @@ export default function AdminProxyOAuthPage() {
     } finally {
       setDisconnecting((prev) => ({ ...prev, [file.name]: false }))
     }
-  }
-
-  const resetSession = (key: string) => {
-    if (pollTimerRef.current[key]) {
-      clearTimeout(pollTimerRef.current[key])
-      delete pollTimerRef.current[key]
-    }
-    setSessions(prev => {
-      const next = { ...prev }
-      delete next[key]
-      return next
-    })
   }
 
   if (loading) {
@@ -552,7 +537,7 @@ export default function AdminProxyOAuthPage() {
                   )}
                 </div>
 
-                {provider.key === 'xai' && (
+                {provider.key === 'grok' && (
                   <p className="mb-4 text-[11px] leading-relaxed text-gray-500 dark:text-gray-400">
                     xAI Grok 使用设备码登录。AI-GateWay 会显示 user code，请在浏览器打开验证链接并输入。
                   </p>
@@ -611,9 +596,7 @@ export default function AdminProxyOAuthPage() {
                     </summary>
                     <div className="px-3 pb-3 space-y-2 border-t border-gray-100 dark:border-dark-700 pt-2">
                       <p className="text-[11px] leading-relaxed text-gray-500 dark:text-gray-400">
-                        {provider.manualCallbackMode === 'sdk'
-                          ? '在浏览器完成登录后，将地址栏完整回调 URL 粘贴到下方。'
-                          : '先发起 OAuth，再将浏览器跳转后的完整回调 URL（含 code 与 state）粘贴到下方。'}
+                        先发起 OAuth，再将浏览器跳转后的完整回调 URL（含 code 与 state）粘贴到下方。
                       </p>
                       <Input
                         value={manualInputs[provider.key] || ''}
@@ -644,10 +627,6 @@ export default function AdminProxyOAuthPage() {
                       </button>
                     </div>
                   </details>
-                ) : provider.key === 'kimi' ? (
-                  <p className="mb-4 text-[11px] text-gray-400 dark:text-gray-500">
-                    Kimi 使用设备码流程，请在弹窗中完成授权，无需手动回填。
-                  </p>
                 ) : null}
 
                 <div className="mt-auto">
@@ -661,7 +640,7 @@ export default function AdminProxyOAuthPage() {
                           </p>
                         </div>
                       )}
-                      <div className="flex items-center gap-2 text-sm text-primary-600 dark:text-primary-400">
+                      <div className="flex items-center gap-2 text-sm text-primary-700 dark:text-primary-400">
                         <Loader2 className="h-4 w-4 animate-spin" />
                         <span>{session.userCode ? "等待设备码授权完成..." : "等待浏览器授权完成..."}</span>
                       </div>
@@ -670,7 +649,7 @@ export default function AdminProxyOAuthPage() {
                           href={session.authURL}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-xs text-primary-500 hover:underline flex items-center gap-1 truncate"
+                          className="text-xs text-primary-700 hover:underline flex items-center gap-1 truncate"
                         >
                           <ExternalLink className="h-3 w-3 flex-shrink-0" />
                           <span className="truncate">打开验证页面</span>
@@ -694,19 +673,6 @@ export default function AdminProxyOAuthPage() {
                         className="btn btn-sm w-full btn-primary"
                       >
                         完成
-                      </button>
-                    </div>
-                  ) : session?.state === "error" ? (
-                    <div className="space-y-3">
-                      <div className="flex items-center gap-2 text-sm text-red-600 dark:text-red-400">
-                        <XCircle className="h-4 w-4 flex-shrink-0" />
-                        <span className="truncate">{session.message}</span>
-                      </div>
-                      <button
-                        onClick={() => resetSession(provider.key)}
-                        className="btn btn-sm w-full bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-800 dark:text-gray-400"
-                      >
-                        关闭
                       </button>
                     </div>
                   ) : session?.state === "pending" ? (
@@ -735,10 +701,10 @@ export default function AdminProxyOAuthPage() {
           <Shield className="h-4 w-4 text-primary-500" />
           <span>
             OAuth 凭证由 AI-GateWay 加密保存在 auth 库中。可在
-            <Link to={adminChannelsTab('credentials')} className="text-primary-500 hover:underline font-medium mx-1">
-              「代理账池 (凭证管理)」
+            <Link to={adminCredentialsTab('sessions')} className="text-primary-700 hover:underline font-medium mx-1">
+              「凭证资产」
             </Link>
-            页面查看详情。xAI 走 OpenAI 兼容通道（模型前缀 xai/ 或 grok/）；Kiro 令牌可刷新并导出。
+            页面查看详情。各家族 hop 与缓存互不混用；Gemini CLI OAuth 已删除（用 API key 或 Antigravity）。
           </span>
         </p>
       </div>

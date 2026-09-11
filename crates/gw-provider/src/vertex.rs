@@ -12,8 +12,8 @@
 //!    column-wise) because parsing *per chunk* simply cannot see a frame that
 //!    straddles two reads. [`crate::streambuf::StreamUsageProbe`] now parses
 //!    *per line* and carries the straddling half-line across frames, so the
-//!    shared [`crate::common::usage_stream`] covers this case natively and the
-//!    bespoke accumulator is gone — see `tests`.
+//!    shared [`crate::common::relay_usage_stream`] covers this case natively
+//!    and the bespoke accumulator is gone — see `tests`.
 //!
 //! OWNER: worker `provider-claude`.
 
@@ -32,8 +32,8 @@ use crate::claude::shared::{
     self, append_query, default_content_negotiation, path_escape, trim_base_url, upstream_error,
 };
 use crate::common::{
-    DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_VERTEX, ProviderConfig, nested_string, requested_model,
-    resolve_timeout, shared_client, stream_response, string_from_map, usage_stream,
+    PROVIDER_VERTEX, ProviderConfig, nested_string, relay_usage_stream, requested_model,
+    resolve_timeout, shared_client, string_from_map,
 };
 use crate::types::{
     Provider, ProviderError, ProviderRequest, ProviderResponse, StreamResponse,
@@ -146,18 +146,6 @@ impl VertexProvider {
             client: shared_client(),
             token_cache: Mutex::new(HashMap::new()),
         })
-    }
-
-    /// The configured upstream base URL; empty means "derive from location".
-    #[must_use]
-    pub fn base_url(&self) -> &str {
-        &self.base_url
-    }
-
-    /// The configured service-account JSON, used to seed persisted records.
-    #[must_use]
-    pub fn service_account_json(&self) -> &str {
-        &self.service_account_json
     }
 
     /// Resolves the access token and endpoint for one request.
@@ -561,12 +549,14 @@ fn token_still_valid(metadata: &Value, now: DateTime<Utc>) -> bool {
 /// it — never by an unrelated top-level one, which may belong to a different
 /// token.
 fn nested_token_still_valid(metadata: &Value, now: DateTime<Utc>) -> bool {
-    let Some(token_data) = metadata.get(META_TOKEN_DATA).and_then(map_from_value) else {
-        return false;
-    };
-    let token_data = Value::Object(token_data);
-    metadata_expiry_valid(&token_data, META_EXPIRES_AT, now)
-        || metadata_expiry_valid(&token_data, META_EXPIRED, now)
+    // `nested_string` 原生容忍嵌套对象与内嵌 JSON 字符串两种形态，
+    // 不必为读两个到期戳克隆整个 `token_data`。
+    [META_EXPIRES_AT, META_EXPIRED].into_iter().any(|key| {
+        nested_string(metadata, META_TOKEN_DATA, key)
+            .as_deref()
+            .and_then(shared::parse_rfc3339)
+            .is_some_and(|expires_at| expires_at > now + VERTEX_REFRESH_SKEW)
+    })
 }
 
 /// A missing or unparseable stamp reads as expired, so a malformed record
@@ -687,20 +677,16 @@ impl Provider for VertexProvider {
             let body = response.bytes().await.unwrap_or_default();
             return Err(upstream_error(status, &body));
         }
-        Ok(stream_response(response, move |response, status| {
-            // 曾经这里是一个 Vertex 专用的 `vertex_usage_stream`：per-chunk latch
-            // 加收尾时对整个窗口再解析一遍再取列最大值，60 行代码只为了兜住
-            // 「终局帧被读边界切成两半」。增量行解析把跨帧半行天然接上了，
-            // 共享的 `usage_stream` 就够了 —— 见 `streambuf.rs` 模块文档。
-            usage_stream(
-                response.bytes_stream(),
-                DEFAULT_STREAM_IDLE_TIMEOUT,
-                model,
-                PROVIDER_VERTEX,
-                extract_latest_vertex_usage,
-                status,
-            )
-        }))
+        // 曾经这里是一个 Vertex 专用的 `vertex_usage_stream`：per-chunk latch
+        // 加收尾时对整个窗口再解析一遍再取列最大值，60 行代码只为了兜住
+        // 「终局帧被读边界切成两半」。增量行解析把跨帧半行天然接上了，
+        // 共享的 usage 中继就够了 —— 见 `streambuf.rs` 模块文档。
+        Ok(relay_usage_stream(
+            response,
+            model,
+            PROVIDER_VERTEX,
+            extract_latest_vertex_usage,
+        ))
     }
 
     async fn refresh(&self, auth: &AuthRecord) -> Result<AuthRecord, ProviderError> {

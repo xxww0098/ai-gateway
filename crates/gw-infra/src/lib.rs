@@ -45,7 +45,7 @@ pub mod redis;
 #[cfg(test)]
 mod testsupport;
 
-pub use cache::{ApiKeyCache, CachedKey, SweepHandle, UserStatus, UserStatusCache};
+pub use cache::{ApiKeyCache, CachedKey, SweepHandle, TtlCache, UserStatus, UserStatusCache};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerSettings, CircuitState};
 pub use db::{DbSettings, SqlLogLevel, init_db};
 pub use rate_limiter::{

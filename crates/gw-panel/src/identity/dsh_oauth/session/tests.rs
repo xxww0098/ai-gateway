@@ -52,7 +52,10 @@ fn approve_then_poll_returns_the_same_key_and_origin() {
 fn deny_then_poll_is_denied_and_cannot_be_approved() {
     let session = start(t0(), Duration::seconds(60), "https://gw.example".to_owned());
     let denied = deny(&session, t0() + Duration::seconds(1)).unwrap();
-    assert_eq!(poll(&denied, t0() + Duration::seconds(2)), PollOutcome::Denied);
+    assert_eq!(
+        poll(&denied, t0() + Duration::seconds(2)),
+        PollOutcome::Denied
+    );
     assert_eq!(
         approve(&denied, t0() + Duration::seconds(3), 1, "agw-x".to_owned()),
         Err(TransitionError::AlreadyResolved)
@@ -64,7 +67,12 @@ fn approve_is_rejected_once_the_session_is_already_approved() {
     let session = start(t0(), Duration::seconds(60), "https://gw.example".to_owned());
     let approved = approve(&session, t0(), 1, "agw-one".to_owned()).unwrap();
     assert_eq!(
-        approve(&approved, t0() + Duration::seconds(1), 2, "agw-two".to_owned()),
+        approve(
+            &approved,
+            t0() + Duration::seconds(1),
+            2,
+            "agw-two".to_owned()
+        ),
         Err(TransitionError::AlreadyResolved)
     );
 }
@@ -73,7 +81,13 @@ fn approve_is_rejected_once_the_session_is_already_approved() {
 fn approved_grant_survives_expiry_so_a_late_poll_still_collects_the_key() {
     let ttl = Duration::seconds(5);
     let session = start(t0(), ttl, "https://gw.example".to_owned());
-    let approved = approve(&session, t0() + Duration::seconds(1), 9, "agw-late".to_owned()).unwrap();
+    let approved = approve(
+        &session,
+        t0() + Duration::seconds(1),
+        9,
+        "agw-late".to_owned(),
+    )
+    .unwrap();
     assert_eq!(
         poll(&approved, t0() + ttl + Duration::seconds(30)),
         PollOutcome::Approved {

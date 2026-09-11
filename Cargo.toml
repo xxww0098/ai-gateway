@@ -67,11 +67,13 @@ parking_lot = "0.12"
 # Local crates (rule 1.12: members must never hand-write `path = "../x"`).
 gw-config = { path = "crates/gw-config" }
 gw-model = { path = "crates/gw-model" }
+gw-role = { path = "crates/gw-role" }
 gw-infra = { path = "crates/gw-infra" }
 gw-authcore = { path = "crates/gw-authcore" }
 gw-pricing = { path = "crates/gw-pricing" }
 gw-ledger = { path = "crates/gw-ledger" }
 gw-provider = { path = "crates/gw-provider" }
+gw-oauth = { path = "crates/gw-oauth" }
 gw-relay = { path = "crates/gw-relay" }
 gw-proxy = { path = "crates/gw-proxy" }
 gw-panel = { path = "crates/gw-panel" }

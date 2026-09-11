@@ -1,16 +1,26 @@
 //! `Ledger` — the Hold / Settle / Release state machine.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 use serde_json::json;
 use sqlx::{PgConnection, PgPool};
 
-use crate::keys::{balance_key, holds_key, holds_ts_key, shortfall_resolve_reference};
-use crate::scripts::{CACHE_MISS, GET_BALANCE_SCRIPT, HOLD_SCRIPT, INSUFFICIENT_BALANCE};
+use crate::keys::{balance_key, balance_ver_key, holds_key, holds_ts_key};
+use crate::scripts::{
+    CACHE_MISS, GET_BALANCE_SCRIPT, HOLD_SCRIPT, INSUFFICIENT_BALANCE, PUBLISH_BALANCE_SCRIPT,
+};
 use crate::settlement::Settlement;
 use crate::{LedgerError, log_type};
+
+mod balance;
+mod intent;
+
+pub use balance::BalanceChange;
+pub use intent::{PENDING_INTENT_SCAN_SQL, PendingIntent};
 
 /// How long a cached balance stays in Redis before it is re-read from
 /// Postgres.
@@ -51,6 +61,13 @@ pub struct SettleOutcome {
     /// `balance_logs.id` of the zero-amount shortfall marker row, present iff
     /// [`shortfall`](Self::shortfall) is positive.
     pub shortfall_log_id: Option<i64>,
+    /// The persistent balance the transaction left behind, for write-through
+    /// publication into the Redis balance cache. `None` on the zero-amount
+    /// path, which never reads the row and therefore cannot vouch for it.
+    pub balance_after: Option<f64>,
+    /// `users.balance_version` after this debit. Paired with
+    /// [`balance_after`](Self::balance_after) for conditional Redis publish.
+    pub balance_version: Option<i64>,
 }
 
 /// Result of a hold that may apply a pre-flight floor.
@@ -79,6 +96,12 @@ pub struct Ledger {
     redis: Option<ConnectionManager>,
     balance_ttl: Duration,
     hold_ttl: Duration,
+    /// `user_id → when the shortfall gate last read clean`. Shared across
+    /// clones so an invalidation in one handle is seen by all; the accessors
+    /// live in `shortfall.rs` beside the queries they shortcut.
+    /// ponytail: one global mutex — the critical section is a HashMap probe;
+    /// shard it if the gate ever contends at six-figure rps.
+    pub(crate) shortfall_clear: Arc<Mutex<HashMap<i64, Instant>>>,
 }
 
 /// Hand-written because `redis::aio::ConnectionManager` is not `Debug`. Only
@@ -130,6 +153,7 @@ impl Ledger {
             } else {
                 hold_ttl
             },
+            shortfall_clear: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -140,79 +164,19 @@ impl Ledger {
         &self.db
     }
 
+    /// The Postgres pool this ledger writes through. Control-plane siblings
+    /// open a caller transaction on it and run [`credit_tx`] / [`debit_tx`]
+    /// inside that transaction.
+    #[must_use]
+    pub fn pool(&self) -> &PgPool {
+        &self.db
+    }
+
     /// The configured reservation lifetime, i.e. the expiry cutoff the Lua
     /// scripts apply.
     #[must_use]
     pub fn hold_ttl(&self) -> Duration {
         self.hold_ttl
-    }
-
-    // ------------------------------------------------------------- balance
-
-    /// Adds `amount` to a user's balance and writes a `credit` journal row in
-    /// one transaction; invalidates the Redis balance cache after the commit.
-    ///
-    /// # Errors
-    /// [`LedgerError::InvalidArgument`] for a non-positive amount,
-    /// [`LedgerError::UserNotFound`] for an unknown user, otherwise the
-    /// underlying query error.
-    pub async fn credit(
-        &self,
-        user_id: i64,
-        amount: f64,
-        reference: &str,
-    ) -> Result<(), LedgerError> {
-        if amount <= 0.0 {
-            return Err(LedgerError::InvalidArgument(
-                "credit amount must be positive",
-            ));
-        }
-        let mut tx = self.db.begin().await?;
-        let balance = Self::lock_balance(&mut tx, user_id).await?;
-        Self::set_balance(&mut tx, user_id, balance + amount).await?;
-        Self::insert_balance_log(&mut tx, user_id, amount, log_type::CREDIT, reference, None)
-            .await?;
-        tx.commit().await?;
-
-        self.invalidate_balance_cache(user_id).await;
-        Ok(())
-    }
-
-    /// Subtracts `amount` from a user's balance and writes a `debit` journal
-    /// row in one transaction; invalidates the Redis balance cache after the
-    /// commit.
-    ///
-    /// Unlike settle, this refuses to overdraw: an amount the balance cannot
-    /// cover fails with [`LedgerError::InsufficientBalance`] and changes
-    /// nothing. Purchases must not be able to create debt.
-    ///
-    /// # Errors
-    /// [`LedgerError::InvalidArgument`] for a non-positive amount,
-    /// [`LedgerError::UserNotFound`] for an unknown user,
-    /// [`LedgerError::InsufficientBalance`] when the balance is too low.
-    pub async fn debit(
-        &self,
-        user_id: i64,
-        amount: f64,
-        reference: &str,
-    ) -> Result<(), LedgerError> {
-        if amount <= 0.0 {
-            return Err(LedgerError::InvalidArgument(
-                "debit amount must be positive",
-            ));
-        }
-        let mut tx = self.db.begin().await?;
-        let balance = Self::lock_balance(&mut tx, user_id).await?;
-        if balance < amount {
-            return Err(LedgerError::InsufficientBalance);
-        }
-        Self::set_balance(&mut tx, user_id, balance - amount).await?;
-        Self::insert_balance_log(&mut tx, user_id, -amount, log_type::DEBIT, reference, None)
-            .await?;
-        tx.commit().await?;
-
-        self.invalidate_balance_cache(user_id).await;
-        Ok(())
     }
 
     /// The available balance: the cached persistent balance minus every live
@@ -430,6 +394,9 @@ impl Ledger {
         if request_id.is_empty() {
             return Err(LedgerError::InvalidArgument("requestID is required"));
         }
+        if let Err(err) = self.release_pending_hold(request_id).await {
+            tracing::debug!(error = %err, request_id, "release: pending intent update failed");
+        }
         let Some(mut conn) = self.redis_conn() else {
             return Ok(());
         };
@@ -511,24 +478,32 @@ impl Ledger {
         }
         .await;
 
-        if let Err(err) = outcome {
-            // The transaction failed. The reservation MUST survive so the
-            // request can be reconciled or retried. Audit outside the failed
-            // transaction; do not clear the hold.
-            let reason = err.to_string();
-            self.write_audit_log(
-                user_id,
-                0.0,
-                log_type::SETTLE_FAILED,
-                request_id,
-                Some(json!({ "reason": reason })),
-            )
-            .await;
-            return Err(err);
-        }
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                // The transaction failed. The reservation MUST survive so the
+                // request can be reconciled or retried. Audit outside the
+                // failed transaction; do not clear the hold.
+                let reason = err.to_string();
+                self.write_audit_log(
+                    user_id,
+                    0.0,
+                    log_type::SETTLE_FAILED,
+                    request_id,
+                    Some(json!({ "reason": reason })),
+                )
+                .await;
+                return Err(err);
+            }
+        };
 
-        // Persistent writes committed; now — and only now — release Redis.
-        self.clear_hold(user_id, request_id).await
+        // Persistent writes committed; now — and only now — release Redis,
+        // publishing the balance the commit left behind.
+        let published = match (outcome.balance_after, outcome.balance_version) {
+            (Some(balance), Some(version)) => Some((balance, version)),
+            _ => None,
+        };
+        self.clear_hold(user_id, request_id, published).await
     }
 
     /// The persistent half of a settle, run inside the caller's transaction.
@@ -566,6 +541,13 @@ impl Ledger {
             return Err(LedgerError::InvalidArgument("requestID is required"));
         }
 
+        let hold_amount = if actual_amount.is_finite() && actual_amount > 0.0 {
+            actual_amount
+        } else {
+            0.0
+        };
+        Self::claim_settlement_intent(&mut *conn, request_id, user_id, hold_amount).await?;
+
         if actual_amount <= 0.0 {
             Self::insert_balance_log(
                 &mut *conn,
@@ -582,7 +564,8 @@ impl Ledger {
         let balance = Self::lock_balance(&mut *conn, user_id).await?;
         let split = Settlement::split(balance, actual_amount);
 
-        Self::set_balance(&mut *conn, user_id, balance - split.debited).await?;
+        let remaining = balance - split.debited;
+        let balance_version = Self::set_balance(&mut *conn, user_id, remaining).await?;
 
         // The debited portion. `amount` is negative-going like every other
         // balance-reducing row, and may be exactly zero when the user had
@@ -603,6 +586,14 @@ impl Ledger {
         // The unpaid portion, as a zero-amount marker row. Downstream
         // reconciliation (has_unresolved_shortfall, the compensating credit)
         // pairs the debt with this request through it.
+        //
+        // Drop the user's cached "no shortfall" verdict before the row is even
+        // committed: on rollback that costs one redundant DB check, while the
+        // other order would leave a window where a fresh debt is invisible to
+        // the gate for a full SHORTFALL_CLEAR_TTL.
+        if split.has_shortfall() {
+            self.note_shortfall_verdict(user_id, true);
+        }
         let shortfall_log_id = if split.has_shortfall() {
             Some(
                 Self::insert_balance_log(
@@ -629,15 +620,22 @@ impl Ledger {
             debited: split.debited,
             shortfall: split.shortfall,
             shortfall_log_id,
+            balance_after: Some(remaining),
+            balance_version: Some(balance_version),
         })
     }
 
-    /// Removes the Redis reservation for `(user_id, request_id)` and
-    /// invalidates the balance cache.
+    /// Removes the Redis reservation for `(user_id, request_id)`. When
+    /// `published` is `Some((balance, version))`, writes through with a
+    /// version check; `None` only drops hold members and never DELs the cache.
     ///
     /// Callers using [`settle_tx`](Self::settle_tx) **must** invoke this after
     /// their transaction commits, so the reservation is released only once the
-    /// debit is durable. A ledger without Redis is a no-op success.
+    /// debit is durable — and should pass the transaction's
+    /// [`SettleOutcome::balance_after`], which keeps the cache warm instead of
+    /// forcing every subsequent hold through a `CACHE_MISS` → Postgres refill
+    /// that races the next settle (see [`Self::clear_reservation`]). A ledger
+    /// without Redis is a no-op success.
     ///
     /// Unlike [`release`](Self::release), a Redis failure here is reported
     /// rather than swallowed: the caller is mid-settle and needs to know the
@@ -645,90 +643,21 @@ impl Ledger {
     ///
     /// # Errors
     /// The underlying Redis error.
-    pub async fn clear_hold(&self, user_id: i64, request_id: &str) -> Result<(), LedgerError> {
+    pub async fn clear_hold(
+        &self,
+        user_id: i64,
+        request_id: &str,
+        published: Option<(f64, i64)>,
+    ) -> Result<(), LedgerError> {
         let Some(mut conn) = self.redis_conn() else {
             return Ok(());
         };
         Self::clear_reservation(&mut conn, user_id, request_id).await?;
+        if let Some((balance, version)) = published {
+            self.publish_balance_conn(&mut conn, user_id, balance, version)
+                .await?;
+        }
         Ok(())
-    }
-
-    // ----------------------------------------------------------- shortfall
-
-    /// Whether the user owns at least one `settle` row with a positive
-    /// `metadata.shortfall_usd` that has not been paired with a compensating
-    /// credit.
-    ///
-    /// A compensating credit is a `balance_logs` row where
-    ///
-    /// ```text
-    /// type      = 'credit'
-    /// reference = shortfall_resolve:<debit.reference>:<debit.id>
-    /// ```
-    ///
-    /// (see [`shortfall_resolve_reference`]). Pinning the credit to the debt's
-    /// `(reference, id)` pair is what makes an orphan credit — one naming a
-    /// row that does not exist — incapable of clearing a real debt.
-    ///
-    /// One unresolved row is enough for a caller (the hold middleware's
-    /// preflight, the subscription purchase preflight) to block billable work
-    /// with HTTP 402 `outstanding_debt`.
-    ///
-    /// Read-only and independent of hold / settle / release. Callers must
-    /// treat an error as "unknown" and fail open or closed per their policy;
-    /// today's callers fail closed with a 500, matching the project's
-    /// default-deny posture.
-    ///
-    /// This is Postgres-only, matching the production dialect.
-    ///
-    /// # Errors
-    /// The underlying query error.
-    pub async fn has_unresolved_shortfall(&self, user_id: i64) -> Result<bool, LedgerError> {
-        // COALESCE guards against `->>` yielding NULL for a row whose metadata
-        // predates the shortfall feature, so those rows drop out instead of
-        // short-circuiting the comparison.
-        let sql = "
-SELECT EXISTS (
-  SELECT 1 FROM balance_logs d
-  WHERE d.user_id = $1
-    AND d.type = $2
-    AND COALESCE((d.metadata::jsonb ->> 'shortfall_usd')::float8, 0) > 0
-    AND NOT EXISTS (
-      SELECT 1 FROM balance_logs c
-      WHERE c.user_id = d.user_id
-        AND c.type = $3
-        AND c.reference = 'shortfall_resolve:' || d.reference || ':' || d.id::text
-    )
-)";
-        let unresolved: bool = sqlx::query_scalar(sql)
-            .bind(user_id)
-            .bind(log_type::SETTLE)
-            .bind(log_type::CREDIT)
-            .fetch_one(&self.db)
-            .await?;
-        Ok(unresolved)
-    }
-
-    /// Resolves one shortfall by crediting the user under the paired
-    /// reference, which is what
-    /// [`has_unresolved_shortfall`](Self::has_unresolved_shortfall) looks for.
-    ///
-    /// `shortfall_log_id` is the marker row's `balance_logs.id` — the value
-    /// [`SettleOutcome::shortfall_log_id`] carries.
-    ///
-    /// Exposing this here keeps the one string format in one place.
-    ///
-    /// # Errors
-    /// Same as [`credit`](Self::credit).
-    pub async fn resolve_shortfall(
-        &self,
-        user_id: i64,
-        request_id: &str,
-        shortfall_log_id: i64,
-        amount: f64,
-    ) -> Result<(), LedgerError> {
-        let reference = shortfall_resolve_reference(request_id, shortfall_log_id);
-        self.credit(user_id, amount, &reference).await
     }
 
     // ------------------------------------------------------------ internals
@@ -742,16 +671,12 @@ SELECT EXISTS (
     /// # Errors
     /// [`LedgerError::UserNotFound`], or the underlying query / Redis error.
     pub async fn refresh_balance_cache(&self, user_id: i64) -> Result<(), LedgerError> {
-        let balance = self.db_balance(user_id).await?;
+        let (balance, version) = self.db_balance_and_version(user_id).await?;
         let Some(mut conn) = self.redis_conn() else {
             return Ok(());
         };
-        conn.set_ex::<_, _, ()>(
-            balance_key(user_id),
-            balance.to_string(),
-            self.balance_ttl.as_secs(),
-        )
-        .await?;
+        self.publish_balance_conn(&mut conn, user_id, balance, version)
+            .await?;
         Ok(())
     }
 
@@ -766,20 +691,9 @@ SELECT EXISTS (
         Ok(balance.unwrap_or_default())
     }
 
-    /// Drops the cached balance so the next read re-derives it from Postgres.
-    /// Best-effort: a stale cache entry expires on its own within
-    /// `balance_ttl`.
-    async fn invalidate_balance_cache(&self, user_id: i64) {
-        let Some(mut conn) = self.redis_conn() else {
-            return;
-        };
-        if let Err(err) = conn.del::<_, ()>(balance_key(user_id)).await {
-            tracing::debug!(error = %err, user_id, "failed to invalidate balance cache");
-        }
-    }
-
-    /// Drops the reservation (both hold keys) and the cached balance in one
-    /// pipeline. The pair of hold keys must move together.
+    /// Drops the reservation (both hold keys) in one pipeline. Cache publish
+    /// is a separate versioned Lua call so a later SETEX cannot resurrect an
+    /// older remaining.
     async fn clear_reservation(
         conn: &mut ConnectionManager,
         user_id: i64,
@@ -788,8 +702,51 @@ SELECT EXISTS (
         let mut pipe = redis::pipe();
         pipe.zrem(holds_key(user_id), request_id).ignore();
         pipe.hdel(holds_ts_key(user_id), request_id).ignore();
-        pipe.del(balance_key(user_id)).ignore();
         pipe.query_async::<()>(conn).await
+    }
+
+    /// Writes `balance` only if `version` is not older than the cached epoch.
+    pub async fn publish_balance(
+        &self,
+        user_id: i64,
+        balance: f64,
+        version: i64,
+    ) -> Result<(), LedgerError> {
+        let Some(mut conn) = self.redis_conn() else {
+            return Ok(());
+        };
+        self.publish_balance_conn(&mut conn, user_id, balance, version)
+            .await
+    }
+
+    async fn publish_balance_conn(
+        &self,
+        conn: &mut ConnectionManager,
+        user_id: i64,
+        balance: f64,
+        version: i64,
+    ) -> Result<(), LedgerError> {
+        let mut inv = PUBLISH_BALANCE_SCRIPT.prepare_invoke();
+        inv.key(balance_key(user_id));
+        inv.key(balance_ver_key(user_id));
+        inv.arg(balance.to_string());
+        inv.arg(version);
+        inv.arg(self.balance_ttl.as_secs() as i64);
+        let _: String = inv.invoke_async(conn).await?;
+        Ok(())
+    }
+
+    async fn db_balance_and_version(&self, user_id: i64) -> Result<(f64, i64), LedgerError> {
+        let row: Option<(Option<f64>, i64)> = sqlx::query_as(&format!(
+            "SELECT {BALANCE_EXPR}, COALESCE(balance_version, 0) FROM users WHERE id = $1"
+        ))
+        .bind(user_id)
+        .fetch_optional(&self.db)
+        .await?;
+        let Some((balance, version)) = row else {
+            return Err(LedgerError::UserNotFound);
+        };
+        Ok((balance.unwrap_or_default(), version))
     }
 
     /// Writes a `balance_logs` audit row, best-effort: a failure here is
@@ -844,13 +801,15 @@ SELECT EXISTS (
         conn: &mut PgConnection,
         user_id: i64,
         balance: f64,
-    ) -> Result<(), LedgerError> {
-        sqlx::query("UPDATE users SET balance = $1, updated_at = NOW() WHERE id = $2")
-            .bind(balance)
-            .bind(user_id)
-            .execute(conn)
-            .await?;
-        Ok(())
+    ) -> Result<i64, LedgerError> {
+        let version: i64 = sqlx::query_scalar(
+            "UPDATE users SET balance = $1, balance_version = COALESCE(balance_version, 0) + 1,              updated_at = NOW() WHERE id = $2 RETURNING COALESCE(balance_version, 0)",
+        )
+        .bind(balance)
+        .bind(user_id)
+        .fetch_one(conn)
+        .await?;
+        Ok(version)
     }
 
     /// Appends one journal row and returns its id.
@@ -927,7 +886,6 @@ async fn run_hold(
     inv.arg(request_id);
     inv.arg(now);
     inv.arg(hold_ttl_secs);
-    inv.arg(""); // idempotency key (unused for now, kept for parity)
     inv.arg(key_ttl_secs);
     inv.arg(min_available);
     inv.invoke_async(conn).await

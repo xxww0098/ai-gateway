@@ -7,11 +7,11 @@
 //! `xai` auth records are also attached to the `openai` credential bucket.
 //! This executor still exists so a stored `xai` row can be refreshed.
 
+use crate::claude::shared::{base_url_attribute, default_content_negotiation, upstream_error};
 use crate::common::{
-    DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_XAI, ProviderConfig, attach_body,
-    chat_completions_endpoint, ensure_include_usage, nested_string, request_surface,
-    requested_model, resolve_timeout, responses_endpoint, shared_client, stream_response,
-    string_from_map, usage_stream,
+    PROVIDER_XAI, ProviderConfig, attach_body, chat_completions_endpoint, ensure_include_usage,
+    nested_string, relay_usage_stream, request_surface, requested_model, resolve_timeout,
+    responses_endpoint, shared_client, string_from_map,
 };
 use crate::openai::bearer;
 use crate::types::{
@@ -22,7 +22,7 @@ use crate::usage::{parse_openai_stream_usage, parse_openai_usage};
 use chrono::{SecondsFormat, Utc};
 use gw_authcore::{AuthRecord, AuthStatus};
 use gw_relay::Surface;
-use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use http::header::{ACCEPT, AUTHORIZATION};
 use http::{HeaderMap, HeaderValue};
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -78,7 +78,9 @@ impl XaiProvider {
         let parsed = url::Url::parse(&base_url)
             .map_err(|_| ProviderError::Other(anyhow::anyhow!("invalid xai base_url")))?;
         if parsed.host_str().unwrap_or_default().is_empty() {
-            return Err(ProviderError::Other(anyhow::anyhow!("invalid xai base_url")));
+            return Err(ProviderError::Other(anyhow::anyhow!(
+                "invalid xai base_url"
+            )));
         }
         Ok(Self {
             base_url,
@@ -89,16 +91,8 @@ impl XaiProvider {
     }
 
     fn resolve_credentials(&self, auth: &AuthRecord) -> (String, String) {
-        let mut base_url = self.base_url.trim().to_owned();
-        for key in ["base_url", "base-url"] {
-            if let Some(value) = auth.attributes.get(key) {
-                let value = value.trim().trim_end_matches('/');
-                if !value.is_empty() {
-                    base_url = value.to_owned();
-                    break;
-                }
-            }
-        }
+        // `new()` 已保证 `self.base_url` 非空且已修剪。
+        let base_url = base_url_attribute(auth).unwrap_or_else(|| self.base_url.clone());
         let token = string_from_map(&auth.metadata, META_ACCESS)
             .or_else(|| nested_string(&auth.metadata, META_TOKEN_DATA, META_ACCESS))
             .or_else(|| string_from_map(&auth.metadata, META_API_KEY))
@@ -138,14 +132,7 @@ impl XaiProvider {
         };
         let mut headers = HeaderMap::new();
         copy_outbound_headers(&mut headers, &req.headers);
-        if !headers.contains_key(CONTENT_TYPE) {
-            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        }
-        if stream {
-            headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
-        } else if !headers.contains_key(ACCEPT) {
-            headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-        }
+        default_content_negotiation(&mut headers, stream);
         headers.insert(AUTHORIZATION, bearer(access_token)?);
         let mut builder = attach_body(
             self.client.post(endpoint).headers(headers),
@@ -183,10 +170,7 @@ impl XaiProvider {
             ProviderError::Other(anyhow::anyhow!("reading xai refresh response: {err}"))
         })?;
         if status >= 400 {
-            return Err(ProviderError::Upstream {
-                status,
-                body: String::from_utf8_lossy(&payload).into_owned(),
-            });
+            return Err(upstream_error(status, &payload));
         }
         serde_json::from_slice(&payload).map_err(|err| {
             ProviderError::Other(anyhow::anyhow!("parsing xai refresh response: {err}"))
@@ -215,10 +199,7 @@ impl Provider for XaiProvider {
         let headers = response.headers().clone();
         let body = response.bytes().await?;
         if status >= 400 {
-            return Err(ProviderError::Upstream {
-                status,
-                body: String::from_utf8_lossy(&body).into_owned(),
-            });
+            return Err(upstream_error(status, &body));
         }
         let usage = parse_openai_usage(&body).map(|t| t.to_record(model, PROVIDER_XAI));
         Ok(ProviderResponse {
@@ -243,21 +224,14 @@ impl Provider for XaiProvider {
         let status = response.status().as_u16();
         if status >= 400 {
             let body = response.bytes().await.unwrap_or_default();
-            return Err(ProviderError::Upstream {
-                status,
-                body: String::from_utf8_lossy(&body).into_owned(),
-            });
+            return Err(upstream_error(status, &body));
         }
-        Ok(stream_response(response, move |response, status| {
-            usage_stream(
-                response.bytes_stream(),
-                DEFAULT_STREAM_IDLE_TIMEOUT,
-                model,
-                PROVIDER_XAI,
-                parse_openai_stream_usage,
-                status,
-            )
-        }))
+        Ok(relay_usage_stream(
+            response,
+            model,
+            PROVIDER_XAI,
+            parse_openai_stream_usage,
+        ))
     }
 
     async fn refresh(&self, auth: &AuthRecord) -> Result<AuthRecord, ProviderError> {
@@ -287,25 +261,46 @@ impl Provider for XaiProvider {
             _ => Map::new(),
         };
         if !token.access_token.is_empty() {
-            metadata.insert(META_ACCESS.to_owned(), Value::String(token.access_token.clone()));
-            metadata.insert(META_API_KEY.to_owned(), Value::String(token.access_token.clone()));
-            token_data.insert(META_ACCESS.to_owned(), Value::String(token.access_token.clone()));
+            metadata.insert(
+                META_ACCESS.to_owned(),
+                Value::String(token.access_token.clone()),
+            );
+            metadata.insert(
+                META_API_KEY.to_owned(),
+                Value::String(token.access_token.clone()),
+            );
+            token_data.insert(
+                META_ACCESS.to_owned(),
+                Value::String(token.access_token.clone()),
+            );
         }
         let refresh_token = if token.refresh_token.is_empty() {
             previous
         } else {
             token.refresh_token
         };
-        metadata.insert(META_REFRESH.to_owned(), Value::String(refresh_token.clone()));
+        metadata.insert(
+            META_REFRESH.to_owned(),
+            Value::String(refresh_token.clone()),
+        );
         token_data.insert(META_REFRESH.to_owned(), Value::String(refresh_token));
         if !token.id_token.is_empty() {
-            metadata.insert(META_ID_TOKEN.to_owned(), Value::String(token.id_token.clone()));
+            metadata.insert(
+                META_ID_TOKEN.to_owned(),
+                Value::String(token.id_token.clone()),
+            );
             token_data.insert(META_ID_TOKEN.to_owned(), Value::String(token.id_token));
         }
         if let Some(expires_at) = &expires_at {
-            metadata.insert(META_EXPIRES_AT.to_owned(), Value::String(expires_at.clone()));
+            metadata.insert(
+                META_EXPIRES_AT.to_owned(),
+                Value::String(expires_at.clone()),
+            );
             metadata.insert(META_EXPIRED.to_owned(), Value::String(expires_at.clone()));
-            token_data.insert(META_EXPIRES_AT.to_owned(), Value::String(expires_at.clone()));
+            token_data.insert(
+                META_EXPIRES_AT.to_owned(),
+                Value::String(expires_at.clone()),
+            );
             token_data.insert(META_EXPIRED.to_owned(), Value::String(expires_at.clone()));
         }
         metadata.insert(META_LAST_REFRESH.to_owned(), Value::String(now_rfc3339));
@@ -345,7 +340,6 @@ mod tests {
             &ProviderConfig {
                 base_url: String::new(),
                 api_key: "cfg".to_owned(),
-                enabled: true,
             },
             30,
         )
@@ -366,7 +360,6 @@ mod tests {
             &ProviderConfig {
                 base_url: String::new(),
                 api_key: String::new(),
-                enabled: true,
             },
             30,
         )

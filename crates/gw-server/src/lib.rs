@@ -121,20 +121,12 @@ pub fn app_router(state: AppState, domains: Option<Router>) -> Router {
     ))
 }
 
-/// Bind, serve, and drain.
+/// Bind, serve, and drain, with an explicit shutdown trigger so the
+/// drain-before-return guarantee is testable without sending the test process
+/// a signal.
 ///
-/// Returns once SIGINT/SIGTERM has been handled, every in-flight request has
+/// Returns once `shutdown` has resolved, every in-flight request has
 /// finished, and the settlements they left behind have been drained.
-pub async fn serve(
-    config: &Config,
-    state: AppState,
-    domains: Option<Router>,
-) -> anyhow::Result<()> {
-    serve_with_shutdown(config, state, domains, shutdown_signal()).await
-}
-
-/// [`serve`] with an explicit shutdown trigger, so the drain-before-return
-/// guarantee is testable without sending the test process a signal.
 pub async fn serve_with_shutdown(
     config: &Config,
     state: AppState,
@@ -247,12 +239,11 @@ pub fn run() -> anyhow::Result<()> {
     // Fail fast on a misconfigured JWT secret, then nudge operators off
     // cleartext Postgres and cleartext upstream credentials.
     startup::validate_jwt_secret(&config.auth.jwt.secret)?;
+    startup::validate_credential_encryption_key(
+        &config.auth.credential_encryption_key,
+        &config.auth.jwt.secret,
+    )?;
     startup::warn_insecure_sslmode(&config.database.sslmode);
-    if config.auth.credential_encryption_key.is_empty() {
-        warn!(
-            "CREDENTIAL_ENCRYPTION_KEY not set — upstream provider credentials will be stored in cleartext; set a 32-byte key (hex/base64) to encrypt auth_records.metadata at rest"
-        );
-    }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

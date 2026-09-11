@@ -44,18 +44,14 @@ pub struct SettleCtx {
 #[derive(Debug)]
 pub struct RequestBilling {
     pub ctx: SettleCtx,
-    /// True when the reservation came from the process-local budget token
-    /// rather than a Redis hold, so the finalizer must not Release.
-    pub used_budget_token: bool,
     finalized: AtomicBool,
 }
 
 impl RequestBilling {
     /// Creates the per-request record.
-    pub fn new(ctx: SettleCtx, used_budget_token: bool) -> Self {
+    pub fn new(ctx: SettleCtx) -> Self {
         Self {
             ctx,
-            used_budget_token,
             finalized: AtomicBool::new(false),
         }
     }

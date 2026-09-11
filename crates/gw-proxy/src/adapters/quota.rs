@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use gw_infra::Db;
 
-use crate::adapters::directory::normalise_reset_at;
+use crate::adapters::directory::SubscriptionRow;
 use crate::hold::rotate_counters;
 use crate::ports::{Id, SubscriptionQuota, SubscriptionQuotaStore};
 
@@ -43,7 +43,9 @@ impl SubscriptionQuotaStore for SqlSubscriptionQuotaStore {
     ) -> anyhow::Result<Option<SubscriptionQuota>> {
         let mut tx = self.db.begin().await?;
 
-        let row = sqlx::query_as::<_, LockedRow>(
+        // 与 access 路径共用同一份行投影（`SubscriptionRow`），
+        // Money / reset 归一化规则只有一处实现。
+        let row = sqlx::query_as::<_, SubscriptionRow>(
             "SELECT id, group_id, daily_usage_usd, weekly_usage_usd, monthly_usage_usd, \
                     daily_limit_usd, weekly_limit_usd, monthly_limit_usd, \
                     daily_reset_at, weekly_reset_at, monthly_reset_at \
@@ -86,45 +88,6 @@ impl SubscriptionQuotaStore for SqlSubscriptionQuotaStore {
 
         tx.commit().await?;
         Ok(Some(quota))
-    }
-}
-
-#[derive(sqlx::FromRow)]
-struct LockedRow {
-    id: Id,
-    group_id: Id,
-    #[sqlx(try_from = "gw_model::compat::Money")]
-    daily_usage_usd: f64,
-    #[sqlx(try_from = "gw_model::compat::Money")]
-    weekly_usage_usd: f64,
-    #[sqlx(try_from = "gw_model::compat::Money")]
-    monthly_usage_usd: f64,
-    #[sqlx(try_from = "gw_model::compat::MoneyOpt")]
-    daily_limit_usd: Option<f64>,
-    #[sqlx(try_from = "gw_model::compat::MoneyOpt")]
-    weekly_limit_usd: Option<f64>,
-    #[sqlx(try_from = "gw_model::compat::MoneyOpt")]
-    monthly_limit_usd: Option<f64>,
-    daily_reset_at: Option<DateTime<Utc>>,
-    weekly_reset_at: Option<DateTime<Utc>>,
-    monthly_reset_at: Option<DateTime<Utc>>,
-}
-
-impl LockedRow {
-    fn into_quota(self) -> SubscriptionQuota {
-        SubscriptionQuota {
-            id: self.id,
-            group_id: self.group_id,
-            daily_usage_usd: self.daily_usage_usd,
-            weekly_usage_usd: self.weekly_usage_usd,
-            monthly_usage_usd: self.monthly_usage_usd,
-            daily_limit_usd: self.daily_limit_usd,
-            weekly_limit_usd: self.weekly_limit_usd,
-            monthly_limit_usd: self.monthly_limit_usd,
-            daily_reset_at: normalise_reset_at(self.daily_reset_at),
-            weekly_reset_at: normalise_reset_at(self.weekly_reset_at),
-            monthly_reset_at: normalise_reset_at(self.monthly_reset_at),
-        }
     }
 }
 

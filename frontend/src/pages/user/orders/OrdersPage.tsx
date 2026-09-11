@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom"
-import { Package } from "lucide-react"
+import { CreditCard, ReceiptText, RefreshCw } from "lucide-react"
 import {
   useOrders,
   OrdersTable,
@@ -24,21 +24,46 @@ export default function Orders() {
   const orderTotalPages = Math.ceil(orderTotal / 20)
 
   return (
-    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500" style={{ willChange: 'transform, opacity' }}>
-      <div>
-        <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white flex items-center gap-2">
-          <Package className="w-6 h-6 text-primary" />
-          充值订单
-        </h2>
-        <p className="text-gray-500 dark:text-dark-300 mt-1">
-          查看在线支付充值记录。订阅权益与退订请前往{' '}
-          <Link to={userRoutes.subscriptions} className="text-primary-600 hover:underline">
-            订阅
+    <div className="space-y-6">
+      {/* Page Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-foreground">
+            充值订单
+          </h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            账户在线充值流水、多渠道支付凭据与实时入账明细
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => loadPaymentOrders(orderPage)}
+            disabled={orderLoading}
+            aria-label="刷新订单列表"
+            className="btn btn-secondary h-9 px-3.5 text-xs font-semibold rounded-xl border-border shadow-2xs gap-1.5"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${orderLoading ? "animate-spin text-primary" : ""}`} />
+            <span>刷新</span>
+          </button>
+          <Link
+            to={userRoutes.finance}
+            className="btn btn-secondary h-9 px-3.5 text-xs font-semibold rounded-xl border-border shadow-2xs gap-1.5"
+          >
+            <ReceiptText className="w-3.5 h-3.5 text-muted-foreground" />
+            <span>财务中心</span>
           </Link>
-          。
-        </p>
+          <Link
+            to={userRoutes.financeTopup}
+            className="btn btn-primary h-9 px-4 text-xs font-semibold rounded-xl shadow-xs gap-1.5"
+          >
+            <CreditCard className="w-3.5 h-3.5" />
+            <span>在线充值</span>
+          </Link>
+        </div>
       </div>
 
+      {/* Orders Table and Filtering */}
       <OrdersTable
         orders={orders}
         loading={orderLoading}
@@ -52,9 +77,11 @@ export default function Orders() {
         onSelectOrder={setSelectedOrder}
       />
 
+      {/* Digital Receipt Drawer */}
       {selectedOrder && (
         <OrderDetailDrawer order={selectedOrder} onClose={() => setSelectedOrder(null)} />
       )}
     </div>
   )
 }
+

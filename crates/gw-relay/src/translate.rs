@@ -11,6 +11,7 @@
 //! | --- | --- | --- |
 //! | [`google`] | P1 四格：`{openai-completions, anthropic-messages} × {gemini, vertex}` | `relay-google` |
 //! | [`anthropic`] | P2 三格：`openai-completions × claude`、`anthropic-messages × {openai, codex}` | `relay-anthropic` |
+//! | `common` | 两家共用的 SSE/JSON wire 原语（无方言知识） | 协调者 |
 //!
 //! 矩阵里剩下的 8 格不归这里：直通 5 格由 [`crate::engine`] 恒等转发，
 //! 直接 400 的 3 格（`openai-responses × {claude, gemini, vertex}`）由
@@ -20,4 +21,5 @@
 //! 错误，比一个 400 坏得多。**
 
 pub mod anthropic;
+mod common;
 pub mod google;

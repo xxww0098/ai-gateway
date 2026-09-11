@@ -1,6 +1,7 @@
-//! 余额流水：用户自己的分页视图 + 管理员看某个用户的近百条。
+//! 余额流水：用户自己的分页视图。
 //!
-//! 对应 `BalanceHistoryHandler` + `AdminUsersBalanceHistoryHandler`。
+//! 对应 `BalanceHistoryHandler`。管理员侧的「用户管理」已下线，看某用户
+//! 近百条流水的 `AdminUsersBalanceHistoryHandler` 一并移除。
 //!
 //! # 累计余额在 SQL 里算，不在内存里算
 //!
@@ -12,7 +13,7 @@
 //! 排序键必须是 `(created_at, id)` 而不是只有 `created_at`：同一毫秒内的两笔
 //! 流水顺序不定，累计值会在两次请求间跳变。
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Query, State};
 use axum::response::Response;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -20,18 +21,15 @@ use std::collections::HashMap;
 
 use gw_infra::Db;
 
-use crate::identity::{bad_request, db_failure};
-use crate::paging::{Page, offset, page_params, parse_id};
-use crate::{AdminUser, AuthUser, PanelState, ok};
+use crate::identity::db_failure;
+use crate::paging::{Page, offset, page_params};
+use crate::{AuthUser, PanelState, ok};
 
 #[cfg(test)]
 mod tests;
 
 /// 用户流水的默认页大小（既有实现里 query 参数名是 `page_size`，默认 20）。
 const USER_HISTORY_DEFAULT_PAGE_SIZE: i64 = 20;
-
-/// 管理员视图一次最多回多少条（既有实现固定 100 条），且**没有分页**。
-const ADMIN_HISTORY_LIMIT: i64 = 100;
 
 /// 对应 `balanceHistoryItem`。
 ///
@@ -51,20 +49,6 @@ pub struct BalanceHistoryItem {
     pub balance_before: f64,
     pub balance_after: f64,
     pub operator_email: String,
-    pub created_at: DateTime<Utc>,
-}
-
-/// 管理员视图的一行。**键名与用户视图不同**（没有 `type` / `reference`，
-/// `operator_email` 是 `null` 而不是空串，`balance_*` 恒为 0），照抄旧实现里键恒在、值可为 `null` 的形状。
-#[derive(Debug, Serialize)]
-pub struct AdminBalanceHistoryItem {
-    pub id: i64,
-    pub kind: String,
-    pub amount: f64,
-    pub balance_before: f64,
-    pub balance_after: f64,
-    pub operator_email: Option<String>,
-    pub note: String,
     pub created_at: DateTime<Utc>,
 }
 
@@ -168,65 +152,4 @@ pub async fn history_page(
             .collect(),
         total,
     ))
-}
-
-/// 管理员视图的一行原始数据。命名而不是用五元组，纯粹为了让查询读得懂。
-#[derive(Debug, sqlx::FromRow)]
-struct AdminHistoryRow {
-    id: i64,
-    #[sqlx(rename = "type", try_from = "gw_model::compat::Text")]
-    kind: String,
-    #[sqlx(try_from = "gw_model::compat::Money")]
-    amount: f64,
-    #[sqlx(try_from = "gw_model::compat::Text")]
-    reference: String,
-    #[sqlx(try_from = "gw_model::compat::Ts")]
-    created_at: DateTime<Utc>,
-}
-
-/// `GET /admin/users/{id}/balance-history` —— 管理员看某个用户最近 100 条。
-///
-/// Ports `AdminUsersBalanceHistoryHandler`。信封是 `{"entries": [...]}`
-/// —— **不是** `items`，也没有分页字段。
-pub async fn admin_history(
-    State(state): State<PanelState>,
-    _admin: AdminUser,
-    Path(id): Path<String>,
-) -> Response {
-    let Some(user_id) = parse_id(&id) else {
-        return bad_request("无效的用户 ID");
-    };
-
-    let rows: Result<Vec<AdminHistoryRow>, _> = sqlx::query_as(
-        "SELECT id, type, amount, reference, created_at FROM balance_logs \
-         WHERE user_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2",
-    )
-    .bind(user_id)
-    .bind(ADMIN_HISTORY_LIMIT)
-    .fetch_all(&state.pg)
-    .await;
-
-    match rows {
-        Ok(rows) => ok(serde_json::json!({
-            "entries": rows
-                .into_iter()
-                .map(|row| AdminBalanceHistoryItem {
-                    id: row.id,
-                    kind: row.kind,
-                    amount: row.amount,
-                    // 旧实现这里就是写死的 0 / null：管理员视图不算累计余额。
-                    balance_before: 0.0,
-                    balance_after: 0.0,
-                    operator_email: None,
-                    note: row.reference,
-                    created_at: row.created_at,
-                })
-                .collect::<Vec<_>>(),
-        })),
-        Err(error) => db_failure(
-            "admin_list_balance_logs",
-            &error,
-            "获取余额流水失败，请稍后重试",
-        ),
-    }
 }

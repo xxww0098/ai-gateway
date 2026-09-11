@@ -25,6 +25,7 @@ pub mod balance;
 pub mod payment;
 pub mod redeem;
 pub mod refund;
+pub mod shortfall;
 pub mod stripe;
 pub mod subscription;
 
@@ -113,9 +114,11 @@ pub fn router() -> Router<PanelState> {
         .route("/admin/redeem-codes/{id}", delete(redeem::admin_delete))
         // ── 余额流水 ──
         .route("/user/balance-history", get(balance::history_own))
+        // ── 欠款（partial-debit 留下的、把账号锁在 402 上的那些行）──
+        .route("/admin/shortfalls", get(shortfall::admin_list))
         .route(
-            "/admin/users/{id}/balance-history",
-            get(balance::admin_history),
+            "/admin/shortfalls/{log_id}/write-off",
+            post(shortfall::admin_write_off),
         )
 }
 

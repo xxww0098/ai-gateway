@@ -14,7 +14,7 @@ export function AuthFileModelsPanel({ models, loading, onRefresh }: AuthFileMode
           )}
         </span>
         <button
-          className="text-[11px] text-primary-500 hover:text-primary-600 font-medium disabled:opacity-50 inline-flex items-center gap-1"
+          className="text-[11px] text-primary-700 hover:text-primary-800 font-medium disabled:opacity-50 inline-flex items-center gap-1"
           onClick={onRefresh}
           disabled={loading}
         >

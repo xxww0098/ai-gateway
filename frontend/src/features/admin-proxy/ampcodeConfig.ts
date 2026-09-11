@@ -108,3 +108,106 @@ export function buildAmpModelMappingsPutPayload(entries: AmpModelMapping[]) {
       })),
   }
 }
+
+export function isRegexValid(pattern: string): { valid: boolean; error?: string } {
+  try {
+    new RegExp(pattern)
+    return { valid: true }
+  } catch (err) {
+    return {
+      valid: false,
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+}
+
+export function simulateModelMapping(
+  modelName: string,
+  mappings: AmpModelMapping[],
+): {
+  matched: boolean
+  targetModel: string
+  ruleIndex: number
+  matchedRule?: AmpModelMapping
+} {
+  const normalizedModel = (modelName ?? '').trim()
+  if (!normalizedModel || !Array.isArray(mappings)) {
+    return { matched: false, targetModel: modelName, ruleIndex: -1 }
+  }
+
+  for (let i = 0; i < mappings.length; i++) {
+    const rule = mappings[i]
+    if (!rule || !rule.from) continue
+
+    if (rule.regex) {
+      try {
+        const re = new RegExp(rule.from)
+        if (re.test(modelName)) {
+          const targetModel = modelName.replace(re, rule.to)
+          return {
+            matched: true,
+            targetModel,
+            ruleIndex: i,
+            matchedRule: rule,
+          }
+        }
+      } catch {
+        // treat as non-match
+      }
+    } else {
+      if (rule.from.trim().toLowerCase() === normalizedModel.toLowerCase()) {
+        return {
+          matched: true,
+          targetModel: rule.to,
+          ruleIndex: i,
+          matchedRule: rule,
+        }
+      }
+    }
+  }
+
+  return { matched: false, targetModel: modelName, ruleIndex: -1 }
+}
+
+export function maskApiKey(key: string): string {
+  if (!key) return ''
+  if (key.length <= 8) return '••••••••'
+  return `${key.slice(0, 6)}••••••••${key.slice(-4)}`
+}
+
+export function validateUpstreamUrl(url: string): {
+  valid: boolean
+  message?: string
+  suggestedUrl?: string
+} {
+  const trimmed = (url ?? '').trim()
+  if (!trimmed) {
+    return {
+      valid: false,
+      message: '请输入上游地址',
+    }
+  }
+
+  if (!/^https?:\/\//i.test(trimmed)) {
+    const suggestedUrl = trimmed.includes('://')
+      ? `https://${trimmed.replace(/^[a-zA-Z]+:\/\//, '')}`
+      : `https://${trimmed}`
+
+    return {
+      valid: false,
+      message: '上游地址必须以 http:// 或 https:// 开头',
+      suggestedUrl,
+    }
+  }
+
+  try {
+    new URL(trimmed)
+    return { valid: true }
+  } catch {
+    return {
+      valid: false,
+      message: '上游地址格式不正确',
+    }
+  }
+}
+

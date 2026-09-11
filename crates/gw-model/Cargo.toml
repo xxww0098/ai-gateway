@@ -11,6 +11,7 @@ doctest = false          # rule 2.10: internal crate, no external example reader
 workspace = true         # rule 4.2: the table is inert without this
 
 [dependencies]
+gw-role.workspace = true
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true, features = ["std"] }
 chrono = { workspace = true, features = ["clock", "std", "serde"] }

@@ -36,12 +36,14 @@
 //! 重启后到有流量之前也是这个值。详见 [`record`]。
 
 pub mod ampcode;
+pub mod api_call;
 pub mod auth_files;
 pub mod logs;
 pub mod oauth;
 pub mod providers;
 pub mod record;
 pub mod runtime_config;
+pub mod usage_stats;
 
 use axum::Router;
 use axum::extract::State;
@@ -60,6 +62,7 @@ pub fn router() -> Router<PanelState> {
     Router::new()
         // ── static routes: must be registered so `/{provider}` cannot eat them ──
         .route(&path("/api-key-usage"), get(providers::api_key_usage))
+        .route(&path("/api-call"), post(api_call::proxy))
         .route(
             &path("/auth-files"),
             get(auth_files::list)
@@ -79,6 +82,12 @@ pub fn router() -> Router<PanelState> {
         )
         // ── ampcode ──
         .route(&path("/ampcode"), get(ampcode::get).put(ampcode::put))
+        .route(
+            &path("/ampcode/force-model-mappings"),
+            get(ampcode::get_force_model_mappings)
+                .put(ampcode::put_force_model_mappings)
+                .delete(ampcode::delete_force_model_mappings),
+        )
         .route(
             &path("/ampcode/model-mappings"),
             get(ampcode::get_model_mappings)

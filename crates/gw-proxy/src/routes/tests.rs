@@ -17,6 +17,7 @@ use crate::testsupport::{
 };
 
 mod dispatch;
+mod dispatch_surface;
 mod stream;
 mod unary;
 

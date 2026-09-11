@@ -22,7 +22,6 @@ fn provider(base_url: &str, api_key: &str) -> ClaudeProvider {
         &ProviderConfig {
             base_url: base_url.to_owned(),
             api_key: api_key.to_owned(),
-            enabled: true,
         },
         0,
     )
@@ -159,7 +158,6 @@ fn a_base_url_without_a_host_is_rejected() {
             &ProviderConfig {
                 base_url: "not-a-url".to_owned(),
                 api_key: String::new(),
-                enabled: true,
             },
             0
         )
@@ -366,6 +364,17 @@ fn streaming_pins_accept_but_a_plain_request_keeps_the_callers_choice() {
 }
 
 #[test]
+fn outbound_accept_encoding_is_identity_even_when_the_caller_asked_for_gzip() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        http::header::ACCEPT_ENCODING,
+        HeaderValue::from_static("gzip, deflate, br"),
+    );
+    default_content_negotiation(&mut headers, false);
+    assert_eq!(headers[http::header::ACCEPT_ENCODING], "identity");
+}
+
+#[test]
 fn hop_by_hop_and_authorization_headers_never_reach_the_upstream() {
     let mut src = HeaderMap::new();
     src.insert(
@@ -377,11 +386,18 @@ fn hop_by_hop_and_authorization_headers_never_reach_the_upstream() {
         HeaderValue::from_static("inbound.example"),
     );
     src.insert("anthropic-beta", HeaderValue::from_static("tools-2024"));
+    src.insert("x-api-key", HeaderValue::from_static("caller-key"));
+    src.insert("x-goog-api-key", HeaderValue::from_static("goog-key"));
 
     let mut dst = HeaderMap::new();
     copy_outbound_headers(&mut dst, &src);
     assert!(!dst.contains_key(http::header::AUTHORIZATION));
     assert!(!dst.contains_key(http::header::HOST));
+    assert!(
+        !dst.contains_key("x-api-key"),
+        "the client's credential carrier is a different trust domain",
+    );
+    assert!(!dst.contains_key("x-goog-api-key"));
     assert_eq!(dst["anthropic-beta"], "tools-2024");
 }
 

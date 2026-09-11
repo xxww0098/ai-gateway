@@ -33,17 +33,22 @@ describe('openAiCompatPresetForm', () => {
 })
 
 describe('matchOpenAiCompatPreset', () => {
-  it('按渠道名认预设，别名与中文名都算', () => {
-    for (const alias of BAILIAN_PRESET.aliases) {
-      expect(matchOpenAiCompatPreset({ name: alias })).toBe(BAILIAN_PRESET)
-      expect(matchOpenAiCompatPreset({ name: alias.toUpperCase() })).toBe(BAILIAN_PRESET)
+  it('所有预设按渠道名与别名都能认出，大小写不敏感', () => {
+    for (const preset of OPENAI_COMPAT_PRESETS) {
+      for (const alias of preset.aliases) {
+        expect(matchOpenAiCompatPreset({ name: alias })).toBe(preset)
+        expect(matchOpenAiCompatPreset({ name: alias.toUpperCase() })).toBe(preset)
+        expect(matchOpenAiCompatPreset({ name: `my-${alias}-gateway` })).toBe(preset)
+      }
     }
   })
 
-  it('按 Base URL 认预设：末尾斜杠、少写版本段都认', () => {
-    const root = BAILIAN_PRESET.baseUrl.replace(/\/v1$/, '')
-    for (const baseUrl of [BAILIAN_PRESET.baseUrl, `${BAILIAN_PRESET.baseUrl}/`, root]) {
-      expect(matchOpenAiCompatPreset({ name: 'my-gateway', baseUrl })).toBe(BAILIAN_PRESET)
+  it('所有预设按 Base URL 认预设：完整 URL、末尾斜杠、少写版本段都认', () => {
+    for (const preset of OPENAI_COMPAT_PRESETS) {
+      const root = preset.baseUrl.replace(/\/v\d+$/i, '')
+      for (const baseUrl of [preset.baseUrl, `${preset.baseUrl}/`, root, `${root}/`]) {
+        expect(matchOpenAiCompatPreset({ name: 'custom-channel', baseUrl })).toBe(preset)
+      }
     }
   })
 
@@ -56,5 +61,20 @@ describe('matchOpenAiCompatPreset', () => {
   it('同一个域名下换了一套 API 就不算这个预设了', () => {
     const { host } = new URL(BAILIAN_PRESET.baseUrl)
     expect(matchOpenAiCompatPreset({ baseUrl: `https://${host}/api/v1` })).toBeUndefined()
+  })
+
+  it('百炼专属实例（*.maas.aliyuncs.com）与国际站端点也能准确识别', () => {
+    expect(
+      matchOpenAiCompatPreset({
+        name: 'custom-channel',
+        baseUrl: 'https://llm-opgv3nmovcqi0se7.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      }),
+    ).toBe(BAILIAN_PRESET)
+    expect(
+      matchOpenAiCompatPreset({
+        name: 'custom-channel',
+        baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+      }),
+    ).toBe(BAILIAN_PRESET)
   })
 })

@@ -27,7 +27,6 @@ fn provider(base_url: &str, service_account: &str) -> VertexProvider {
         &ProviderConfig {
             base_url: base_url.to_owned(),
             api_key: service_account.to_owned(),
-            enabled: true,
         },
         0,
     )

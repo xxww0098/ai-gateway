@@ -3,17 +3,16 @@
 //! 对应 `generateRedeemCode` / `UserRedeemHandler` / `AdminListRedeemCodes` /
 //! `AdminCreateRedeemCodes` / `AdminDeleteRedeemCode`。
 //!
-//! # 兑换是「先认领、再入账、失败回滚」
+//! # 兑换是「认领与入账同一事务」
 //!
 //! ```text
-//! UPDATE redeem_codes SET status='used' … WHERE id=? AND status='unused'
-//!   rows_affected == 0 -> 已被别人用掉，400
-//!   rows_affected == 1 -> 我抢到了 -> Credit
-//!        Credit 失败 -> 把认领**退回去**（并且只退回我自己那一次）
+//! BEGIN
+//!   UPDATE redeem_codes SET status='used' … WHERE id=? AND status='unused'
+//!   credit_tx(..., "redeem:{CODE}")
+//! COMMIT
 //! ```
 //!
-//! 条件 UPDATE 是跨副本安全的；先读后写不是。回滚那句 `AND used_by_id = $2` 也
-//! 是必要的：没有它，一次失败的兑换会把别人刚刚成功的认领擦掉。
+//! 失败整段回滚：码仍 unused，也没有 credit。补偿式 `release_claim` 不再走成功路径。
 //!
 //! # 码必须不可猜
 //!
@@ -27,6 +26,7 @@ use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 
 use gw_infra::Db;
+use gw_ledger::{BalanceChange, Ledger, LedgerError};
 
 use crate::identity::{
     bad_request, db_failure, internal, is_positive_amount, not_found, parse_json_body,
@@ -180,12 +180,15 @@ pub enum Claim {
 ///
 /// # Errors
 /// 更新失败。
-pub async fn claim_code(
-    pg: &Db,
+pub async fn claim_code<'e, E>(
+    pg: E,
     code_id: i64,
     user_id: i64,
     used_by: &str,
-) -> Result<Claim, sqlx::Error> {
+) -> Result<Claim, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let claimed = sqlx::query(
         "UPDATE redeem_codes SET status = $3, used_at = $4, used_by = $5, used_by_id = $6 \
          WHERE id = $1 AND status = $2",
@@ -225,6 +228,111 @@ pub async fn release_claim(pg: &Db, code_id: i64, user_id: i64) -> Result<(), sq
     .execute(pg)
     .await?;
     Ok(())
+}
+
+/// 认领与 `redeem:{CODE}` 入账同一事务。码已被自己占用但缺流水时补入一次。
+pub async fn apply_redeem(
+    pg: &Db,
+    ledger: &Ledger,
+    user_id: i64,
+    used_by: &str,
+    code: &str,
+    code_id: i64,
+    amount: f64,
+) -> Result<(), RedeemApplyError> {
+    let reference = format!("redeem:{code}");
+    let mut tx = pg.begin().await.map_err(RedeemApplyError::Db)?;
+    match claim_code(&mut *tx, code_id, user_id, used_by).await {
+        Ok(Claim::Won) => match ledger.credit_tx(&mut tx, user_id, amount, &reference).await {
+            Ok(change) => {
+                tx.commit().await.map_err(RedeemApplyError::Db)?;
+                publish_credit(ledger, user_id, change).await;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                Err(RedeemApplyError::Credit(error))
+            }
+        },
+        Ok(Claim::AlreadyUsed) => {
+            let _ = tx.rollback().await;
+            repair_own_redeem(pg, ledger, user_id, code_id, amount, &reference).await
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(RedeemApplyError::Db(error))
+        }
+    }
+}
+
+/// 兑换事务失败。
+#[derive(Debug)]
+pub enum RedeemApplyError {
+    /// 码已被他人使用，或已被自己兑过且流水已在。
+    AlreadyUsed,
+    /// 入账失败，事务已回滚。
+    Credit(LedgerError),
+    /// 认领/提交失败。
+    Db(sqlx::Error),
+}
+
+async fn repair_own_redeem(
+    pg: &Db,
+    ledger: &Ledger,
+    user_id: i64,
+    code_id: i64,
+    amount: f64,
+    reference: &str,
+) -> Result<(), RedeemApplyError> {
+    let mut tx = pg.begin().await.map_err(RedeemApplyError::Db)?;
+    let owner: Option<i64> =
+        sqlx::query_scalar("SELECT used_by_id FROM redeem_codes WHERE id = $1 FOR UPDATE")
+            .bind(code_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(RedeemApplyError::Db)?;
+    if owner != Some(user_id) {
+        let _ = tx.rollback().await;
+        return Err(RedeemApplyError::AlreadyUsed);
+    }
+    let credited: Option<i64> = sqlx::query_scalar(
+        "SELECT user_id FROM balance_logs WHERE type = 'credit' AND reference = $1 LIMIT 1",
+    )
+    .bind(reference)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(RedeemApplyError::Db)?;
+    if let Some(credited_user) = credited {
+        let _ = tx.rollback().await;
+        return if credited_user == user_id {
+            Ok(())
+        } else {
+            Err(RedeemApplyError::AlreadyUsed)
+        };
+    }
+    match ledger.credit_tx(&mut tx, user_id, amount, reference).await {
+        Ok(change) => {
+            tx.commit().await.map_err(RedeemApplyError::Db)?;
+            publish_credit(ledger, user_id, change).await;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(RedeemApplyError::Credit(error))
+        }
+    }
+}
+
+async fn publish_credit(ledger: &Ledger, user_id: i64, change: BalanceChange) {
+    if let BalanceChange::Applied {
+        balance_after,
+        balance_version,
+    } = change
+    {
+        let _ = ledger
+            .publish_balance(user_id, balance_after, balance_version)
+            .await;
+    }
 }
 
 // ── handlers ─────────────────────────────────────────────────────────────────
@@ -270,25 +378,27 @@ pub async fn redeem(
         user.email.clone()
     };
 
-    // 原子认领：只有把 unused 翻成 used 的那一次调用会去入账。
-    match claim_code(&state.pg, id, user.user_id, &used_by).await {
-        Ok(Claim::Won) => {}
-        Ok(Claim::AlreadyUsed) => return bad_request("兑换码已被使用"),
-        Err(error) => return db_failure("claim_redeem_code", &error, "兑换失败，请稍后重试"),
-    }
-
-    if let Err(error) = state
-        .ledger
-        .credit(user.user_id, amount, &format!("redeem:{code}"))
-        .await
+    match apply_redeem(
+        &state.pg,
+        &state.ledger,
+        user.user_id,
+        &used_by,
+        &code,
+        id,
+        amount,
+    )
+    .await
     {
-        // 入账失败 → 把认领退回去，让这张码还能再兑。
-        let _ = release_claim(&state.pg, id, user.user_id).await;
-        tracing::warn!(event = "redeem_credit_failed", user_id = user.user_id, error = %error);
-        return internal("兑换失败，请稍后重试");
+        Ok(()) => ok(serde_json::json!({ "amount": amount })),
+        Err(RedeemApplyError::AlreadyUsed) => bad_request("兑换码已被使用"),
+        Err(RedeemApplyError::Credit(error)) => {
+            tracing::warn!(event = "redeem_credit_failed", user_id = user.user_id, error = %error);
+            internal("兑换失败，请稍后重试")
+        }
+        Err(RedeemApplyError::Db(error)) => {
+            db_failure("claim_redeem_code", &error, "兑换失败，请稍后重试")
+        }
     }
-
-    ok(serde_json::json!({ "amount": amount }))
 }
 
 /// `GET /admin/redeem-codes` —— 全部兑换码，`{"items": [...]}`，无分页。

@@ -129,12 +129,14 @@ async fn collecting_a_unary_body_does_not_double_settle() {
 #[tokio::test]
 async fn a_unary_error_status_releases_instead_of_charging() {
     let harness = Harness::build();
-    harness.provider.queue(Ok(gw_provider::types::ProviderResponse {
-        status: 400,
-        headers: http::HeaderMap::new(),
-        body: bytes::Bytes::from_static(b"{\"error\":\"bad\"}"),
-        usage: None,
-    }));
+    harness
+        .provider
+        .queue(Ok(gw_provider::types::ProviderResponse {
+            status: 400,
+            headers: http::HeaderMap::new(),
+            body: bytes::Bytes::from_static(b"{\"error\":\"bad\"}"),
+            usage: None,
+        }));
 
     let (status, _) = send_settled(
         &harness,

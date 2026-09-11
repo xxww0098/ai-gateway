@@ -2,15 +2,18 @@
 # 一键启动本地开发前后端（双热更新），Ctrl+C 同时退出。
 #
 # 用法:
-#   ./dev.sh                 # 前端默认 http://127.0.0.1:3000
+#   ./dev.sh                 # 前端默认 http://127.0.0.1:3030
 #   FRONTEND_PORT=5173 ./dev.sh
 #
 # - 后端 http://127.0.0.1:8888：cargo watch 监听 crates/、migrations/、
 #   Cargo.toml、Cargo.lock、config.yaml，改动后自动重编译重启。
 #   端口固定 8888 —— frontend/vite.config.ts 把 /api、/v1、/v1beta、/healthz
 #   等硬编码代理到 127.0.0.1:8888，改了代理会断。
-# - 前端 vite dev server：源码 HMR 热更新；FRONTEND_PORT 可覆盖（默认 3000，
-#   与 config.example.yaml 的 frontend.port 一致），被占用时 strictPort 直接报错。
+# - 前端 vite dev server：源码 HMR 热更新；FRONTEND_PORT 可覆盖（默认 3030，
+#   与 config.example.yaml 的 frontend.port 一致）。
+# - 启动前会主动清掉占用 8888/$FRONTEND_PORT 的残留进程（上次没退干净的旧实例），
+#   避免 strictPort 因端口被占用直接失败。
+
 #
 # 前置依赖:
 #   - Postgres/Redis 按 config.yaml 可达，否则后端启动失败并退出（脚本随之整体退出）
@@ -20,8 +23,16 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_PORT=8888
-FRONTEND_PORT="${FRONTEND_PORT:-3000}"
+FRONTEND_PORT="${FRONTEND_PORT:-3030}"
 CONFIG="$ROOT/config.yaml"
+
+# ── 加载环境变量 ──
+if [[ -f "$ROOT/.env" ]]; then
+  echo "检测到 .env，正在自动加载环境变量 ..."
+  set -a
+  source "$ROOT/.env"
+  set +a
+fi
 
 # ── 前置检查 ──
 if ! command -v cargo-watch >/dev/null 2>&1; then
@@ -43,6 +54,33 @@ if [[ ! -x "$ROOT/frontend/node_modules/.bin/vite" ]]; then
   # 裸 npm ci 会 ERESOLVE 失败，必须带 --legacy-peer-deps。
   (cd "$ROOT/frontend" && npm ci --legacy-peer-deps)
 fi
+if ! command -v lsof >/dev/null 2>&1; then
+  echo "缺少 lsof：macOS 自带；Debian/Ubuntu 执行 apt install lsof" >&2
+  exit 1
+fi
+
+# ── 端口清理 ──
+# 先 TERM 占用者，5 秒内未释放再 KILL，确保启动时端口是空的。
+free_port() {
+  local port="$1" pid waited=0
+  for pid in $(lsof -ti tcp:"$port" -sTCP:LISTEN 2>/dev/null); do
+    echo "端口 $port 被进程 $pid 占用，结束它 ..."
+    kill "$pid" 2>/dev/null || true
+  done
+  while lsof -ti tcp:"$port" -sTCP:LISTEN >/dev/null 2>&1 && (( waited < 50 )); do
+    sleep 0.1
+    (( waited += 1 ))
+  done
+  if [[ -n "$(lsof -ti tcp:"$port" -sTCP:LISTEN 2>/dev/null || true)" ]]; then
+    echo "端口 $port 仍未释放，强制结束占用进程"
+    for pid in $(lsof -ti tcp:"$port" -sTCP:LISTEN 2>/dev/null); do
+      kill -9 "$pid" 2>/dev/null || true
+    done
+    sleep 0.5
+  fi
+}
+free_port "$BACKEND_PORT"
+free_port "$FRONTEND_PORT"
 
 # ── 进程清理 ──
 BACKEND_PID=""

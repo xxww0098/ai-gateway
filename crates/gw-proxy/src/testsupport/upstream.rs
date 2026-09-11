@@ -1,7 +1,7 @@
 //! Doubles for the upstream side: credential store, providers, catalogue.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -211,9 +211,17 @@ pub(crate) struct FakeCatalog {
     /// this is scanning the whole catalogue to find one id.
     list_calls: AtomicUsize,
     get_calls: AtomicUsize,
+    /// 让下一次 `list_models` 失败，测缓存「刷新失败保留旧快照」的路径。
+    pub(crate) fail_list: AtomicBool,
 }
 
 impl FakeCatalog {
+    pub(crate) fn with(models: Vec<ModelEntry>) -> Arc<Self> {
+        let catalog = Self::default();
+        *catalog.models.lock() = models;
+        Arc::new(catalog)
+    }
+
     pub(crate) fn list_calls(&self) -> usize {
         self.list_calls.load(Ordering::SeqCst)
     }
@@ -227,6 +235,9 @@ impl FakeCatalog {
 impl ModelCatalog for FakeCatalog {
     async fn list_models(&self) -> anyhow::Result<Vec<ModelEntry>> {
         self.list_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_list.load(Ordering::SeqCst) {
+            anyhow::bail!("catalog unavailable");
+        }
         Ok(self.models.lock().clone())
     }
 

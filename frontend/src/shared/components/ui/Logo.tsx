@@ -116,7 +116,7 @@ export const Logo: React.FC<LogoProps> = ({
       {showText && (
         <span
           className={cn(
-            'tracking-tight font-bold bg-clip-text text-transparent bg-gradient-to-r from-gray-900 via-gray-800 to-gray-600 dark:from-white dark:via-gray-100 dark:to-gray-300',
+            'tracking-tight font-bold text-foreground',
             sizeConfig.textSize,
             textClassName
           )}

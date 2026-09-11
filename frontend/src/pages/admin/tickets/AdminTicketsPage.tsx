@@ -174,7 +174,7 @@ const TicketChatPane = memo(function TicketChatPane({
 
   if (!ticketId) {
     return (
-      <div className="flex flex-1 items-center justify-center px-4 py-12 text-sm text-gray-500 dark:text-dark-400">
+      <div className="flex flex-1 items-center justify-center px-4 py-12 text-sm text-muted-foreground">
         从列表选择一条工单
       </div>
     )
@@ -182,7 +182,7 @@ const TicketChatPane = memo(function TicketChatPane({
 
   if (loading) {
     return (
-      <div className="flex flex-1 items-center justify-center text-sm text-gray-500 dark:text-dark-400">
+      <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
         加载中
       </div>
     )
@@ -190,7 +190,7 @@ const TicketChatPane = memo(function TicketChatPane({
 
   if (!ticket) {
     return (
-      <div className="flex flex-1 items-center justify-center px-4 text-sm text-gray-500 dark:text-dark-400">
+      <div className="flex flex-1 items-center justify-center px-4 text-sm text-muted-foreground">
         无法加载该工单
       </div>
     )
@@ -202,7 +202,7 @@ const TicketChatPane = memo(function TicketChatPane({
   const peerLabel = ticket.user_email || `用户#${ticket.user_id}`
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-white dark:bg-dark-900">
+    <div className="flex min-h-0 flex-1 flex-col bg-card">
       <header className="shrink-0 border-b border-border px-4 py-2.5">
         <div className="flex items-start gap-2">
           <Button
@@ -217,8 +217,8 @@ const TicketChatPane = memo(function TicketChatPane({
             <ChevronLeft className="h-4 w-4" />
           </Button>
           <div className="min-w-0 flex-1">
-            <h3 className="truncate text-sm font-medium text-gray-900 dark:text-white">{ticket.title}</h3>
-            <p className="mt-0.5 text-xs text-gray-500 dark:text-dark-400">
+            <h3 className="truncate text-sm font-medium text-foreground">{ticket.title}</h3>
+            <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">
               #{ticket.id} · {CATEGORY_MAP[ticket.category] || ticket.category} · {statusLabel} · 优先级{" "}
               {priorityLabel} · {peerLabel}
             </p>
@@ -235,7 +235,7 @@ const TicketChatPane = memo(function TicketChatPane({
               <button
                 type="button"
                 onClick={() => void refetch()}
-                className="text-xs text-gray-500 underline-offset-2 hover:underline dark:text-dark-400"
+                className="text-xs text-muted-foreground underline-offset-2 hover:underline hover:text-foreground"
               >
                 刷新对话
               </button>
@@ -251,7 +251,7 @@ const TicketChatPane = memo(function TicketChatPane({
               <EmptyState
                 size="compact"
                 icon={MessageSquare}
-                title="暂无回复记录"
+                title="还没有回复"
                 description="当前工单尚未进行任何回复。您可在下方输入内容并发送给用户。"
               />
             ) : (
@@ -262,18 +262,18 @@ const TicketChatPane = memo(function TicketChatPane({
                     <div
                       className={`flex max-w-[min(100%,480px)] gap-2 ${isStaff ? "flex-row-reverse" : "flex-row"}`}
                     >
-                      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gray-100 text-gray-500 dark:bg-dark-800 dark:text-gray-400">
+                      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
                         {isStaff ? <Shield className="h-3.5 w-3.5" /> : <User className="h-3.5 w-3.5" />}
                       </div>
                       <div
                         className={`min-w-0 rounded-lg px-3 py-2 text-sm ${
                           isStaff
-                            ? "bg-primary-500/15 text-gray-900 dark:bg-primary-500/20 dark:text-gray-100"
-                            : "bg-gray-100 text-gray-900 dark:bg-dark-800 dark:text-gray-100"
+                            ? "bg-primary/10 text-foreground"
+                            : "bg-muted text-foreground"
                         }`}
                       >
                         <div
-                          className={`mb-1 text-[11px] text-gray-500 dark:text-dark-400 ${isStaff ? "text-right" : ""}`}
+                          className={`mb-1 text-[11px] text-muted-foreground tabular-nums ${isStaff ? "text-right" : ""}`}
                         >
                           {isStaff ? "客服" : "用户"} · {fmtDateTime(reply.created_at)}
                         </div>
@@ -303,7 +303,7 @@ const TicketChatPane = memo(function TicketChatPane({
                     title={q.text}
                     disabled={sending || !q.text.trim()}
                     onClick={() => void submitReply(q.text)}
-                    className="min-h-9 rounded-md border border-border bg-gray-50 px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:bg-dark-800 dark:text-gray-200 dark:hover:bg-dark-700"
+                    className="min-h-9 rounded-md border border-border bg-muted px-2.5 py-1.5 text-xs text-foreground hover:bg-muted/80 disabled:opacity-50"
                   >
                     {q.label || `回复${qi + 1}`}
                   </button>
@@ -336,7 +336,7 @@ const TicketChatPane = memo(function TicketChatPane({
           )}
 
           {isClosed && (
-            <div className="shrink-0 border-t border-border py-2 text-center text-xs text-gray-500 dark:text-dark-400">
+            <div className="shrink-0 border-t border-border py-2 text-center text-xs text-muted-foreground">
               已关闭
             </div>
           )}
@@ -345,13 +345,13 @@ const TicketChatPane = memo(function TicketChatPane({
         {/* Desktop: side meta. Mobile: collapsible under chat to avoid 3-stack */}
         <aside className="w-full shrink-0 border-t border-border p-3 lg:w-[220px] lg:border-l lg:border-t-0">
           <details className="group" open>
-            <summary className="cursor-pointer list-none text-xs font-medium text-gray-600 dark:text-dark-300 marker:content-none [&::-webkit-details-marker]:hidden lg:pointer-events-none lg:cursor-default">
+            <summary className="cursor-pointer list-none text-xs font-medium text-muted-foreground marker:content-none [&::-webkit-details-marker]:hidden lg:pointer-events-none lg:cursor-default">
               <span className="lg:hidden">状态 / 分配 ▾</span>
-              <span className="hidden lg:inline text-gray-500 dark:text-dark-400">处理</span>
+              <span className="hidden lg:inline text-muted-foreground">处理</span>
             </summary>
             <div className="mt-3 space-y-3">
               <div className="space-y-1">
-                <label className="text-xs text-gray-500 dark:text-dark-400">状态</label>
+                <label className="text-xs text-muted-foreground">状态</label>
                 <Select value={ticket.status} onValueChange={(v) => void handleStatusChange(v)} disabled={updatingStatus}>
                   <SelectTrigger className="h-11 text-sm">
                     <SelectValue />
@@ -366,7 +366,7 @@ const TicketChatPane = memo(function TicketChatPane({
                 </Select>
               </div>
               <div className="space-y-1">
-                <label className="text-xs text-gray-500 dark:text-dark-400">分配</label>
+                <label className="text-xs text-muted-foreground">分配</label>
                 <Select
                   value={ticket.assigned_to != null && ticket.assigned_to > 0 ? String(ticket.assigned_to) : "0"}
                   onValueChange={(v) => void handleAssign(v)}
@@ -383,7 +383,7 @@ const TicketChatPane = memo(function TicketChatPane({
                   </SelectContent>
                 </Select>
               </div>
-              <div className="text-[11px] leading-relaxed text-gray-400 dark:text-dark-500">
+              <div className="text-[11px] leading-relaxed text-muted-foreground tabular-nums">
                 <div>创建 {fmtDateTime(ticket.created_at)}</div>
                 <div>更新 {fmtDateTime(ticket.updated_at)}</div>
               </div>
@@ -403,14 +403,18 @@ export default function AdminTickets() {
   const [filterStatus, setFilterStatus] = useState("")
   const qc = useQueryClient()
 
-  const { data, isLoading: listBusy, refetch: loadList } = useAdminTickets(page, pageSize, filterStatus || undefined)
+  const { data, isLoading: listBusy, refetch: loadList } = useAdminTickets(
+    page,
+    pageSize,
+    filterStatus || undefined
+  )
+
   const tickets: TicketItem[] = data?.items || []
   const total = data?.total || 0
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
 
-  const handleFilter = useCallback((status: string) => {
-    setFilterStatus(status)
-    setPage(1)
-  }, [])
+  const selectedFromList = tickets.some((t) => String(t.id) === routeTicketId)
+  const detailOpen = Boolean(routeTicketId)
 
   const onTicketUpdated = useCallback(() => {
     qc.invalidateQueries({ queryKey: queryKeys.tickets.all() })
@@ -420,40 +424,27 @@ export default function AdminTickets() {
     navigate(adminRoutes.tickets, { replace: true })
   }, [navigate])
 
-  const selectTicket = useCallback(
-    (id: number) => {
-      if (String(id) === routeTicketId) {
-        goList()
-        return
-      }
-      navigate(adminTicketPath(id))
-    },
-    [routeTicketId, goList, navigate]
-  )
+  const selectTicket = (id: number) => {
+    navigate(adminTicketPath(id))
+  }
 
-  const totalPages = Math.max(1, Math.ceil(total / pageSize))
-  const selectedFromList = tickets.find((t) => String(t.id) === routeTicketId)
-
-  const detailOpen = Boolean(routeTicketId)
+  const handleFilter = (status: string) => {
+    setFilterStatus(status)
+    setPage(1)
+  }
 
   return (
-    <div className="flex flex-col gap-2 sm:gap-3">
-      <h2 className="text-lg font-semibold text-gray-900 dark:text-white">工单管理</h2>
-
-      <div
-        className={cn(
-          "flex flex-col rounded-lg border border-border bg-white dark:bg-dark-900 lg:flex-row lg:overflow-hidden",
-          "min-h-[calc(100dvh-11rem)] lg:min-h-[min(100dvh-10rem,720px)]"
-        )}
-      >
+    <div className="space-y-4">
+      <div className="flex h-[calc(100vh-14rem)] min-h-[480px] overflow-hidden rounded-2xl border border-border bg-card shadow-xs">
+        {/* Left List */}
         <aside
           className={cn(
-            "flex w-full flex-col border-border lg:w-[min(100%,260px)] lg:max-w-[260px] lg:shrink-0 lg:border-r lg:bg-gray-50/50 dark:lg:bg-dark-950/50",
+            "flex w-full flex-col border-border lg:w-[min(100%,260px)] lg:max-w-[260px] lg:shrink-0 lg:border-r lg:bg-muted/20",
             detailOpen && "hidden lg:flex"
           )}
         >
           {routeTicketId && !selectedFromList && (
-            <div className="shrink-0 border-b border-border px-3 py-2 text-xs text-gray-500 dark:text-dark-400">
+            <div className="shrink-0 border-b border-border px-3 py-2 text-xs text-muted-foreground">
               工单 #{routeTicketId} 不在本页列表，可继续处理。
             </div>
           )}
@@ -464,10 +455,10 @@ export default function AdminTickets() {
                 key={f.key || "all"}
                 type="button"
                 onClick={() => handleFilter(f.key)}
-                className={`min-h-9 rounded-lg px-3 py-1.5 text-xs font-medium ${
+                className={`min-h-9 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
                   filterStatus === f.key
-                    ? "bg-gray-200 text-gray-900 dark:bg-dark-700 dark:text-white"
-                    : "text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-dark-800"
+                    ? "bg-primary text-primary-foreground shadow-xs"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
                 }`}
               >
                 {f.label}
@@ -477,7 +468,7 @@ export default function AdminTickets() {
               type="button"
               onClick={() => void loadList()}
               disabled={listBusy}
-              className="ml-auto min-h-9 px-3 py-1.5 text-xs text-gray-500 hover:text-gray-700 disabled:opacity-50 dark:text-dark-400 dark:hover:text-gray-200"
+              className="ml-auto min-h-9 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
             >
               {listBusy ? "更新中" : "刷新"}
             </button>
@@ -487,12 +478,12 @@ export default function AdminTickets() {
             className={`min-h-0 flex-1 overflow-y-auto ${listBusy && tickets.length > 0 ? "opacity-70" : ""}`}
           >
             {listBusy && tickets.length === 0 ? (
-              <div className="px-3 py-8 text-center text-xs text-gray-400 dark:text-dark-500">加载中</div>
+              <div className="px-3 py-8 text-center text-xs text-muted-foreground">加载中</div>
             ) : tickets.length === 0 ? (
               <EmptyState
                 size="compact"
                 icon={Ticket}
-                title="暂无工单"
+                title="还没有工单"
                 description="用户提交工单后将按状态列出。可切换上方状态标签查看全部记录。"
               />
             ) : (
@@ -507,22 +498,22 @@ export default function AdminTickets() {
                       <button
                         type="button"
                         onClick={() => selectTicket(ticket.id)}
-                        className={`flex w-full min-h-[3.25rem] gap-2 px-3 py-3 text-left ${
-                          active ? "bg-gray-100 dark:bg-dark-800" : "hover:bg-gray-50 dark:hover:bg-dark-800/80 active:bg-gray-100"
+                        className={`flex w-full min-h-[3.25rem] gap-2 px-3 py-3 text-left transition-colors ${
+                          active ? "bg-primary/10" : "hover:bg-muted/50 active:bg-muted"
                         }`}
                       >
-                        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gray-200 text-xs font-medium text-gray-600 dark:bg-dark-700 dark:text-gray-300">
+                        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium text-muted-foreground">
                           {userInitial(label)}
                         </span>
                         <span className="min-w-0 flex-1">
                           <span className="flex items-baseline justify-between gap-2">
-                            <span className="truncate text-sm text-gray-900 dark:text-gray-100">{label}</span>
-                            <span className="shrink-0 tabular-nums text-[10px] text-gray-400 dark:text-dark-500">
+                            <span className="truncate text-sm text-foreground">{label}</span>
+                            <span className="shrink-0 tabular-nums text-[10px] text-muted-foreground">
                               {fmtShortTime(ticket.updated_at)}
                             </span>
                           </span>
-                          <span className="mt-0.5 line-clamp-1 block text-xs text-gray-500 dark:text-dark-400">{ticket.title}</span>
-                          <span className="mt-0.5 block text-[10px] text-gray-400 dark:text-dark-500">
+                          <span className="mt-0.5 line-clamp-1 block text-xs text-muted-foreground">{ticket.title}</span>
+                          <span className="mt-0.5 block text-[10px] text-muted-foreground tabular-nums">
                             {st} · {cat}
                           </span>
                         </span>
@@ -535,7 +526,7 @@ export default function AdminTickets() {
           </div>
 
           {total > 0 && (
-            <div className="flex shrink-0 items-center justify-between border-t border-border px-2 py-1.5 text-[11px] text-gray-500 dark:text-dark-400">
+            <div className="flex shrink-0 items-center justify-between border-t border-border px-2 py-1.5 text-[11px] text-muted-foreground">
               <span className="tabular-nums">
                 {total} 条 · {page}/{totalPages}
               </span>
@@ -544,7 +535,7 @@ export default function AdminTickets() {
                   type="button"
                   disabled={page <= 1 || listBusy}
                   onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  className="rounded p-1 text-gray-500 hover:bg-gray-100 disabled:opacity-30 dark:hover:bg-dark-800"
+                  className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-30"
                   aria-label="上一页"
                 >
                   <ChevronLeft className="h-4 w-4" />
@@ -553,7 +544,7 @@ export default function AdminTickets() {
                   type="button"
                   disabled={page >= totalPages || listBusy}
                   onClick={() => setPage((p) => p + 1)}
-                  className="rounded p-1 text-gray-500 hover:bg-gray-100 disabled:opacity-30 dark:hover:bg-dark-800"
+                  className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-30"
                   aria-label="下一页"
                 >
                   <ChevronRight className="h-4 w-4" />

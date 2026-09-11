@@ -1,5 +1,4 @@
-// API functions for tickets feature module
-import { apiClient } from "@/shared/api/client"
+import { apiClient, fetchApiFormData } from "@/shared/api/client"
 import type { PaginatedResponse } from "@/shared/types/api"
 import type {
   TicketItem,
@@ -31,6 +30,26 @@ export function createTicket(body: CreateTicketRequest) {
 
 export function replyUserTicket(ticketId: number | string, body: ReplyTicketRequest) {
   return apiClient.post(`/user/tickets/${ticketId}/replies`, body)
+}
+
+const maxTicketImageBytes = 4 * 1024 * 1024
+
+export async function uploadTicketImageFile(file: File): Promise<string> {
+  if (!file.type.startsWith("image/")) {
+    throw new Error("请选择图片文件")
+  }
+  if (file.size > maxTicketImageBytes) {
+    throw new Error("图片不能超过 4MB")
+  }
+  const fd = new FormData()
+  fd.append("image", file)
+  const res = (await fetchApiFormData("/user/ticket-images", fd)) as {
+    data?: { markdown?: string }
+  }
+  const data = res?.data
+  const md = typeof data?.markdown === "string" ? data.markdown : ""
+  if (!md) throw new Error("上传失败")
+  return md
 }
 
 // ── Admin Ticket Endpoints ──────────────────────────────────────────────────

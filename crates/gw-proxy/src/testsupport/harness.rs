@@ -145,6 +145,7 @@ impl Harness {
             settlement.clone(),
         )
         .with_circuit_breaker(breaker.clone())
+        .with_rate_limiter(rate_limiter.clone())
         .with_catalog(catalog.clone());
         let dispatch = Arc::new(match resolver {
             Some(resolver) => dispatch.with_channel_resolver(resolver),

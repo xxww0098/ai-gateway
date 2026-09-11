@@ -22,15 +22,8 @@ impl SharedLedger {
         Self(ledger)
     }
 
-    /// The underlying ledger, for callers that need more than the port.
-    pub fn inner(&self) -> &Arc<Ledger> {
-        &self.0
-    }
-}
-
-impl From<Arc<Ledger>> for SharedLedger {
-    fn from(ledger: Arc<Ledger>) -> Self {
-        Self::new(ledger)
+    pub fn hold_ttl(&self) -> Duration {
+        self.0.hold_ttl()
     }
 }
 
@@ -44,43 +37,12 @@ pub fn map_error(err: LedgerError) -> BillingError {
     match err {
         LedgerError::InsufficientBalance => BillingError::InsufficientBalance,
         LedgerError::OutstandingDebt => BillingError::OutstandingDebt,
-        LedgerError::HoldNotFound => BillingError::HoldNotFound,
         other => BillingError::Other(anyhow::Error::new(other)),
     }
 }
 
 #[async_trait]
 impl BillingLedger for SharedLedger {
-    async fn hold(
-        &self,
-        user_id: Id,
-        amount: f64,
-        request_id: &str,
-        ttl: Duration,
-    ) -> Result<(), BillingError> {
-        self.0
-            .hold(user_id, amount, request_id, ttl)
-            .await
-            .map_err(map_error)
-    }
-
-    async fn settle(
-        &self,
-        user_id: Id,
-        request_id: &str,
-        actual_amount: f64,
-    ) -> Result<f64, BillingError> {
-        // The standalone settle reports no shortfall — it debits what it can and
-        // records the rest in `balance_logs`. The number the caller wants comes
-        // from `settle_tx`, which is what `SqlUsageStore` uses on the hot path;
-        // this method only runs for a ledger used without the usage store.
-        self.0
-            .settle(user_id, request_id, actual_amount)
-            .await
-            .map(|()| 0.0)
-            .map_err(map_error)
-    }
-
     async fn release(&self, user_id: Id, request_id: &str) -> Result<(), BillingError> {
         self.0.release(user_id, request_id).await.map_err(map_error)
     }
@@ -149,20 +111,36 @@ impl BillingLedger for SharedLedger {
             Err(err) => Err(map_error(err)),
         }
     }
+
+    async fn record_pending_hold(
+        &self,
+        user_id: Id,
+        request_id: &str,
+        amount: f64,
+    ) -> Result<(), BillingError> {
+        self.0
+            .record_pending_hold(user_id, request_id, amount)
+            .await
+            .map_err(map_error)
+    }
 }
 
 #[async_trait]
 impl StaleHoldScanner for SharedLedger {
     async fn scan_stale_holds(&self, older_than: Duration) -> anyhow::Result<Vec<StaleHold>> {
-        let stale = self.0.scan_stale_holds(older_than).await?;
+        let stale = self.0.list_pending_intents(older_than).await?;
         Ok(stale
             .into_iter()
             .map(|hold| StaleHold {
                 user_id: hold.user_id,
                 request_id: hold.request_id,
-                amount: hold.amount,
+                amount: hold.hold_amount,
             })
             .collect())
+    }
+
+    fn recovery_grace(&self) -> Duration {
+        self.hold_ttl()
     }
 }
 

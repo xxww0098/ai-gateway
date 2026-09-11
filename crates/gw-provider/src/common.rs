@@ -30,9 +30,10 @@ pub const PROVIDER_GEMINI: &str = "gemini";
 pub const PROVIDER_CODEX: &str = "codex";
 /// See [`PROVIDER_OPENAI`].
 pub const PROVIDER_VERTEX: &str = "vertex";
-/// xAI Grok OAuth executor. Tokens are also usable via the OpenAI-compatible
-/// executor when the record carries `base_url=https://api.x.ai/v1`.
-pub const PROVIDER_XAI: &str = "xai";
+/// xAI Grok OAuth executor. Stored as `grok` (not `xai`).
+pub const PROVIDER_XAI: &str = "grok";
+/// See [`PROVIDER_XAI`].
+pub const PROVIDER_GROK: &str = "grok";
 /// Kiro / AWS Builder ID. The 15-cell relay matrix has no Kiro cell, so this
 /// executor is registered for refresh and for an operator who routes to it
 /// explicitly; `/v1` candidates never include `"kiro"` today.
@@ -87,12 +88,11 @@ pub fn request_surface(req: &ProviderRequest) -> Surface {
 /// Provider-specific upstream settings.
 ///
 /// Deliberately local rather than a `gw_config` re-export: the executors need
-/// exactly these three fields.
+/// exactly these two fields.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProviderConfig {
     pub base_url: String,
     pub api_key: String,
-    pub enabled: bool,
 }
 
 /// Connection-pool settings shared by every executor client.
@@ -121,30 +121,14 @@ fn build_or_default(builder: reqwest::ClientBuilder) -> reqwest::Client {
 /// Claude answer). Stall protection comes from [`with_stream_idle_timeout`]
 /// instead.
 ///
-/// Callers that want a bounded non-streaming request can either use
-/// [`new_http_client`] or scope the cap per request with
-/// `RequestBuilder::timeout` — the latter keeps everything on this one pool
+/// Callers that want a bounded non-streaming request scope the cap per request
+/// with `RequestBuilder::timeout` — that keeps everything on this one pool
 /// (`reqwest` has no API for sharing a pool between two `Client`s).
 pub fn shared_client() -> reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT
         .get_or_init(|| build_or_default(client_builder()))
         .clone()
-}
-
-/// Alias for [`shared_client`]: a client with no whole-request timeout.
-pub fn streaming_client() -> reqwest::Client {
-    shared_client()
-}
-
-/// An executor HTTP client whose `timeout` caps the whole request, including
-/// reading the response body. For non-streaming calls only.
-///
-/// This cannot reuse [`shared_client`]'s pool — `reqwest` binds the pool to the
-/// `Client` — so prefer `shared_client().post(..).timeout(..)` when the timeout
-/// is the only reason you would build a second client.
-pub fn new_http_client(timeout: Duration) -> reqwest::Client {
-    build_or_default(client_builder().timeout(timeout))
 }
 
 /// Turns a configured timeout in seconds into a [`Duration`], falling back to
@@ -156,26 +140,6 @@ pub fn resolve_timeout(timeout_seconds: i64) -> Duration {
     } else {
         DEFAULT_TIMEOUT
     }
-}
-
-/// Estimates token count from a payload byte size.
-#[must_use]
-pub fn approximate_tokens_from_bytes(size: usize) -> i64 {
-    if size == 0 {
-        return 0;
-    }
-    size.div_ceil(4) as i64
-}
-
-/// Clips a failure payload so a persisted error body stays bounded. 4 KiB is
-/// more than enough for provider error envelopes.
-#[must_use]
-pub fn truncate_failure_body(payload: &[u8]) -> String {
-    const MAX: usize = 4 * 1024;
-    let end = payload.len().min(MAX);
-    // Never split a UTF-8 code point; `from_utf8_lossy` also tolerates the
-    // non-UTF-8 bodies some upstreams return on infrastructure errors.
-    String::from_utf8_lossy(&payload[..end]).into_owned()
 }
 
 /// Resolves the upstream-facing model name for a request.
@@ -547,7 +511,7 @@ where
 ///
 /// Callers must have rejected a failing status already — see
 /// [`crate::types::Provider::execute_stream`].
-pub fn stream_response<F>(response: reqwest::Response, build: F) -> StreamResponse
+pub(crate) fn stream_response<F>(response: reqwest::Response, build: F) -> StreamResponse
 where
     F: FnOnce(reqwest::Response, u16) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>>,
 {
@@ -653,7 +617,7 @@ where
 /// `parse` is handed **one line at a time**, not the whole body. The four
 /// provider scanners behave identically on a single line, so none of them
 /// changed when the head/tail window was replaced.
-pub fn usage_stream<S>(
+pub(crate) fn usage_stream<S>(
     body: S,
     idle: Duration,
     model: String,
@@ -673,6 +637,27 @@ where
             upstream_status,
         },
         phase: UsagePhase::Streaming,
+    })
+}
+
+/// [`stream_response`] + [`usage_stream`]，七个 executor 唯一的流式收尾组合：
+/// 接受一个已确认 2xx 的响应，挂上默认空闲看门狗与逐行 usage 探针。
+/// 各家只差 `(model, provider, parse)` 三个参数，所以组合收拢在这一处。
+pub(crate) fn relay_usage_stream(
+    response: reqwest::Response,
+    model: String,
+    provider: &'static str,
+    parse: fn(&[u8]) -> Option<UsageTokens>,
+) -> StreamResponse {
+    stream_response(response, move |response, status| {
+        usage_stream(
+            response.bytes_stream(),
+            DEFAULT_STREAM_IDLE_TIMEOUT,
+            model,
+            provider,
+            parse,
+            status,
+        )
     })
 }
 

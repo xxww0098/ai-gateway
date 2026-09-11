@@ -11,16 +11,17 @@ doctest = false          # rule 2.10: internal crate, no external example reader
 workspace = true         # rule 4.2: the table is inert without this
 
 [dependencies]
-gw-model.workspace = true
-gw-infra.workspace = true
-serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true, features = ["std"] }
 chrono = { workspace = true, features = ["clock", "std", "serde"] }
-sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chrono", "json", "macros", "rust_decimal"] }
-rust_decimal = { workspace = true, features = ["std"] }
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chrono", "json", "macros"] }
 redis = { workspace = true, features = ["tokio-comp", "connection-manager", "script", "aio"] }
 tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
 thiserror.workspace = true
 tracing = { workspace = true, features = ["std"] }
 anyhow.workspace = true
+
+# Rule 2.5: test-only — the integration harness seeds ids with uuid and runs
+# the gw-model migrations; src/ uses neither.
+[dev-dependencies]
+gw-model.workspace = true
 uuid = { workspace = true, features = ["v4", "std"] }

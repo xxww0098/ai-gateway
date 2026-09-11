@@ -331,20 +331,9 @@ export default function PaymentConfig({ embedded = true }: PaymentConfigProps) {
   const getConfig = (provider: string) => configs.find((c) => c.provider === provider)
 
   return (
-    <div
-      className={`space-y-6 max-w-4xl mx-auto ${embedded ? '' : 'animate-in fade-in duration-500 px-4 sm:px-6'}`}
-      style={embedded ? undefined : { willChange: 'transform, opacity' }}
-    >
-      {!embedded && (
-        <div>
-          <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">支付配置</h2>
-          <p className="text-gray-500 dark:text-dark-300 mt-1">
-            管理各支付渠道的接入参数、运行模式与启用状态。敏感信息将以加密形式存储。
-          </p>
-        </div>
-      )}
+    <div className={`mx-auto max-w-4xl space-y-6 ${embedded ? '' : 'px-4 sm:px-6'}`}>
       {embedded && (
-        <p className="text-sm text-gray-500 dark:text-dark-300">
+        <p className="text-sm text-muted-foreground">
           配置各支付渠道参数与启用状态。密钥以加密形式存储。
         </p>
       )}

@@ -27,7 +27,7 @@ gw-provider.workspace = true
 gw-proxy.workspace = true
 gw-panel.workspace = true
 axum = { workspace = true, features = ["http1", "http2", "json", "query", "tokio", "macros", "tracing"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync", "fs"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync"] }
 tokio-util = { workspace = true, features = ["rt"] }
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true, features = ["std"] }

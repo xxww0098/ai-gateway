@@ -135,6 +135,7 @@ async fn a_refresh_replaces_the_whole_snapshot() {
         weight: 5,
         priority: 2,
         enabled: false,
+        max_concurrent: 0,
     });
     let cache = ChannelPolicyCache::new(store.clone());
     cache.refresh().await.expect("refresh");
@@ -184,6 +185,7 @@ fn policy(auth_id: &str, weight: i64, priority: i64, enabled: bool) -> ChannelPo
         weight,
         priority,
         enabled,
+        max_concurrent: 0,
     }
 }
 

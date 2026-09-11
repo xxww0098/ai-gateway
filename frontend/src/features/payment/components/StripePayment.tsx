@@ -5,7 +5,7 @@ import { useQueryClient } from "@tanstack/react-query"
 import { getStripe } from "@/features/payment/stripe"
 import { useAuthStore } from "@/features/auth/auth_store"
 import { useStripeConfig, useCreateStripePayment } from "@/features/payment/hooks"
-import { apiClient } from "@/shared/api/client"
+import { getProfile } from "@/features/auth/api"
 import { queryKeys } from "@/shared/api/query-keys"
 import { toast } from "sonner"
 
@@ -83,14 +83,14 @@ function CheckoutForm({
   const pollBalance = useCallback(async () => {
     if (!token) return
     try {
-      const res = await apiClient.get<{ available_balance?: number; user?: { balance?: number } }>('/user/profile')
-      const balance = res?.available_balance ?? res?.user?.balance
+      const res = await queryClient.fetchQuery({
+        queryKey: queryKeys.auth.profile(),
+        queryFn: getProfile,
+      })
+      const balance = res.available_balance ?? res.user?.balance
       if (typeof balance === "number") {
         updateUser({ balance })
       }
-      // Also invalidate the profile query so the Header (driven by useProfile)
-      // picks up the new available_balance immediately.
-      void queryClient.invalidateQueries({ queryKey: queryKeys.auth.profile() })
     } catch {
       // ignore polling errors
     }

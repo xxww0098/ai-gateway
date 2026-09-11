@@ -89,7 +89,7 @@ export function AdminSubscriptionAssignDialog({ groups, onAssigned }: Props) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button className="gap-2 bg-amber-600 hover:bg-amber-700 text-white shadow-sm">
+        <Button className="gap-2 bg-amber-700 hover:bg-amber-800 text-white shadow-sm">
           <Plus className="h-4 w-4" />
           分配订阅
         </Button>
@@ -171,7 +171,7 @@ export function AdminSubscriptionAssignDialog({ groups, onAssigned }: Props) {
           <div className="flex justify-end gap-2 pt-4">
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>取消</Button>
             <Button type="submit" disabled={creating || !form.group_id || !form.funding_source}
-              className="bg-amber-600 hover:bg-amber-700">
+              className="bg-amber-700 hover:bg-amber-800">
               {creating ? "分配中..." : "确认分配"}
             </Button>
           </div>

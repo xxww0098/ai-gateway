@@ -5,9 +5,9 @@ ai-gateway：Rust + axum 实现的 LLM 中转网关，不依赖任何上游网�
 11 个 worker 分两波在**同一个 worktree**里工作。之所以能并行，全靠下面这份所有权表：
 **只写属于你的文件，绝不碰别人的。**
 
-> **工程规范以 [`docs/rust-engineering.md`](docs/rust-engineering.md) 为准（1108 行，必读）。**
-> 本文件不复述它（规则 5.6：索引文档只链接、不复述，复述出来的那份就是半年后过期的那份）。
-> 下面只列**本仓库已经做出的决定**，以及**该文档里最容易被违反的几条**。
+> 长期架构与目录落点见 [`docs/architecture.md`](docs/architecture.md)。
+> 可执行工程约束以 [`tools/xtask/src/gates.rs`](tools/xtask/src/gates.rs) 和根清单为准；下文保留工程决定与所有权约定。
+> 旧规则编号仅作索引，不代表每条文字约定都已有自动检查。
 
 ---
 
@@ -17,7 +17,7 @@ ai-gateway：Rust + axum 实现的 LLM 中转网关，不依赖任何上游网�
 | --- | --- |
 | 前端零改动 | `frontend/` 一行都不能改。后端必须复刻前端契约的 JSON 字段名、大小写、HTTP 状态码、错误体 |
 | 数据库兼容 | 表名/列名必须与既有 schema 一致，现有 Postgres 数据可直接被 Rust 读写 |
-| 计费语义不变 | Hold / Settle / Release 三段式、partial-debit shortfall、strict-usage-metadata 模式，逐条对齐 `AGENTS.md` |
+| 计费语义不变 | Hold / Settle / Release 三段式、partial-debit shortfall、strict-usage-metadata 模式保持；资金一致性改造沿用 [独立方案](specs/billing-hardening/README.md)，不混入目录整理 |
 | 不改前端 | `frontend/` 只读。后端产出全部落在 crate 里 |
 
 ## 2. 已经定下的工程决定（别改，要改先 ask）
@@ -27,8 +27,7 @@ ai-gateway：Rust + axum 实现的 LLM 中转网关，不依赖任何上游网�
 - `[profile.dev.build-override] opt-level = 3` 与 per-package 覆盖是**一对**，谁都不许只删一半（规则 3.3，实测只删一半比不改还慢：269s vs 255s，配齐是 75.8s）
 - **禁止** `[profile.*.package."*"]`（规则 3.2，反模式 #1）
 - `[workspace.dependencies]` 只钉版本 + `default-features = false`；**业务 feature 写在成员里**（规则 4.1，反模式 #24）
-- `[workspace.lints]` 已就位，每个成员都写了 `[lints] workspace = true`。当前 `clippy::todo` / `unimplemented` 是 `warn`（存量＝骨架里的 `todo!()`）；
-  **谁清空了自己 crate 的最后一个 `todo!()`，就在同一个 commit 里把它翻成 `deny`**（规则 5.3 棘轮）
+- 每个成员继承 `[workspace.lints]`；`clippy::todo` / `unimplemented` 已为 `deny`，不允许为新增占位实现放宽。实际 lint 配置以根 `Cargo.toml` 为准。
 - 内部 crate 一律 `[lib] doctest = false`（规则 2.10）
 - 薄 main、厚 lib：`gw-server` 的逻辑全在 `lib.rs`，`main.rs` 只有三行（规则 1.5 —— `tests/` 够不到 `main.rs`）
 - **绝不写 `#![deny(warnings)]`**；CI 用 `RUSTFLAGS="-D warnings"`（规则 5.3）
@@ -47,8 +46,10 @@ ai-gateway：Rust + axum 实现的 LLM 中转网关，不依赖任何上游网�
 | `ledger-pricing` | `crates/gw-ledger/**`、`crates/gw-pricing/**` |
 | `provider-openai` | `crates/gw-provider/src/{common,openai,codex,usage,streambuf}.rs` |
 | `provider-claude` | `crates/gw-provider/src/{claude,gemini,vertex}.rs` |
+| `oauth-families` | `crates/gw-oauth/**` |
 | `proxy-kernel` | `crates/gw-proxy/**` |
 | `relay` | `crates/gw-relay/**` |
+| `roles` | `crates/gw-role/**` |
 
 ### 第二波（面板，依赖第一波）
 
@@ -101,7 +102,7 @@ ai-gateway：Rust + axum 实现的 LLM 中转网关，不依赖任何上游网�
 ## 5. 你的完成标准
 
 1. `cargo check -p <你的 crate>` 与 `cargo clippy -p <你的 crate>` 干净
-2. `cargo test -p <你的 crate>` 通过，且上面第 6 节的自查两个数字对得上
+2. `cargo test -p <你的 crate>` 通过，`cargo xtask ci` 可达性门禁确认测试没有因模块移动而脱离编译
 3. 公开 API 有 doc comment，写明职责与关键不变量
 4. 你负责的公开路径不留 `todo!()`；清空了就自己上棘轮（**不用 ask 我，下面这个写法已验证可用**）：
 
@@ -118,9 +119,8 @@ ai-gateway：Rust + axum 实现的 LLM 中转网关，不依赖任何上游网�
    注意这与规则 5.3 禁止的 `#![deny(warnings)]` 不是一回事：那条禁的是**笼统**的 deny
    （rustc 升级引入新 lint 就全仓库红灯）。点名两条具体 lint 没有这个问题。
 
-   上棘轮前请自查三项，全绿再加：`grep -rn 'todo!\|unimplemented!' src/ | wc -l` 为 0；
-   `#[test]` 数量与 `cargo test -p <crate> --lib -- --list | grep -c ': test$'` 相等（规则 2.6）；
-   `cargo clippy -p <crate> --all-targets -- -D warnings` 通过。
+   用 `cargo xtask ci` 检查模块可达性，并运行 `cargo test -p <crate>` 与
+   `cargo clippy -p <crate> --all-targets -- -D warnings`；不要用 grep 测试标记数量替代实际执行。
 5. 用 `CARGO_TARGET_DIR=/tmp/cargo-<你的名字>` 跑构建，避免多人抢同一个 target 锁
 6. 用 `cargo check` 迭代，不要用 `cargo build`（规则 3.13）；**永远不要 `cargo clean`**（规则 3.8）
 

@@ -32,6 +32,27 @@ fn migrations_are_ordered_and_unique() {
     );
 }
 
+/// 运行时凭据 id / Redis 键已经硬切换到 `ai-gateway-*`。迁移可以把旧前缀
+/// **改写成**新前缀，但绝不能再写出 `cpa-gateway-` 作为新值。
+#[test]
+fn no_migration_mints_the_retired_runtime_prefix() {
+    for m in MIGRATOR.iter() {
+        for (idx, raw) in m.sql.lines().enumerate() {
+            let line = raw.trim();
+            if line.starts_with("--") {
+                continue;
+            }
+            let lower = line.to_ascii_lowercase();
+            assert!(
+                !lower.contains("= 'cpa-gateway-") && !lower.contains("= \"cpa-gateway-"),
+                "{} 第 {} 行仍在写入已退役前缀: {line}",
+                m.version,
+                idx + 1
+            );
+        }
+    }
+}
+
 /// 这份迁移的硬要求：能直接跑在「已经建过表」的库上。
 /// 换句话说每一条建表 / 建列 / 建索引都必须带 IF NOT EXISTS。
 ///

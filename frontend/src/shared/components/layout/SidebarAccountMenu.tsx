@@ -22,6 +22,7 @@ import { cn } from '@/shared/utils/utils'
 import { currentTheme, toggleTheme, type Theme } from '@/shared/theme'
 import { docsRoutes } from '@/shared/routes/docs'
 import { userRoutes } from '@/shared/routes/user'
+import { isStaff, roleLabel } from '@/shared/role_core'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -47,8 +48,9 @@ export function SidebarAccountMenu({ collapsed, onNavigate }: SidebarAccountMenu
 
   if (!user) return null
 
-  const isAdmin = user.role === 'admin'
-  const roleLabel = isAdmin ? '管理员' : '用户'
+  const isStaffUser = isStaff(user.role)
+  const isSuperAdmin = user.role === 'super_admin'
+  const currentRoleLabel = roleLabel(user.role)
 
   const go = (path: string) => {
     onNavigate()
@@ -84,20 +86,22 @@ export function SidebarAccountMenu({ collapsed, onNavigate }: SidebarAccountMenu
           <span
             className={cn(
               'flex h-8 w-8 shrink-0 items-center justify-center rounded-full shadow-sm',
-              isAdmin
+              isSuperAdmin
+                ? 'bg-amber-100 text-amber-700 dark:text-amber-400 dark:bg-amber-900/30 dark:text-amber-400'
+                : isStaffUser
                 ? 'bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400'
                 : 'bg-primary-100 text-primary-600 dark:bg-primary-900/30 dark:text-primary-400'
             )}
             aria-hidden
           >
-            {isAdmin ? <ShieldCheck className="h-4 w-4" /> : <User className="h-4 w-4" />}
+            {isStaffUser ? <ShieldCheck className="h-4 w-4" /> : <User className="h-4 w-4" />}
           </span>
           <span className={cn('min-w-0 flex-1', collapsed && 'lg:hidden')}>
             <span className="block truncate text-sm font-medium text-gray-900 dark:text-white">
               {user.email}
             </span>
             <span className="block truncate text-[11px] text-gray-400 dark:text-dark-400">
-              {roleLabel}
+              {currentRoleLabel}
             </span>
           </span>
           <ChevronsUpDown
@@ -114,7 +118,7 @@ export function SidebarAccountMenu({ collapsed, onNavigate }: SidebarAccountMenu
       >
         <DropdownMenuLabel className="font-normal space-y-1">
           <p className="text-sm font-medium text-foreground break-all">{user.email}</p>
-          <p className="text-xs text-muted-foreground">{roleLabel}</p>
+          <p className="text-xs text-muted-foreground">{currentRoleLabel}</p>
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuItem className="cursor-pointer rounded-lg" onSelect={() => { go(userRoutes.finance) }}>

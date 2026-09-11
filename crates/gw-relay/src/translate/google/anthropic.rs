@@ -22,6 +22,7 @@ use super::wire::{self, GenerateContentResponse, GenerationConfig};
 use crate::contract::{
     RelayUsage, StreamTranslator, Surface, TranslateError, Translator, UpstreamDialect,
 };
+use crate::translate::common;
 
 /// `POST /v1/messages` ↔ Google GenerateContent 的转义器。
 ///
@@ -94,7 +95,7 @@ const REQ_DROPPED: &[&str] = &["stream", "metadata"];
 const MSG_MAPPED: &[&str] = &["role", "content"];
 
 fn build_request(body: &[u8]) -> Result<Bytes, TranslateError> {
-    let root = wire::as_object(body)?;
+    let root = common::parse_object(body)?;
     wire::reject_unknown(&root, REQ_MAPPED, REQ_DROPPED, "messages")?;
 
     let messages = root
@@ -218,7 +219,7 @@ fn system_instruction(value: Option<&Value>) -> Result<Option<Vec<Value>>, Trans
         }
         Some(other) => Err(TranslateError::Malformed(format!(
             "`system` must be a string or an array of blocks, got {}",
-            wire::kind_of(other)
+            common::kind_of(other)
         ))),
     }
 }
@@ -241,7 +242,7 @@ fn content_parts(
         }
         Some(other) => Err(TranslateError::Malformed(format!(
             "message content must be a string or an array of blocks, got {}",
-            wire::kind_of(other)
+            common::kind_of(other)
         ))),
     }
 }
@@ -572,7 +573,7 @@ struct AnthropicStream {
 }
 
 impl AnthropicStream {
-    fn message_start(&mut self, resp: &GenerateContentResponse) -> Result<Bytes, TranslateError> {
+    fn message_start(&mut self, resp: &GenerateContentResponse) -> Bytes {
         self.started = true;
         if self.id.is_none() {
             self.id = Some(
@@ -598,34 +599,29 @@ impl AnthropicStream {
         message.insert("stop_reason".to_owned(), Value::Null);
         message.insert("stop_sequence".to_owned(), Value::Null);
         message.insert("usage".to_owned(), usage_value(&self.usage));
-        wire::anthropic_frame(
+        common::anthropic_frame(
             "message_start",
             &json!({ "type": "message_start", "message": Value::Object(message) }),
         )
     }
 
-    fn close_open(&mut self, frames: &mut Vec<Bytes>) -> Result<(), TranslateError> {
+    fn close_open(&mut self, frames: &mut Vec<Bytes>) {
         if let Some((index, _)) = self.open.take() {
-            frames.push(wire::anthropic_frame(
+            frames.push(common::anthropic_frame(
                 "content_block_stop",
                 &json!({ "type": "content_block_stop", "index": index }),
-            )?);
+            ));
         }
-        Ok(())
     }
 
     /// 打开一个新 block（必要时先关掉旧的），返回它的 index。
-    fn open_block(
-        &mut self,
-        kind: BlockKind,
-        frames: &mut Vec<Bytes>,
-    ) -> Result<usize, TranslateError> {
+    fn open_block(&mut self, kind: BlockKind, frames: &mut Vec<Bytes>) -> usize {
         if let Some((index, open_kind)) = self.open
             && open_kind == kind
         {
-            return Ok(index);
+            return index;
         }
-        self.close_open(frames)?;
+        self.close_open(frames);
         let index = self.next_index;
         self.next_index += 1;
         self.open = Some((index, kind));
@@ -633,11 +629,11 @@ impl AnthropicStream {
             BlockKind::Text => json!({ "type": "text", "text": "" }),
             BlockKind::Thinking => json!({ "type": "thinking", "thinking": "" }),
         };
-        frames.push(wire::anthropic_frame(
+        frames.push(common::anthropic_frame(
             "content_block_start",
             &json!({ "type": "content_block_start", "index": index, "content_block": block }),
-        )?);
-        Ok(index)
+        ));
+        index
     }
 }
 
@@ -655,7 +651,7 @@ impl StreamTranslator for AnthropicStream {
                 wire::merge_usage(&mut self.usage, meta);
             }
             if !self.started {
-                let frame = self.message_start(&resp)?;
+                let frame = self.message_start(&resp);
                 frames.push(frame);
             }
 
@@ -667,11 +663,11 @@ impl StreamTranslator for AnthropicStream {
                         // Anthropic 方言里 tool_use 仍然必须走
                         // start → input_json_delta → stop 三帧，客户端的
                         // 累加器是照这个序列写的。
-                        self.close_open(&mut frames)?;
+                        self.close_open(&mut frames);
                         self.saw_tool_call = true;
                         let index = self.next_index;
                         self.next_index += 1;
-                        frames.push(wire::anthropic_frame(
+                        frames.push(common::anthropic_frame(
                             "content_block_start",
                             &json!({
                                 "type": "content_block_start",
@@ -683,8 +679,8 @@ impl StreamTranslator for AnthropicStream {
                                     "input": {},
                                 }
                             }),
-                        )?);
-                        frames.push(wire::anthropic_frame(
+                        ));
+                        frames.push(common::anthropic_frame(
                             "content_block_delta",
                             &json!({
                                 "type": "content_block_delta",
@@ -695,11 +691,11 @@ impl StreamTranslator for AnthropicStream {
                                         .unwrap_or_else(|_| "{}".to_owned()),
                                 }
                             }),
-                        )?);
-                        frames.push(wire::anthropic_frame(
+                        ));
+                        frames.push(common::anthropic_frame(
                             "content_block_stop",
                             &json!({ "type": "content_block_stop", "index": index }),
-                        )?);
+                        ));
                     }
                     let Some(text) = part.text.as_deref() else {
                         continue;
@@ -715,13 +711,13 @@ impl StreamTranslator for AnthropicStream {
                             json!({ "type": "text_delta", "text": text }),
                         )
                     };
-                    let index = self.open_block(kind, &mut frames)?;
-                    frames.push(wire::anthropic_frame(
+                    let index = self.open_block(kind, &mut frames);
+                    frames.push(common::anthropic_frame(
                         "content_block_delta",
                         &json!({
                             "type": "content_block_delta", "index": index, "delta": delta
                         }),
-                    )?);
+                    ));
                 }
             }
 
@@ -751,25 +747,25 @@ impl StreamTranslator for AnthropicStream {
         if !self.started {
             // 一帧内容都没产出的流仍然要给客户端一个语法完整的信封，
             // 否则就是缺陷 #6 那种「干净的 EOF」。
-            let frame = self.message_start(&GenerateContentResponse::default())?;
+            let frame = self.message_start(&GenerateContentResponse::default());
             frames.push(frame);
         }
-        self.close_open(&mut frames)?;
+        self.close_open(&mut frames);
 
         let raw = self.stop_reason.as_deref().unwrap_or("STOP");
         let stop_reason = wire::anthropic_stop_reason(raw, self.saw_tool_call);
-        frames.push(wire::anthropic_frame(
+        frames.push(common::anthropic_frame(
             "message_delta",
             &json!({
                 "type": "message_delta",
                 "delta": { "stop_reason": stop_reason, "stop_sequence": Value::Null },
                 "usage": usage_value(&self.usage),
             }),
-        )?);
-        frames.push(wire::anthropic_frame(
+        ));
+        frames.push(common::anthropic_frame(
             "message_stop",
             &json!({ "type": "message_stop" }),
-        )?);
+        ));
         Ok(frames)
     }
 

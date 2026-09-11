@@ -45,25 +45,7 @@ impl UsageStore for SqlUsageStore {
     async fn commit_settlement(&self, commit: &SettlementCommit) -> anyhow::Result<SettleReceipt> {
         let mut tx = self.db.begin().await?;
 
-        // The reconcile path's idempotency guard. Re-checked HERE, inside the
-        // transaction, rather than by the caller beforehand: two reconcilers
-        // racing on the same orphaned hold would both see "no row" outside it
-        // and both charge.
-        if commit.skip_if_already_logged {
-            // `(i32,)`, not `(i64,)`: the literal `1` is INT4, and sqlx checks
-            // the wire type rather than widening.
-            let existing: Option<(i32,)> =
-                sqlx::query_as("SELECT 1 FROM usage_logs WHERE request_id = $1 LIMIT 1")
-                    .bind(&commit.request_id)
-                    .fetch_optional(&mut *tx)
-                    .await?;
-            if existing.is_some() {
-                tx.rollback().await?;
-                return Ok(SettleReceipt::AlreadySettled);
-            }
-        }
-
-        let outcome = self
+        let outcome = match self
             .ledger
             .settle_tx(
                 &mut tx,
@@ -71,7 +53,14 @@ impl UsageStore for SqlUsageStore {
                 &commit.request_id,
                 commit.actual_cost,
             )
-            .await?;
+            .await
+        {
+            Err(gw_ledger::LedgerError::AlreadySettled) => {
+                tx.rollback().await?;
+                return Ok(SettleReceipt::AlreadySettled);
+            }
+            other => other?,
+        };
 
         // Read the balance back inside the same transaction so it reflects the
         // debit above; the pre-settle figure is what the balance actually lost.
@@ -126,6 +115,7 @@ impl UsageStore for SqlUsageStore {
             shortfall: outcome.shortfall,
             balance_before,
             balance_after,
+            balance_version: outcome.balance_version,
         })
     }
 
@@ -149,8 +139,16 @@ impl UsageStore for SqlUsageStore {
         Ok(())
     }
 
-    async fn clear_hold(&self, user_id: Id, request_id: &str) -> anyhow::Result<()> {
-        Ok(self.ledger.clear_hold(user_id, request_id).await?)
+    async fn clear_hold(
+        &self,
+        user_id: Id,
+        request_id: &str,
+        published: Option<(f64, i64)>,
+    ) -> anyhow::Result<()> {
+        Ok(self
+            .ledger
+            .clear_hold(user_id, request_id, published)
+            .await?)
     }
 
     async fn model_usage_since(

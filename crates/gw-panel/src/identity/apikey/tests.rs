@@ -69,26 +69,6 @@ fn list_item_emits_group_id_when_bound() {
 }
 
 #[test]
-fn admin_item_uses_prefix_not_key_prefix() {
-    // 管理员视图和用户视图的键名**故意不同**（旧实现里就是两套 gin.H）。
-    // 统一它们会悄悄改掉管理员页面读的字段。
-    let json = serde_json::to_value(AdminApiKeyItem {
-        id: 3,
-        name: "n".into(),
-        prefix: "agw-abc".into(),
-        status: "active".into(),
-        quota: 0,
-        quota_used: 0,
-        created_at: chrono::Utc::now(),
-    })
-    .expect("serialise");
-    let obj = json.as_object().expect("object");
-    assert!(obj.contains_key("prefix"));
-    assert!(!obj.contains_key("key_prefix"));
-    assert!(!obj.contains_key("key"), "管理员视图不该出现任何密钥字段");
-}
-
-#[test]
 fn rebind_request_distinguishes_unbind_from_absent_field() {
     // `{"group_id": null}` 与 `{}` 在旧实现里都解成 nil 指针 → 都表示解绑。
     // 这条是刻意的：前端的"取消绑定"按钮发的就是显式 null。

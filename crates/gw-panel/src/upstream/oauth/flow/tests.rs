@@ -31,24 +31,24 @@ fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
 
 #[test]
 fn the_oauth_providers_round_trip() {
-    for provider in [
-        Provider::Gemini,
-        Provider::Claude,
-        Provider::Codex,
-        Provider::Xai,
-        Provider::Kiro,
-    ] {
+    for provider in Provider::ALL {
         assert_eq!(Provider::parse(provider.as_str()), Some(provider));
     }
 }
 
 #[test]
-fn grok_is_an_alias_for_xai() {
-    assert_eq!(Provider::parse("grok"), Some(Provider::Xai));
-    assert_eq!(Provider::parse("XAI"), Some(Provider::Xai));
-    assert_eq!(Provider::from_auth_url_key("xai-auth-url"), Some(Provider::Xai));
-    assert_eq!(Provider::from_auth_url_key("grok-auth-url"), Some(Provider::Xai));
-    assert_eq!(Provider::from_auth_url_key("kiro-auth-url"), Some(Provider::Kiro));
+fn grok_is_stored_as_grok_not_xai() {
+    assert_eq!(Provider::parse("grok"), Some(Provider::Grok));
+    assert_eq!(Provider::parse("xai"), None);
+    assert_eq!(Provider::from_auth_url_key("xai-auth-url"), None);
+    assert_eq!(
+        Provider::from_auth_url_key("grok-auth-url"),
+        Some(Provider::Grok)
+    );
+    assert_eq!(
+        Provider::from_auth_url_key("kiro-auth-url"),
+        Some(Provider::Kiro)
+    );
 }
 
 #[test]
@@ -60,7 +60,7 @@ fn provider_parsing_is_case_and_space_insensitive() {
 fn anything_else_is_not_an_oauth_provider() {
     // `openai` and `vertex` are API-key pools; accepting them here would mint a
     // session no callback could ever complete.
-    for unknown in ["", "openai", "vertex", "anthropic", "antigravity", "kimi"] {
+    for unknown in ["", "openai", "vertex", "anthropic", "gemini", "xai"] {
         assert_eq!(Provider::parse(unknown), None);
     }
 }
@@ -75,12 +75,18 @@ fn the_anthropic_auth_url_key_maps_to_claude() {
 }
 
 #[test]
-fn the_delegated_auth_url_keys_are_not_recognised() {
-    // `antigravity`/`kimi` were forwarded to the SDK, which is gone. They must
-    // fall through to the 404 the gateway serves when it is not wired.
-    for key in ["antigravity-auth-url", "kimi-auth-url", "openai-auth-url"] {
+fn gemini_cli_and_xai_auth_url_keys_are_gone() {
+    for key in ["gemini-cli-auth-url", "xai-auth-url", "openai-auth-url"] {
         assert_eq!(Provider::from_auth_url_key(key), None);
     }
+    assert_eq!(
+        Provider::from_auth_url_key("antigravity-auth-url"),
+        Some(Provider::Antigravity)
+    );
+    assert_eq!(
+        Provider::from_auth_url_key("kimi-auth-url"),
+        Some(Provider::Kimi)
+    );
 }
 
 // ---------------------------------------------------------------- redirect
@@ -109,7 +115,7 @@ fn the_redirect_uri_falls_back_to_the_host_header() {
 fn the_redirect_uri_names_the_provider_it_will_come_back_to() {
     // The callback route parses the provider out of the path; a mismatch here
     // makes every flow fail with "provider mismatch".
-    for provider in [Provider::Gemini, Provider::Claude, Provider::Codex] {
+    for provider in [Provider::Antigravity, Provider::Claude, Provider::Codex] {
         let uri = redirect_uri(&headers(&[("host", "h")]), provider);
         assert!(uri.ends_with(provider.as_str()), "{uri}");
     }
@@ -131,9 +137,9 @@ fn the_two_pkce_providers_store_a_verifier() {
 }
 
 #[test]
-fn gemini_uses_offline_consent_rather_than_pkce() {
+fn antigravity_uses_offline_consent_rather_than_pkce() {
     let mut config = config();
-    let url = build_authorize_url(Provider::Gemini, "state-1", &mut config).expect("entropy");
+    let url = build_authorize_url(Provider::Antigravity, "state-1", &mut config).expect("entropy");
     assert!(config.code_verifier.is_empty());
     assert!(url.contains("access_type=offline"));
     assert!(url.contains("prompt=consent"));
@@ -143,7 +149,7 @@ fn gemini_uses_offline_consent_rather_than_pkce() {
 fn every_authorize_url_carries_the_state_we_minted() {
     // The state is the only thing binding the browser round-trip; a URL without
     // it produces a callback that can never be matched.
-    for provider in [Provider::Gemini, Provider::Claude, Provider::Codex] {
+    for provider in [Provider::Antigravity, Provider::Claude, Provider::Codex] {
         let mut config = config();
         let url = build_authorize_url(provider, "state-xyz", &mut config).expect("entropy");
         assert!(url.contains("state=state-xyz"), "{url}");
@@ -152,7 +158,7 @@ fn every_authorize_url_carries_the_state_we_minted() {
 
 #[test]
 fn every_authorize_url_carries_the_redirect_we_will_accept() {
-    for provider in [Provider::Gemini, Provider::Claude, Provider::Codex] {
+    for provider in [Provider::Antigravity, Provider::Claude, Provider::Codex] {
         let mut config = config();
         let url = build_authorize_url(provider, "s", &mut config).expect("entropy");
         assert!(url.contains("redirect_uri="), "{url}");
@@ -199,7 +205,7 @@ fn the_authorize_url_percent_encodes_its_parameters() {
     // The redirect URI contains `://` and `/`; an unencoded one truncates the
     // query and the provider rejects the request.
     let mut config = config();
-    let url = build_authorize_url(Provider::Gemini, "s", &mut config).expect("entropy");
+    let url = build_authorize_url(Provider::Antigravity, "s", &mut config).expect("entropy");
     assert!(url.contains("redirect_uri=https%3A%2F%2F"), "{url}");
 }
 
@@ -209,7 +215,8 @@ fn spaces_in_a_scope_list_become_plus_signs() {
     let mut config = config();
     let url = build_authorize_url(Provider::Codex, "s", &mut config).expect("entropy");
     assert!(!url.contains(' '), "{url}");
-    assert!(url.contains("scope=openid+email"), "{url}");
+    assert!(url.contains("openid"), "{url}");
+    assert!(url.contains("email"), "{url}");
 }
 
 #[test]

@@ -15,8 +15,8 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::common::{
-    DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_CLAUDE, ProviderConfig, nested_string, requested_model,
-    resolve_timeout, shared_client, stream_response, string_from_map, usage_stream,
+    PROVIDER_CLAUDE, ProviderConfig, nested_string, relay_usage_stream, requested_model,
+    resolve_timeout, shared_client, string_from_map,
 };
 use crate::types::{
     Provider, ProviderError, ProviderRequest, ProviderResponse, StreamResponse,
@@ -75,17 +75,6 @@ pub enum CredentialSource {
     OauthToken,
 }
 
-impl CredentialSource {
-    /// The wire name this source maps to.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::ApiKey => "api_key",
-            Self::OauthToken => "oauth_token",
-        }
-    }
-}
-
 /// Body of `POST /v1/oauth/token`.
 #[derive(Debug, Default, Deserialize)]
 struct ClaudeRefreshResponse {
@@ -122,12 +111,6 @@ impl ClaudeProvider {
             timeout: resolve_timeout(timeout_seconds),
             client: shared_client(),
         })
-    }
-
-    /// The configured upstream base URL.
-    #[must_use]
-    pub fn base_url(&self) -> &str {
-        &self.base_url
     }
 
     /// Resolves the credential and base URL for one request.
@@ -399,16 +382,12 @@ impl Provider for ClaudeProvider {
             let body = response.bytes().await.unwrap_or_default();
             return Err(upstream_error(status, &body));
         }
-        Ok(stream_response(response, move |response, status| {
-            usage_stream(
-                response.bytes_stream(),
-                DEFAULT_STREAM_IDLE_TIMEOUT,
-                model,
-                PROVIDER_CLAUDE,
-                parse_claude_stream_usage,
-                status,
-            )
-        }))
+        Ok(relay_usage_stream(
+            response,
+            model,
+            PROVIDER_CLAUDE,
+            parse_claude_stream_usage,
+        ))
     }
 
     /// A record with no refresh token is a plain API-key record: it is only
@@ -459,7 +438,7 @@ impl Provider for ClaudeProvider {
     ///
     /// 这里原来返回 `payload.len() / 4` —— 一个和真实 tokenizer 毫无关系的
     /// **伪造值**（`docs/relay-surface-plan.md` §2.1 缺陷 ①：五个 provider 的实现
-    /// 全是同一句 `approximate_tokens_from_bytes`，没有任何一个真的去问上游）。
+    /// 全是同一句字节数除以 4 的估算，没有任何一个真的去问上游）。
     /// 更糟的是那个假数还在按 LLM 价格计费（同节缺陷 ②，计费范围的修复归 `gw-proxy`）。
     ///
     /// 五个 provider 里只有 Anthropic 这一家的上游真的有计数端点，而
@@ -658,10 +637,15 @@ pub(crate) mod shared {
     }
 
     /// Fills in the `Content-Type` / `Accept` defaults after inbound headers
-    /// have been copied.
+    /// have been copied, and pins `Accept-Encoding: identity`.
     ///
     /// Streaming pins `Accept` outright because the caller's value describes
     /// the *client* leg, not the upstream one.
+    ///
+    /// `Accept-Encoding` is always `identity`: a client `gzip` preference
+    /// forwarded upstream makes the usage probe read the gzip magic bytes,
+    /// so every unary call falls through to estimate/strict instead of
+    /// real token counts (`gw-relay` headers.rs, defect #5).
     pub(crate) fn default_content_negotiation(headers: &mut HeaderMap, stream: bool) {
         if !headers.contains_key(header::CONTENT_TYPE) {
             headers.insert(
@@ -677,6 +661,10 @@ pub(crate) mod shared {
         } else if !headers.contains_key(header::ACCEPT) {
             headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
         }
+        headers.insert(
+            header::ACCEPT_ENCODING,
+            HeaderValue::from_static("identity"),
+        );
     }
 
     /// Wraps a non-2xx upstream response.

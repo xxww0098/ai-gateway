@@ -5,9 +5,12 @@
 //! # 只有一条入账路径，而且它是幂等的
 //!
 //! [`settle_payment_order`] 是订单变成余额的**唯一**出口，管理员人工确认和 Stripe
-//! 回调（[`super::stripe`]）都走它。幂等靠 `UPDATE … WHERE status = 'pending'`：
-//! 只有抢到那一行的调用者会去 `Credit`，重复确认/重复回调是 no-op，跨副本也成立。
-//! 账本失败时把 `pending` 抢回来，好让下一次重试能继续。
+//! 回调（[`super::stripe`]）都走它。幂等靠**单一事务**：锁住订单行后，pending 和
+//! paid 两种状态都走 [`Ledger::credit_tx`]（事务内按 reference 预查 +
+//! `0010` 的分区唯一索引把重复入账挡在库里），只有 pending 在入账后翻 `paid`。
+//! 已 paid 但缺流水的历史行由重试补入恰好一次；不存在 `paid→pending` 的补偿 ——
+//! 那会制造 "credit 已提交、状态被改回 pending、重试再 credit" 的窗口。任何失败
+//! 都回滚整个事务，订单保持原状；暂时性失败可重试，用户/金额冲突需先对账。
 //!
 //! # 三个渠道目前都是本地模拟
 //!
@@ -22,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use gw_infra::Db;
-use gw_ledger::Ledger;
+use gw_ledger::{BalanceChange, Ledger};
 
 use crate::audit::Actor;
 use crate::identity::oplog::ReqMeta;
@@ -143,10 +146,14 @@ pub fn parse_public_order_id(raw: &str) -> Option<(&str, i64)> {
     i64::try_from(id).ok().map(|id| (provider, id))
 }
 
-/// 把一张 `pending` 订单标记为已付，并通过账本给用户入账。**幂等**。
+/// 把一张订单标记为已付，并通过账本给用户入账。**幂等**。
 ///
-/// Ports `PanelRouter.settlePaymentOrder`。返回 `Ok(true)` 表示"这次调用真的入账
-/// 了"，`Ok(false)` 表示"这张单已经结过了"（重复确认/重复回调）——**不是错误**。
+/// Ports `PanelRouter.settlePaymentOrder`。整个结算在**一个事务**里完成：锁住
+/// 订单行，pending 与 paid 两种状态都调用 [`Ledger::credit_tx`]（入账与订单状态
+/// 原子；已 paid 但缺流水的历史行由同一事务补入恰好一次），只有 pending 在入账后
+/// 翻 `paid`。返回 `Ok(true)` 表示"这次调用真的动了钱"，`Ok(false)` 表示
+/// "没有新入账"（订单不存在、状态不可处理，或入账早已发生过）——**不是错误**。
+/// 任何失败都回滚整个事务，订单保持原状，调用方重试即可。
 ///
 /// 参数是 `(&Db, &Ledger)` 而不是 `&PanelState`：这条路径是整个 crate 里最该被
 /// 连库测试盯住的一段，而 `PanelState` 还拖着 Redis 连接、定价缓存、凭据仓库 ——
@@ -154,58 +161,80 @@ pub fn parse_public_order_id(raw: &str) -> Option<(&str, i64)> {
 /// 能把幂等性验完（`Ledger::new(pg, None)` 本来就允许没有 Redis）。
 ///
 /// # Errors
-/// 数据库或账本失败。账本失败时这里已经把 `paid` 改回 `pending`，调用方重试即可。
+/// 数据库或账本失败。事务已整体回滚，调用方重试即可。
 pub async fn settle_payment_order(
     pg: &Db,
     ledger: &Ledger,
     order_id: i64,
 ) -> Result<bool, SettleError> {
-    // 条件 UPDATE 就是那把锁：并发/重复调用里只有一个能把 pending 翻成 paid。
-    let claimed = sqlx::query(
-        "UPDATE payment_orders SET status = $2, paid_at = $3, updated_at = $3 \
-         WHERE id = $1 AND status = $4",
+    let mut tx = pg.begin().await.map_err(SettleError::Db)?;
+
+    // 锁序：订单行 -> 用户行（credit_tx 内）-> balance_logs。订单行锁同时把
+    // 同一张单的并发确认 / 回调全部串行化，后面的 credit_tx 预查因此不会与
+    // 另一个结算竞态。
+    let order: Option<(i64, String, f64)> = sqlx::query_as(
+        "SELECT user_id, COALESCE(status,''), COALESCE(amount_usd,0)::float8 \
+         FROM payment_orders WHERE id = $1 FOR UPDATE",
     )
     .bind(order_id)
-    .bind(STATUS_PAID)
-    .bind(Utc::now())
-    .bind(STATUS_PENDING)
-    .execute(pg)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(SettleError::Db)?;
 
-    if claimed.rows_affected() == 0 {
+    let Some((user_id, status, amount_usd)) = order else {
+        // 订单不存在：按"没有新入账"处理。webhook 侧继续 200，管理员侧的
+        // 404 由 admin_confirm 自己的预读负责。
+        return Ok(false);
+    };
+
+    // 只有 pending / paid 是可处理状态；其它（手工写坏的 status）一律按
+    // "已结过"返回，不碰钱。
+    let is_pending = status == STATUS_PENDING;
+    if !is_pending && status != STATUS_PAID {
         return Ok(false);
     }
 
-    let order: Option<(i64, f64)> = sqlx::query_as(
-        "SELECT user_id, COALESCE(amount_usd,0)::float8 FROM payment_orders WHERE id = $1",
-    )
-    .bind(order_id)
-    .fetch_optional(pg)
-    .await
-    .map_err(SettleError::Db)?;
-    let Some((user_id, amount_usd)) = order else {
-        return Err(SettleError::Vanished);
-    };
-
-    if let Err(error) = ledger
-        .credit(user_id, amount_usd, &format!("payment_order:{order_id}"))
+    // pending 与 paid 都走同一个入账：pending 是首次入账，paid 是对历史
+    // "已付但缺流水"行的恰好一次补入（credit_tx 的预查 / 0010 唯一索引挡住
+    // 一切重复）。
+    let outcome = ledger
+        .credit_tx(
+            &mut tx,
+            user_id,
+            amount_usd,
+            &format!("payment_order:{order_id}"),
+        )
         .await
-    {
-        // 把认领退回去，这样重试还能继续。不退的话订单永远停在 paid 而余额没到账。
-        let _ = sqlx::query(
-            "UPDATE payment_orders SET status = $2, paid_at = NULL, updated_at = $3 \
-             WHERE id = $1 AND status = $4",
+        .map_err(|error| SettleError::Ledger(error.to_string()))?;
+
+    if is_pending {
+        // 只有 pending 翻状态；paid 修复路径保留既有时间戳。
+        sqlx::query(
+            "UPDATE payment_orders SET status = $2, paid_at = $3, updated_at = $3 \
+             WHERE id = $1",
         )
         .bind(order_id)
-        .bind(STATUS_PENDING)
-        .bind(Utc::now())
         .bind(STATUS_PAID)
-        .execute(pg)
-        .await;
-        return Err(SettleError::Ledger(error.to_string()));
+        .bind(Utc::now())
+        .execute(&mut *tx)
+        .await
+        .map_err(SettleError::Db)?;
     }
-    Ok(true)
+
+    tx.commit().await.map_err(SettleError::Db)?;
+
+    if let BalanceChange::Applied {
+        balance_after,
+        balance_version,
+    } = outcome
+    {
+        let _ = ledger
+            .publish_balance(user_id, balance_after, balance_version)
+            .await;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 /// [`settle_payment_order`] 的失败原因。
@@ -214,10 +243,7 @@ pub enum SettleError {
     /// 查询/更新失败。
     #[error(transparent)]
     Db(sqlx::Error),
-    /// 抢到了 pending，回头却读不到这一行 —— 只可能是并发删除。
-    #[error("payment order disappeared mid-settlement")]
-    Vanished,
-    /// 账本入账失败；认领已回滚。
+    /// 账本入账失败；整个事务已回滚。
     #[error("ledger credit failed: {0}")]
     Ledger(String),
 }
@@ -227,11 +253,6 @@ pub enum SettleError {
 /// 管理员查询里 `user_id = 0` 表示不过滤。用户路径绝不能落到这个哨兵，
 /// 否则 `?user_id=` 或漏绑会把全站订单交出去。
 const UNSCOPED_USER_ID: i64 = 0;
-
-/// 用户订单列表永远绑登录身份；查询串里的 `user_id` 无效。
-fn own_orders_user_id(auth_id: i64, _query_user_id: Option<&str>) -> i64 {
-    auth_id
-}
 
 async fn list_orders_page(
     pg: &Db,
@@ -298,7 +319,9 @@ pub async fn list_own(
         ADMIN_ORDERS_DEFAULT_PAGE_SIZE,
     );
     let status = params.get("status").map(|s| s.trim()).unwrap_or_default();
-    let user_id = own_orders_user_id(user.user_id, params.get("user_id").map(String::as_str));
+    // `?user_id=` 即使带了也丢掉，只看登录身份 —— 0 是管理员的「不过滤」哨兵，
+    // 用户路径绝不能落到它上面。
+    let user_id = user.user_id;
     orders_response(
         list_orders_page(&state.pg, "", status, user_id, page, page_size).await,
         page,

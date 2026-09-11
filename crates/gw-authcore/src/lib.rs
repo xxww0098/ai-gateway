@@ -33,7 +33,7 @@ pub mod token_version;
 pub use apikey::{API_KEY_PREFIX, KEY_PREFIX_LEN, api_key_prefix, hash_api_key, new_api_key};
 pub use credcrypto::{CRED_ENC_ENVELOPE_KEY, CredentialCipher};
 pub use error::AuthError;
-pub use jwt::{Claims, generate_jwt, generate_jwt_with_version, validate_jwt};
+pub use jwt::{Claims, generate_jwt_with_version, validate_jwt};
 pub use password::{BCRYPT_COST, hash_password, verify_password};
 pub use record::{AuthRecord, AuthStatus, AuthStore};
 pub use runtime::{RuntimeAuthStore, build_runtime_upstreams};

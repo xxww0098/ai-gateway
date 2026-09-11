@@ -106,8 +106,15 @@ describe('SidebarAccountMenu', () => {
   it('shows the signed-in identity on the trigger and keeps actions out of the closed footer', () => {
     const container = mount()
     expect(triggerOf(container).textContent).toContain(fixtureUser.email)
+    expect(triggerOf(container).textContent).toContain('用户')
     expect(document.querySelector('[role="menu"]')).toBeNull()
     expect(menuItems()).toHaveLength(0)
+  })
+
+  it('renders 超级管理员 for super_admin role', () => {
+    useAuthStore.setState({ token: 'tok', user: { ...fixtureUser, role: 'super_admin' as const } })
+    const container = mount()
+    expect(triggerOf(container).textContent).toContain('超级管理员')
   })
 
   it('opens a popup whose destinations include finance, tickets, keys, and docs', () => {

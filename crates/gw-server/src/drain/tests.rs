@@ -103,7 +103,7 @@ fn the_timeout_is_the_hold_ttl_capped_by_the_grace_period() {
     assert_eq!(drain_timeout(&brief.billing), Duration::from_secs(5));
 
     // Unset/zero falls back to the ledger's own default (5 min), still capped.
-    let unset = Config::parse_yaml("billing:\n  hold_amount: 1\n").expect("yaml");
+    let unset = Config::parse_yaml("billing:\n  hold_ttl_seconds: 0\n").expect("yaml");
     assert_eq!(drain_timeout(&unset.billing), DRAIN_TIMEOUT_CAP);
 }
 

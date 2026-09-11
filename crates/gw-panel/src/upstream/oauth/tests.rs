@@ -59,7 +59,7 @@ fn a_null_status_column_is_not_pending() {
 
 #[test]
 fn the_session_config_never_serialises_an_absent_verifier() {
-    // Gemini's row has no PKCE; emitting `"code_verifier": ""` would suggest
+    // Antigravity's row has no PKCE; emitting `"code_verifier": ""` would suggest
     // there is one and that it is empty.
     let encoded = serde_json::to_value(SessionConfig::default()).expect("serializes");
     let object = encoded.as_object().expect("object");
@@ -138,4 +138,44 @@ fn a_query_parameter_outranks_the_body() {
     assert_eq!(first_non_empty(None, "from-body"), "from-body");
     assert_eq!(first_non_empty(Some("  "), "from-body"), "from-body");
     assert!(first_non_empty(None, "  ").is_empty());
+}
+
+#[test]
+fn the_wait_payload_republishes_the_device_code_on_every_poll() {
+    // 控制台是无状态轮询的：user_code 只在 start 时给一次的话，刷新页面就再也
+    // 看不到要输的码了。
+    let config = SessionConfig {
+        flow: "device".to_owned(),
+        user_code: "WDJB-MJHT".to_owned(),
+        verification_uri: "https://auth.x.ai/device".to_owned(),
+        verification_uri_complete: "https://auth.x.ai/device?user_code=WDJB-MJHT".to_owned(),
+        interval: 5,
+        ..SessionConfig::default()
+    };
+    let payload = device_wait_payload("xai", &config);
+    assert_eq!(payload["status"], json!("wait"));
+    assert_eq!(payload["provider"], json!("xai"));
+    assert_eq!(payload["user_code"], json!("WDJB-MJHT"));
+    assert_eq!(payload["interval"], json!(5));
+    assert_eq!(payload["flow"], json!("device"));
+}
+
+#[test]
+fn a_pkce_session_still_waits_under_the_device_flow_name() {
+    // flow 为空的 PKCE 会话也要给出一个 status，前端只认 wait/success/error。
+    let payload = device_wait_payload("claude", &SessionConfig::default());
+    assert_eq!(payload["status"], json!("wait"));
+    assert_eq!(payload["flow"], json!("device"));
+}
+
+#[test]
+fn a_kiro_authcode_session_reports_its_own_flow() {
+    let config = SessionConfig {
+        flow: "authorization_code".to_owned(),
+        ..SessionConfig::default()
+    };
+    assert_eq!(
+        device_wait_payload("kiro", &config)["flow"],
+        json!("authorization_code")
+    );
 }

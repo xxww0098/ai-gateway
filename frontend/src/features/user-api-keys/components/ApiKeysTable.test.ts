@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { maskApiKeyDisplay } from './ApiKeysTable'
+import { maskApiKeyDisplay } from '../mask'
 
 describe('maskApiKeyDisplay', () => {
   it('masks agw- and sk-agw- prefixes', () => {

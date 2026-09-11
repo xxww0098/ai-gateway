@@ -6,23 +6,10 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/sha
 import { Button } from "@/shared/components/ui/button"
 import { Textarea } from "@/shared/components/ui/textarea"
 import { Alert, AlertDescription } from "@/shared/components/ui/alert"
-import { ArrowLeft, ArrowLeftRight, Calculator, CalendarDays, AlertTriangle, CheckCircle2 } from "lucide-react"
+import { ArrowLeft, Calculator, CalendarDays, AlertTriangle, CheckCircle2 } from "lucide-react"
 import { userRoutes } from "@/shared/routes/user"
-
-interface Subscription {
-  id: number
-  group_name?: string
-  status: string
-  starts_at: string
-  expires_at: string
-  price_paid: number
-}
-
-interface RefundRecord {
-  id: number
-  subscription_id: number
-  status: string
-}
+import { useSubscriptionOrders } from "@/features/user-orders"
+import type { Subscription, RefundRecord } from "@/features/user-orders"
 
 function daysBetween(a: string | Date, b: string | Date): number {
   const d1 = new Date(a).getTime()
@@ -60,11 +47,9 @@ export default function RefundApply() {
   const [searchParams] = useSearchParams()
   const preselectedId = parseInt(searchParams.get("subscription_id") || "0", 10)
 
-  const [subs, setSubs] = useState<Subscription[]>([])
-  const [refunds, setRefunds] = useState<RefundRecord[]>([])
+  const { subs, refunds, loading } = useSubscriptionOrders()
   const [selectedId, setSelectedId] = useState<number>(preselectedId)
   const [reason, setReason] = useState("")
-  const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [submitted, setSubmitted] = useState(false)
 
@@ -79,38 +64,16 @@ export default function RefundApply() {
     return !hasRefund
   }, [])
 
-  const loadData = useCallback(async () => {
-    setLoading(true)
-    try {
-      const [subsRes, refundsRes] = await Promise.all([
-        fetchApi("/user/subscriptions"),
-        fetchApi("/refund/list").catch(() => ({ data: { items: [] } })),
-      ])
-      const subscriptions = subsRes?.data || []
-      setSubs(subscriptions)
-      setRefunds(refundsRes?.data?.items || [])
-
-      const preselected = subscriptions.find((s: Subscription) => s.id === preselectedId)
-      if (!preselected || !isRefundable(preselected, refundsRes?.data?.items || [])) {
-        const firstRefundable = subscriptions.find((s: Subscription) =>
-          isRefundable(s, refundsRes?.data?.items || [])
-        )
-        if (firstRefundable) {
-          setSelectedId(firstRefundable.id)
-        } else {
-          setSelectedId(0)
-        }
-      }
-    } catch (err: unknown) {
-      toast.error(errorMessage(err, "加载失败"))
-    } finally {
-      setLoading(false)
-    }
-  }, [isRefundable, preselectedId])
-
   useEffect(() => {
-    loadData()
-  }, [loadData])
+    if (loading) return
+    setSelectedId(prev => {
+      const current = subs.find(s => s.id === prev)
+      if (current && isRefundable(current, refunds)) return prev
+      const preselected = subs.find(s => s.id === preselectedId)
+      if (preselected && isRefundable(preselected, refunds)) return preselected.id
+      return subs.find(s => isRefundable(s, refunds))?.id ?? 0
+    })
+  }, [loading, subs, refunds, preselectedId, isRefundable])
 
   const selectedSub = subs.find((s) => s.id === selectedId)
   const calc = selectedSub ? calculateRefund(selectedSub) : null
@@ -156,7 +119,7 @@ export default function RefundApply() {
 
   if (submitted) {
     return (
-      <div className="max-w-2xl mx-auto space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+      <div className="mx-auto max-w-2xl space-y-6">
         <Button variant="ghost" className="gap-1 -ml-3" onClick={() => navigate(userRoutes.subscriptions)}>
           <ArrowLeft className="w-4 h-4" />
           返回订阅
@@ -202,21 +165,11 @@ export default function RefundApply() {
   }
 
   return (
-    <div className="max-w-2xl mx-auto space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <Button variant="ghost" className="gap-1 -ml-3" onClick={() => navigate(userRoutes.subscriptions)}>
-        <ArrowLeft className="w-4 h-4" />
+    <div className="mx-auto max-w-2xl space-y-6">
+      <Button variant="ghost" className="-ml-3 gap-1" onClick={() => navigate(userRoutes.subscriptions)}>
+        <ArrowLeft className="h-4 w-4" />
         返回我的订阅
       </Button>
-
-      <div>
-        <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white flex items-center gap-2">
-          <ArrowLeftRight className="w-6 h-6 text-primary" />
-          申请退订
-        </h2>
-        <p className="text-gray-500 dark:text-dark-300 mt-1">
-          选择要退订的订阅，系统将根据剩余天数自动计算可退金额。退订后对应订阅权益将取消，款项将退回您的账户余额。
-        </p>
-      </div>
 
       <Card className="shadow-sm border-border">
         <CardHeader>

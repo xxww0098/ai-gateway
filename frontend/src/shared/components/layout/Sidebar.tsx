@@ -5,14 +5,15 @@ import {
   LayoutDashboard, Key,
   Settings, Cpu, FileBarChart, Crown,
   ShoppingCart, Ticket, Wallet,
-  Users, Network, CreditCard, BarChart3,
-  ClipboardList, ShieldAlert,
+  Network, CreditCard, BarChart3,
+  ClipboardList, ShieldAlert, ShieldCheck,
 } from 'lucide-react'
 import { useEffect } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { cn } from '@/shared/utils/utils'
 import { adminRoutes } from '@/shared/routes/admin'
 import { userRoutes } from '@/shared/routes/user'
+import { isStaff } from '@/shared/role_core'
 import { SidebarAccountMenu } from './SidebarAccountMenu'
 
 type NavLinkItem = {
@@ -62,11 +63,11 @@ export function Sidebar() {
     { label: '工单', path: userRoutes.tickets, icon: Ticket },
   ]
 
-  // Admin nav: 8 items — commerce merges 支付订单 + 退款审核
-  const adminNavs: NavLinkItem[] = user?.role === 'admin'
+  // Admin nav: 8 items — credentials separated from channels
+  const adminNavs: NavLinkItem[] = isStaff(user?.role)
     ? [
-        { label: '用户', path: adminRoutes.users, icon: Users, hint: '用户管理' },
         { label: '渠道', path: adminRoutes.channels, icon: Network, hint: '渠道管理' },
+        { label: '凭证', path: adminRoutes.credentials, icon: ShieldCheck, hint: '凭证资产 / OAuth' },
         { label: '计费', path: adminRoutes.billing, icon: CreditCard, hint: '倍率 / 卡密 / 订阅' },
         { label: '用量日志', path: adminRoutes.usageLogs, icon: BarChart3, hint: '全站用量' },
         { label: '交易', path: adminRoutes.commerce, icon: ClipboardList, hint: '支付订单 / 退款' },
@@ -119,6 +120,13 @@ export function Sidebar() {
         location.pathname === adminRoutes.channels ||
         location.pathname === '/channels' ||
         location.pathname.startsWith('/channels/')
+      )
+    }
+    if (path === adminRoutes.credentials) {
+      return (
+        location.pathname === adminRoutes.credentials ||
+        location.pathname === '/credentials' ||
+        location.pathname.startsWith('/credentials/')
       )
     }
     if (path === adminRoutes.commerce) {

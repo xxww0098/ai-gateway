@@ -40,18 +40,24 @@ pub mod log_type;
 mod reconcile;
 mod scripts;
 mod settlement;
+mod shortfall;
 
 #[cfg(test)]
 mod testsupport;
 
 pub use integrity::usd_to_micro;
 pub use keys::{
-    BALANCE_KEY_PREFIX, HOLDS_KEY_PREFIX, HOLDS_TS_KEY_PREFIX, balance_key, holds_key,
-    holds_ts_key, shortfall_resolve_reference,
+    BALANCE_KEY_PREFIX, BALANCE_VER_KEY_PREFIX, HOLDS_KEY_PREFIX, HOLDS_TS_KEY_PREFIX,
+    SERVICE_CREDIT_REF_PREFIX, balance_key, balance_ver_key, holds_key, holds_ts_key,
+    service_credit_reference, shortfall_resolve_reference,
 };
-pub use ledger::{DEFAULT_BALANCE_TTL, DEFAULT_HOLD_TTL, HoldOutcome, Ledger, SettleOutcome};
+pub use ledger::{
+    BalanceChange, DEFAULT_BALANCE_TTL, DEFAULT_HOLD_TTL, HoldOutcome, Ledger,
+    PENDING_INTENT_SCAN_SQL, PendingIntent, SettleOutcome,
+};
 pub use reconcile::StaleHold;
 pub use settlement::Settlement;
+pub use shortfall::{OutstandingShortfall, WriteOff, shortfall_gate_sql};
 
 /// Everything the ledger can fail with.
 ///
@@ -83,6 +89,10 @@ pub enum LedgerError {
     /// The reservation a caller expected to still be live was not in Redis.
     #[error("hold not found")]
     HoldNotFound,
+
+    /// This gateway request id has already completed a successful settle.
+    #[error("already settled")]
+    AlreadySettled,
 
     /// A hold-path method was called on a ledger built without Redis. Holds
     /// have nowhere to live without it, so this is a wiring bug, not a

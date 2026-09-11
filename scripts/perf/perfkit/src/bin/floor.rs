@@ -21,11 +21,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use axum::Router;
 use http::{HeaderMap, HeaderName, StatusCode};
 use perfkit::counting_alloc::{self, Counting};
 

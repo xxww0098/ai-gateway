@@ -33,15 +33,21 @@ pub struct ProviderRequest {
     pub query: Vec<(String, String)>,
 }
 
-/// Headers that must never be forwarded to an upstream: the hop-by-hop set plus
-/// `authorization` (each provider supplies its own credential). Comparison is
-/// case-insensitive on the trimmed name.
+/// Headers that must never be forwarded to an upstream: the hop-by-hop set,
+/// plus every tenant-or-upstream credential carrier. Each executor injects
+/// its own credential after the copy; leaving the client's `x-api-key` /
+/// `x-goog-api-key` in the map leaks a different trust domain (Claude
+/// overwrites `x-api-key`, but OpenAI / Gemini / Vertex do not).
+///
+/// Comparison is case-insensitive on the trimmed name.
 pub fn is_skipped_proxy_header(name: &str) -> bool {
     // HeaderName 已经是小写，但本函数吃 &str，大小写都要认。
     // 以前 to_ascii_lowercase() 每个头分配一次 String，热路径上每个
     // 入站头都走这里。
     let name = name.trim();
     name.eq_ignore_ascii_case("authorization")
+        || name.eq_ignore_ascii_case("x-api-key")
+        || name.eq_ignore_ascii_case("x-goog-api-key")
         || name.eq_ignore_ascii_case("connection")
         || name.eq_ignore_ascii_case("content-length")
         || name.eq_ignore_ascii_case("host")
@@ -179,11 +185,11 @@ pub trait Provider: Send + Sync {
     /// Refresh an expiring OAuth credential; returns the updated record.
     async fn refresh(&self, auth: &AuthRecord) -> Result<AuthRecord, ProviderError>;
 
+    /// 必选、没有默认体：一个默认的 `Ok(0)` 会让忘写此方法的新实现
+    /// 静默计费一个伪造的零 —— 宁可编译错误。
     async fn count_tokens(
         &self,
-        _auth: &AuthRecord,
-        _req: ProviderRequest,
-    ) -> Result<i64, ProviderError> {
-        Ok(0)
-    }
+        auth: &AuthRecord,
+        req: ProviderRequest,
+    ) -> Result<i64, ProviderError>;
 }

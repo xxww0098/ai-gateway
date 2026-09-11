@@ -216,11 +216,11 @@ fn the_expiry_is_in_the_future() {
 
 #[test]
 fn the_label_names_the_account_when_there_is_one() {
-    let named = oauth_record(Provider::Gemini, &tokens(), Utc::now());
+    let named = oauth_record(Provider::Claude, &tokens(), Utc::now());
     assert!(named.label.contains("ops@example.test"));
 
     let anonymous = oauth_record(
-        Provider::Gemini,
+        Provider::Claude,
         &TokenResponse {
             email: String::new(),
             ..tokens()
@@ -229,43 +229,6 @@ fn the_label_names_the_account_when_there_is_one() {
     );
     assert!(!anonymous.label.is_empty());
     assert!(!anonymous.label.contains('('));
-}
-
-#[test]
-fn only_gemini_gets_the_google_token_blob() {
-    let gemini = oauth_record(Provider::Gemini, &tokens(), Utc::now());
-    assert!(
-        gemini
-            .metadata
-            .as_object()
-            .expect("object")
-            .contains_key("token")
-    );
-
-    for provider in [Provider::Claude, Provider::Codex] {
-        let record = oauth_record(provider, &tokens(), Utc::now());
-        assert!(
-            !record
-                .metadata
-                .as_object()
-                .expect("object")
-                .contains_key("token")
-        );
-    }
-}
-
-#[test]
-fn the_google_token_blob_lists_the_scopes_as_an_array() {
-    // A Google credential file carries `scopes` as a list; a single
-    // space-joined string is rejected by the client libraries that read it.
-    let record = oauth_record(Provider::Gemini, &tokens(), Utc::now());
-    let scopes = record
-        .metadata
-        .get("token")
-        .and_then(|token| token.get("scopes"))
-        .and_then(Value::as_array)
-        .expect("scopes array");
-    assert!(scopes.len() > 1);
 }
 
 #[test]

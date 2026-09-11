@@ -17,9 +17,6 @@ use tokio::time::MissedTickBehavior;
 #[cfg(test)]
 mod tests;
 
-/// Sweep cadence of both background sweepers.
-pub const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
-
 /// Ceiling on a [`UserStatusCache`] entry's lifetime: no cached status may
 /// outlive the API-key cache's own 5-minute default, or an admin's status
 /// flip could stay invisible for longer than one key-cache generation.
@@ -88,11 +85,6 @@ impl ApiKeyCache {
         self.entries.is_empty()
     }
 
-    /// Removes every expired entry, returning how many were dropped.
-    pub fn sweep(&self) -> usize {
-        sweep_expired(&self.entries)
-    }
-
     /// Spawns the background sweeper. The returned [`SweepHandle`] is the
     /// cancellation token — dropping it stops the task, and
     /// [`SweepHandle::shutdown`] additionally waits for it.
@@ -104,11 +96,16 @@ impl ApiKeyCache {
     }
 }
 
-/// A cached `users.status` lookup.
+/// A cached `users.status` lookup, plus the concurrent-request cap.
+///
+/// The two columns are loaded together so a panel JWT recheck and a `/v1`
+/// hold cannot disagree about the cap for the length of one TTL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserStatus {
     /// The `users.status` column value.
     pub status: String,
+    /// `users.concurrency`. `<= 0` means "use the limiter default".
+    pub concurrency: i64,
     /// When this entry stops being served.
     pub expires_at: DateTime<Utc>,
 }
@@ -139,11 +136,19 @@ impl UserStatusCache {
         Some(entry)
     }
 
-    /// Caches `status` for `ttl`, with both guards: a zero `ttl` is a no-op
-    /// (callers must not poison the cache with an already-expired entry — the
-    /// negative half is unrepresentable in a [`Duration`]), and the TTL is
-    /// clamped to [`MAX_USER_STATUS_TTL`].
+    /// Caches `status` for `ttl` with concurrency 0 ("unset").
+    ///
+    /// Prefer [`Self::set_row`] when the caller has just read `users.concurrency`.
     pub fn set(&self, user_id: Id, status: impl Into<String>, ttl: Duration) {
+        self.set_row(user_id, status, 0, ttl);
+    }
+
+    /// Caches status and the per-user concurrent-request cap together.
+    ///
+    /// A zero `ttl` is a no-op (callers must not poison the cache with an
+    /// already-expired entry — the negative half is unrepresentable in a
+    /// [`Duration`]), and the TTL is clamped to [`MAX_USER_STATUS_TTL`].
+    pub fn set_row(&self, user_id: Id, status: impl Into<String>, concurrency: i64, ttl: Duration) {
         if ttl.is_zero() {
             return;
         }
@@ -153,15 +158,10 @@ impl UserStatusCache {
             user_id,
             UserStatus {
                 status: status.into(),
+                concurrency: concurrency.max(0),
                 expires_at: Utc::now() + TimeDelta::milliseconds(ttl_ms),
             },
         );
-    }
-
-    /// Drops the entry for `user_id` so the next auth attempt re-reads the
-    /// database. Called by every admin path that flips a user's status.
-    pub fn invalidate_user(&self, user_id: Id) {
-        self.entries.remove(&user_id);
     }
 
     /// Number of entries currently held, expired ones included.
@@ -174,15 +174,88 @@ impl UserStatusCache {
         self.entries.is_empty()
     }
 
-    /// Removes every expired entry, returning how many were dropped.
-    pub fn sweep(&self) -> usize {
-        sweep_expired(&self.entries)
-    }
-
     /// Spawns the background sweeper. See [`ApiKeyCache::spawn_sweeper`] for
     /// the cancellation contract.
     pub fn spawn_sweeper(&self, interval: Duration) -> SweepHandle {
         spawn_sweeper(&self.entries, interval, "user_status", sweep_expired)
+    }
+}
+
+/// A generic in-process TTL cache for hot-path lookups.
+///
+/// Same staleness contract as [`ApiKeyCache`] / [`UserStatusCache`] — an entry
+/// may be served for up to one TTL after the backing row changed — without a
+/// bespoke row type per lookup. Uses [`std::time::Instant`] (monotonic, no
+/// clock reads through `chrono`) because every expiry here is relative to
+/// insertion, never an absolute timestamp a caller computed.
+///
+/// Expired entries are evicted on read. There is no background sweeper:
+/// cardinality is bounded by the caller's key domain (users / groups), and an
+/// expired entry is 2 machine words of overhead until the key is touched
+/// again.
+/// ponytail: no sweeper — entries for keys that stop being queried linger;
+/// reuse `spawn_sweeper` here if tenant cardinality ever makes that matter.
+pub struct TtlCache<K, V> {
+    entries: DashMap<K, (V, std::time::Instant)>,
+    ttl: Duration,
+}
+
+/// Hand-written so `Debug` does not force `K: Eq + Hash` bounds onto the
+/// struct itself; entry contents are noise in a log line anyway.
+impl<K: Eq + std::hash::Hash, V> std::fmt::Debug for TtlCache<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TtlCache")
+            .field("len", &self.entries.len())
+            .field("ttl", &self.ttl)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<K: Eq + std::hash::Hash, V: Clone> TtlCache<K, V> {
+    /// Creates an empty cache whose entries live for `ttl` after insertion.
+    #[must_use]
+    pub fn new(ttl: Duration) -> Self {
+        Self {
+            entries: DashMap::new(),
+            ttl,
+        }
+    }
+
+    /// Returns the entry for `key` when present and unexpired, evicting it as
+    /// a side effect when it has expired.
+    pub fn get(&self, key: &K) -> Option<V> {
+        let hit = self.entries.get(key).map(|e| {
+            let (value, stored_at) = e.value();
+            (value.clone(), stored_at.elapsed())
+        })?;
+        let (value, age) = hit;
+        if age >= self.ttl {
+            self.entries.remove(key);
+            return None;
+        }
+        Some(value)
+    }
+
+    /// Stores `value` under `key`, restarting its TTL.
+    pub fn insert(&self, key: K, value: V) {
+        self.entries.insert(key, (value, std::time::Instant::now()));
+    }
+
+    /// Drops the entry for `key`.
+    pub fn remove(&self, key: &K) {
+        self.entries.remove(key);
+    }
+
+    /// Number of entries currently held, expired ones included.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the cache holds no entries at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 

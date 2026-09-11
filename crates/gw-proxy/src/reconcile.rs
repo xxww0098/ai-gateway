@@ -2,13 +2,12 @@
 //!
 //! Charging a crash-orphaned request is a policy choice, so the scan always
 //! runs (it feeds the `agw_orphaned_holds` gauge) while the settlement half is
-//! opt-in through `BILLING_AUTO_RECONCILE_HOLDS`.
+//! opt-in through `BILLING_AUTO_RECONCILE_HOLDS` (replay expired SQL pending
+//! intents; Redis holds are only the short admission lock).
 //!
-//! Reconciliation is idempotent and safe to run concurrently: a hold whose
-//! request already produced a `usage_logs` row is skipped, and the existence
-//! check is re-evaluated inside the same transaction as the debit
-//! ([`crate::ports::SettlementCommit::skip_if_already_logged`]), so a hold can
-//! never be charged twice.
+//! Reconciliation is idempotent and safe to run concurrently: `Ledger::settle_tx`
+//! claims the request id inside the debit transaction, so a hold can never be
+//! charged twice.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -33,8 +32,9 @@ pub struct StaleHold {
 /// Environment flag that arms automatic reconciliation.
 pub const AUTO_RECONCILE_ENV: &str = "BILLING_AUTO_RECONCILE_HOLDS";
 
-/// How stale a hold must be before the scan considers it orphaned.
-pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(30 * 60);
+/// Default recovery grace, equal to the default hold TTL. Production must pass
+/// the configured `Ledger::hold_ttl()` so a 3600s lock is not scanned at 30 min.
+pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(300);
 
 /// How often the scan runs (5 minutes).
 pub const DEFAULT_SCAN_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -43,7 +43,13 @@ pub const DEFAULT_SCAN_INTERVAL: Duration = Duration::from_secs(5 * 60);
 #[async_trait::async_trait]
 pub trait StaleHoldScanner: Send + Sync {
     /// Holds still present well past their TTL, never settled or released.
+    /// Pending settlement intents older than the admission lock TTL.
     async fn scan_stale_holds(&self, older_than: Duration) -> anyhow::Result<Vec<StaleHold>>;
+
+    /// Cutoff for recovery. Production returns the configured hold TTL.
+    fn recovery_grace(&self) -> Duration {
+        DEFAULT_STALE_AFTER
+    }
 }
 
 /// Whether automatic reconciliation is armed.
@@ -82,16 +88,21 @@ pub async fn reconcile_orphaned_holds(settlement: &Settlement, holds: &[StaleHol
             actual_cost: hold.amount,
             entry,
             subscription_id: None,
-            // The guard that makes this idempotent: re-checked inside the
-            // transaction, so a concurrent run cannot double-charge.
-            skip_if_already_logged: true,
         };
 
         match settlement.store().commit_settlement(&commit).await {
-            Ok(SettleReceipt::Committed { .. }) => {
+            Ok(SettleReceipt::Committed {
+                balance_after,
+                balance_version,
+                ..
+            }) => {
                 if let Err(err) = settlement
                     .store()
-                    .clear_hold(hold.user_id, &hold.request_id)
+                    .clear_hold(
+                        hold.user_id,
+                        &hold.request_id,
+                        balance_version.map(|version| (balance_after, version)),
+                    )
                     .await
                 {
                     tracing::warn!(user_id = hold.user_id, request_id = %hold.request_id, %err,
@@ -195,7 +206,7 @@ pub fn spawn_scanner(
                     settlement.clone(),
                     metrics.clone(),
                     true,
-                    DEFAULT_STALE_AFTER,
+                    scanner.recovery_grace(),
                 ));
                 // Awaited, not fire-and-forget: two overlapping reconciles
                 // would race for the same orphaned holds.
@@ -208,7 +219,7 @@ pub fn spawn_scanner(
                     settlement.as_ref(),
                     metrics.as_ref(),
                     false,
-                    DEFAULT_STALE_AFTER,
+                    scanner.recovery_grace(),
                 )
                 .await;
             }

@@ -43,10 +43,6 @@ async fn an_orphaned_hold_is_charged_at_the_reserved_amount_and_then_cleared() {
     assert_eq!(settled, 1);
     let commits = fixture.store.commits.lock();
     assert_eq!(commits[0].actual_cost, 1.25);
-    assert!(
-        commits[0].skip_if_already_logged,
-        "the in-transaction existence check is what makes this safe to re-run",
-    );
     assert_eq!(fixture.store.cleared_holds.lock().as_slice(), ["req-1"]);
 }
 

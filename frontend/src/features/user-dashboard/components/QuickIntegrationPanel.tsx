@@ -1,13 +1,53 @@
-import { Zap, Archive, Code2, MessageSquare, Terminal } from 'lucide-react'
+import { useState } from 'react'
+import { Link } from 'react-router-dom'
+import { Terminal, Code2, MessageSquare, Copy, Check, ArrowRight, Key } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
+import { toast } from 'sonner'
 import type { IntegrationTab, QuickIntegrationPanelProps } from '../types'
 import { anthropicBaseUrl, openaiBaseUrl } from '@/pages/docs/guide'
+import { userRoutes } from '@/shared/routes/user'
+import { docsPath } from '@/shared/routes/docs'
 
 const integrationTabs: Array<{ id: IntegrationTab; label: string; Icon: LucideIcon }> = [
   { id: 'openai', label: 'OpenAI 兼容', Icon: Code2 },
   { id: 'anthropic', label: 'Anthropic 原生', Icon: MessageSquare },
   { id: 'amp', label: 'Amp', Icon: Terminal },
 ]
+
+function CopyableField({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  const [copied, setCopied] = useState(false)
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(true)
+      toast.success('已复制到剪贴板')
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      toast.error('复制失败，请手动选择复制')
+    }
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between text-[11px] font-semibold text-muted-foreground">
+        <span>{label}</span>
+        {hint && <span className="text-[10px] font-normal text-muted-foreground/80">{hint}</span>}
+      </div>
+      <div className="group relative flex items-center justify-between rounded-[8px] border border-border bg-muted/30 px-3 py-2 text-xs font-mono text-foreground transition-colors hover:bg-muted/50">
+        <span className="truncate select-all mr-2">{value}</span>
+        <button
+          type="button"
+          onClick={handleCopy}
+          aria-label={`复制 ${label}`}
+          className="shrink-0 rounded-[6px] p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          {copied ? <Check className="size-3.5 text-emerald-600 dark:text-emerald-400" /> : <Copy className="size-3.5" />}
+        </button>
+      </div>
+    </div>
+  )
+}
 
 export function QuickIntegrationPanel({
   apiKeyCount,
@@ -22,90 +62,105 @@ export function QuickIntegrationPanel({
       : '配置 Amp CLI 或编辑器扩展使用 AI-GateWay 的 Amp 路由：'
 
   return (
-    <div className="glass-card overflow-hidden flex flex-col relative border-primary-500/20">
-      <div className="absolute inset-0 bg-gradient-to-br from-primary-500/5 to-blue-500/5 z-0 pointer-events-none"></div>
-      <div className="px-6 py-5 border-b border-primary-500/10 flex items-center gap-2 bg-primary-50/50 dark:bg-primary-900/10 z-10">
-        <Zap className="w-5 h-5 text-emerald-500" />
-        <h3 className="text-sm font-bold uppercase tracking-wider text-gray-900 dark:text-white">
-          快速集成
-        </h3>
+    <div className="overflow-hidden rounded-[13px] border border-border bg-card shadow-[0_1px_2px_rgb(0_0_0/0.07)] flex flex-col justify-between">
+      {/* Panel Header */}
+      <div className="flex items-center justify-between border-b border-border px-4 py-3">
+        <div className="flex items-center gap-2">
+          <span className="size-1.5 rounded-[2px] bg-primary" aria-hidden />
+          <div>
+            <h3 className="text-xs font-semibold text-foreground">快速接入</h3>
+            <p className="text-[11px] text-muted-foreground">标准客户端与 IDE 插件中转配置</p>
+          </div>
+        </div>
+        <Link
+          to={docsPath('quickstart')}
+          className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+        >
+          接入文档
+          <ArrowRight className="size-3" />
+        </Link>
       </div>
-      <div className="p-6 flex-1 z-10">
-        {/* Protocol Tabs */}
-        <div className="flex flex-wrap gap-1 p-1 mb-5 bg-gray-100 dark:bg-dark-800 rounded-xl w-fit max-w-full">
+
+      <div className="p-4 flex-1 flex flex-col justify-between space-y-4">
+        {/* Protocol Switcher */}
+        <div className="flex flex-wrap gap-1 p-0.5 bg-muted rounded-[8px] w-fit max-w-full">
           {integrationTabs.map(tab => {
             const Icon = tab.Icon
+            const isActive = integrationTab === tab.id
             return (
               <button
                 key={tab.id}
+                type="button"
                 onClick={() => onIntegrationTabChange(tab.id)}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                  integrationTab === tab.id
-                    ? 'bg-white dark:bg-dark-700 text-gray-900 dark:text-white shadow-sm'
-                    : 'text-gray-500 dark:text-dark-400 hover:text-gray-700 dark:hover:text-dark-200'
+                className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-[6px] text-xs font-medium transition-all ${
+                  isActive
+                    ? 'bg-card text-foreground shadow-[0_1px_2px_rgb(0_0_0/0.07)]'
+                    : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
-                <Icon className="h-3.5 w-3.5" />
+                <Icon className="size-3.5" />
                 {tab.label}
               </button>
             )
           })}
         </div>
 
-        <p className="text-sm text-gray-600 dark:text-gray-300 mb-6">
+        <p className="text-xs leading-relaxed text-muted-foreground">
           {description}
         </p>
-        <div className="space-y-6">
+
+        {/* Code Snippets */}
+        <div className="space-y-3">
           {integrationTab === 'amp' ? (
             <>
-              <div className="space-y-2">
-                <label className="text-xs font-semibold text-gray-500 dark:text-dark-400 uppercase tracking-wider">Amp 环境变量</label>
-                <div className="whitespace-pre-wrap bg-white dark:bg-dark-900/80 border border-border p-3 rounded-xl font-mono text-sm shadow-sm select-all cursor-text text-primary-600 dark:text-primary-400">
-                  {`AMP_URL="${origin}"\nAMP_API_KEY="<YOUR_API_KEY>"`}
-                </div>
-              </div>
-              <div className="space-y-2">
-                <label className="text-xs font-semibold text-gray-500 dark:text-dark-400 uppercase tracking-wider">VS Code Settings</label>
-                <div className="whitespace-pre-wrap bg-white dark:bg-dark-900/80 border border-border p-3 rounded-xl font-mono text-sm shadow-sm select-all cursor-text text-gray-500 dark:text-dark-300">
-                  {`{\n  "amp.url": "${origin}"\n}`}
-                </div>
-              </div>
+              <CopyableField
+                label="Amp 环境变量"
+                value={`AMP_URL="${origin}"\nAMP_API_KEY="<YOUR_API_KEY>"`}
+              />
+              <CopyableField
+                label="VS Code Settings"
+                value={`{\n  "amp.url": "${origin}"\n}`}
+              />
             </>
           ) : (
             <>
-              <div className="space-y-2">
-                <label className="text-xs font-semibold text-gray-500 dark:text-dark-400 uppercase tracking-wider">Base URL 请求地址</label>
-                <div className="flex items-center justify-between bg-white dark:bg-dark-900/80 border border-border p-3 rounded-xl font-mono text-sm shadow-sm select-all cursor-text text-primary-600 dark:text-primary-400">
-                  {integrationTab === 'openai'
-                    ? openaiBaseUrl(origin)
-                    : anthropicBaseUrl(origin)}
-                </div>
-              </div>
-              <div className="space-y-2">
-                <label className="text-xs font-semibold text-gray-500 dark:text-dark-400 uppercase tracking-wider">身份认证标头</label>
-                <div className="bg-white dark:bg-dark-900/80 border border-border p-3 rounded-xl font-mono text-sm shadow-sm overflow-x-auto text-gray-500 dark:text-dark-300">
-                  <>Authorization: Bearer <span className="text-emerald-500">{"<YOUR_API_KEY>"}</span></>
+              <CopyableField
+                label="Base URL 请求地址"
+                value={integrationTab === 'openai' ? openaiBaseUrl(origin) : anthropicBaseUrl(origin)}
+              />
+              <div className="space-y-1.5">
+                <span className="text-[11px] font-semibold text-muted-foreground">身份认证标头</span>
+                <div className="rounded-[8px] border border-border bg-muted/30 px-3 py-2 text-xs font-mono text-foreground select-all">
+                  Authorization: Bearer <span className="text-emerald-600 dark:text-emerald-400">{"<YOUR_API_KEY>"}</span>
                 </div>
               </div>
               {integrationTab === 'anthropic' && (
-                <div className="space-y-2">
-                  <label className="text-xs font-semibold text-gray-500 dark:text-dark-400 uppercase tracking-wider">必须标头</label>
-                  <div className="bg-white dark:bg-dark-900/80 border border-border p-3 rounded-xl font-mono text-sm shadow-sm overflow-x-auto text-gray-500 dark:text-dark-300">
-                    anthropic-version: <span className="text-blue-500">2023-06-01</span>
+                <div className="space-y-1.5">
+                  <span className="text-[11px] font-semibold text-muted-foreground">必须标头</span>
+                  <div className="rounded-[8px] border border-border bg-muted/30 px-3 py-2 text-xs font-mono text-foreground select-all">
+                    anthropic-version: <span className="text-primary font-medium">2023-06-01</span>
                   </div>
                 </div>
               )}
             </>
           )}
-          <div className="pt-4 border-t border-border flex items-center justify-between text-sm text-gray-600 dark:text-gray-400">
-            <span className="flex items-center gap-2">
-              <Archive className="w-4 h-4" />
-              当前拥有的 API Keys
-            </span>
-            <span className="font-bold text-gray-900 dark:text-white bg-gray-100 dark:bg-dark-800 px-3 py-1 rounded-full border border-border">
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-between border-t border-border/50 pt-3 text-xs text-muted-foreground">
+          <span className="inline-flex items-center gap-1.5">
+            <Key className="size-3.5 text-muted-foreground" />
+            已分配 API Keys
+            <span className="ml-1 rounded-md border border-border bg-muted px-2 py-0.5 font-semibold tabular-nums text-foreground">
               {apiKeyCount}
             </span>
-          </div>
+          </span>
+          <Link
+            to={userRoutes.keys}
+            className="text-xs font-medium text-primary hover:underline"
+          >
+            管理密钥 →
+          </Link>
         </div>
       </div>
     </div>

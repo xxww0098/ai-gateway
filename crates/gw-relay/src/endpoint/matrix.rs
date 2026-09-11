@@ -64,13 +64,6 @@ impl Provider {
             Self::Vertex => "vertex",
         }
     }
-
-    /// executor 注册名 → provider。不认识返回 `None`（配置里写错了渠道映射时
-    /// 必须报出来，不能兜底猜一个）。
-    #[must_use]
-    pub fn from_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|p| p.as_str() == name)
-    }
 }
 
 /// 三个入口。与 [`Surface`] 一一对应，存在的意义是让测试能穷举三行。
@@ -279,19 +272,6 @@ pub fn surfaces_serving(provider: Provider) -> Vec<Surface> {
         .collect()
 }
 
-/// 入口 → 路径。[`Surface::from_path`] 的逆映射。
-///
-/// 正映射住在 `contract.rs`（协调者独占），这里是它唯一的逆。两者一致性由
-/// `tests.rs` 的往返测试钉死：`Surface::from_path(path_of(s)) == Some(s)`。
-#[must_use]
-pub fn path_of(surface: Surface) -> &'static str {
-    match surface {
-        Surface::OpenAiCompletions => "/v1/chat/completions",
-        Surface::OpenAiResponses => "/v1/responses",
-        Surface::AnthropicMessages => "/v1/messages",
-    }
-}
-
 fn reject_message(
     surface: Surface,
     provider: Provider,
@@ -302,7 +282,7 @@ fn reject_message(
     let alternatives: Vec<String> = surfaces_serving(provider)
         .into_iter()
         .filter(|s| *s != surface)
-        .map(|s| format!("POST {}", path_of(s)))
+        .map(|s| format!("POST {}", s.path()))
         .collect();
     let guidance = if alternatives.is_empty() {
         format!("本网关没有任何入口能承接渠道 {}。", provider.as_str())
@@ -323,7 +303,7 @@ fn reject_message(
     format!(
         "模型 {model} 属于渠道 {channel}，{path} 入口无法承接它：{why}{guidance}",
         channel = provider.as_str(),
-        path = path_of(surface),
+        path = surface.path(),
     )
 }
 

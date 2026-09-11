@@ -53,10 +53,10 @@ const TicketAuthImage = memo(function TicketAuthImage({ url }: { url: string }) 
   }, [url])
 
   if (err) {
-    return <span className="text-xs text-amber-600 dark:text-amber-400">[图片加载失败]</span>
+    return <span className="text-xs text-amber-700 dark:text-amber-400">[图片加载失败]</span>
   }
   if (!blobUrl) {
-    return <span className="text-xs text-gray-400 dark:text-dark-500">[图片加载中…]</span>
+    return <span className="text-xs text-muted-foreground">[图片加载中…]</span>
   }
   return (
     <a href={blobUrl} target="_blank" rel="noreferrer" className="mt-1 block max-w-full">

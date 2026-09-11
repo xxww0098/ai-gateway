@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 
+use gw_role::Role;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
@@ -250,64 +251,110 @@ pub async fn ensure_sdk_management_seeds(
 pub enum BootstrapAdmin {
     /// 没配 `auth.bootstrap_admin_email`，整个机制关闭。
     NotConfigured,
-    /// 已经有活跃管理员 —— 这条路径从此永久失效，不可能再提权。
-    AlreadyAdministered,
-    /// 配了邮箱但该用户还没注册；注册后由注册流程完成提权。
+    /// 已经有活跃 `super_admin` —— 这条路径从此永久失效。
+    AlreadyHasSuperAdmin,
+    /// 配了邮箱但该用户还没注册，且没有提供可写入的口令哈希。
     UserNotFound,
-    /// 该用户本来就是管理员。
-    AlreadyAdmin { user_id: i64 },
-    /// 刚刚把该用户提成了管理员。
+    /// 该用户本来就是 `super_admin`。
+    AlreadySuperAdmin { user_id: i64 },
+    /// 刚刚把该用户提成了 `super_admin`。
     Promoted { user_id: i64 },
+    /// 用配置里的口令新建了 `super_admin`。
+    Created { user_id: i64 },
 }
 
-/// 一次性的服务端管理员引导。
+/// 一次性的服务端主人引导。
 ///
 /// 安全性完全依赖两个同时成立的前提：(a) 邮箱来自服务端配置，**永远不取请求输入**；
-/// (b) 当前一个活跃管理员都没有。只要系统里已经有管理员，这条路径就永久失效，
-/// 不可能用来提权一个已经在运营的系统。
+/// (b) 当前一个活跃 `super_admin` 都没有。已有 `admin` 不挡住这条路径 —— 那是救砖。
+///
+/// `password_hash` 为 `Some` 且用户不存在时会 `INSERT`；为 `None` 时只提权已有用户。
 pub async fn ensure_bootstrap_admin(
     pool: &PgPool,
     email: &str,
+    password_hash: Option<&str>,
 ) -> Result<BootstrapAdmin, sqlx::Error> {
     let email = email.trim().to_lowercase();
-    if email.is_empty() {
-        return Ok(BootstrapAdmin::NotConfigured);
+    match email.as_str() {
+        "" => Ok(BootstrapAdmin::NotConfigured),
+        email => ensure_bootstrap_admin_for(pool, email, password_hash).await,
     }
+}
 
-    let admin_count: i64 =
+async fn ensure_bootstrap_admin_for(
+    pool: &PgPool,
+    email: &str,
+    password_hash: Option<&str>,
+) -> Result<BootstrapAdmin, sqlx::Error> {
+    let super_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM users WHERE role = $1 AND status = $2")
-            .bind("admin")
+            .bind(Role::SuperAdmin.as_str())
             .bind("active")
             .fetch_one(pool)
             .await?;
-    if admin_count > 0 {
-        return Ok(BootstrapAdmin::AlreadyAdministered);
+    match super_count {
+        0 => bootstrap_missing_owner(pool, email, password_hash).await,
+        _ => Ok(BootstrapAdmin::AlreadyHasSuperAdmin),
     }
+}
 
-    // 这里是等值匹配（`WHERE email = ?`），不是大小写不敏感匹配：
-    // 用大写邮箱注册的账号不会被这条路径命中。
+async fn bootstrap_missing_owner(
+    pool: &PgPool,
+    email: &str,
+    password_hash: Option<&str>,
+) -> Result<BootstrapAdmin, sqlx::Error> {
     let found: Option<(i64, Option<String>)> =
         sqlx::query_as("SELECT id, role FROM users WHERE email = $1 ORDER BY id LIMIT 1")
-            .bind(&email)
+            .bind(email)
             .fetch_optional(pool)
             .await?;
-    let Some((user_id, role)) = found else {
-        return Ok(BootstrapAdmin::UserNotFound);
-    };
-    if role
-        .unwrap_or_default()
-        .trim()
-        .eq_ignore_ascii_case("admin")
-    {
-        return Ok(BootstrapAdmin::AlreadyAdmin { user_id });
-    }
 
-    sqlx::query("UPDATE users SET role = $1, updated_at = now() WHERE id = $2")
-        .bind("admin")
-        .bind(user_id)
-        .execute(pool)
-        .await?;
-    Ok(BootstrapAdmin::Promoted { user_id })
+    match (found, password_hash) {
+        (None, None) => Ok(BootstrapAdmin::UserNotFound),
+        (None, Some(hash)) => insert_super_admin(pool, email, hash).await,
+        (Some((user_id, role)), _) => {
+            match Role::from_stored(role.as_deref().unwrap_or_default()) {
+                Role::SuperAdmin => Ok(BootstrapAdmin::AlreadySuperAdmin { user_id }),
+                Role::User | Role::Admin => {
+                    sqlx::query("UPDATE users SET role = $1, updated_at = now() WHERE id = $2")
+                        .bind(Role::SuperAdmin.as_str())
+                        .bind(user_id)
+                        .execute(pool)
+                        .await?;
+                    Ok(BootstrapAdmin::Promoted { user_id })
+                }
+            }
+        }
+    }
+}
+
+async fn insert_super_admin(
+    pool: &PgPool,
+    email: &str,
+    password_hash: &str,
+) -> Result<BootstrapAdmin, sqlx::Error> {
+    let inserted: Result<i64, sqlx::Error> = sqlx::query_scalar(
+        "INSERT INTO users \
+             (email, password_hash, role, username, balance, status, concurrency, created_at, updated_at) \
+         VALUES ($1, $2, $3, '', 0, 'active', 0, now(), now()) \
+         RETURNING id",
+    )
+    .bind(email)
+    .bind(password_hash)
+    .bind(Role::SuperAdmin.as_str())
+    .fetch_one(pool)
+    .await;
+
+    match inserted {
+        Ok(user_id) => Ok(BootstrapAdmin::Created { user_id }),
+        Err(error) => match error
+            .as_database_error()
+            .is_some_and(sqlx::error::DatabaseError::is_unique_violation)
+        {
+            true => Ok(BootstrapAdmin::AlreadyHasSuperAdmin),
+            false => Err(error),
+        },
+    }
 }
 
 #[cfg(test)]

@@ -11,15 +11,48 @@ use parking_lot::Mutex;
 use crate::ports::{
     BalanceEvent, BillingError, BillingLedger, HoldAdmit, Id, ModelTokenUsage, PricingCalculator,
     SettleReceipt, SettlementCommit, SubscriptionQuota, SubscriptionQuotaStore, TokenUsage,
-    UsageLogEntry, UsageStore, fold_model_usage,
+    UsageLogEntry, UsageStore,
 };
 use crate::reconcile::{StaleHold, StaleHoldScanner};
+
+/// 把逐条 usage 折成按模型的 token 小计。空模型名变成 `unknown`。
+///
+/// 排序与面板 `buildUsageModels` 同口径：请求数降序，同数按模型名升序。
+/// 只有测试侧用它 —— 生产的 `SqlUsageStore::model_usage_since` 在 SQL 里
+/// GROUP BY，这份内存实现给 `FakeUsageStore` 与对拍断言共用。
+pub(crate) fn fold_model_usage<'a>(
+    logs: impl IntoIterator<Item = &'a UsageLogEntry>,
+) -> Vec<ModelTokenUsage> {
+    let mut table: HashMap<String, ModelTokenUsage> = HashMap::new();
+    for entry in logs {
+        let name = entry.model.trim();
+        let name = if name.is_empty() { "unknown" } else { name };
+        let point = table
+            .entry(name.to_owned())
+            .or_insert_with(|| ModelTokenUsage {
+                model: name.to_owned(),
+                requests: 0,
+                tokens_in: 0,
+                tokens_out: 0,
+            });
+        point.requests += 1;
+        point.tokens_in += entry.input_tokens;
+        point.tokens_out += entry.output_tokens;
+    }
+    let mut items: Vec<ModelTokenUsage> = table.into_values().collect();
+    items.sort_by(|left, right| {
+        right
+            .requests
+            .cmp(&left.requests)
+            .then_with(|| left.model.cmp(&right.model))
+    });
+    items
+}
 
 /// Records every ledger call so a test can assert on ordering and amounts.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LedgerCall {
     Hold { user_id: Id, amount: f64 },
-    Settle { user_id: Id, amount: f64 },
     Release { user_id: Id },
 }
 
@@ -52,11 +85,10 @@ impl FakeLedger {
     fn available_after_holds(balance: f64, holds: &HashMap<String, f64>) -> f64 {
         balance - holds.values().sum::<f64>()
     }
-}
 
-#[async_trait]
-impl BillingLedger for FakeLedger {
-    async fn hold(
+    /// 直接落一个 hold，测试造「已有预扣」的初始状态用（不是 trait 方法：
+    /// 生产路径只走 `hold_gated`）。
+    pub(crate) async fn hold(
         &self,
         user_id: Id,
         amount: f64,
@@ -70,24 +102,10 @@ impl BillingLedger for FakeLedger {
         self.holds.lock().insert(request_id.to_owned(), amount);
         Ok(())
     }
+}
 
-    async fn settle(
-        &self,
-        user_id: Id,
-        request_id: &str,
-        actual_amount: f64,
-    ) -> Result<f64, BillingError> {
-        self.calls.lock().push(LedgerCall::Settle {
-            user_id,
-            amount: actual_amount,
-        });
-        self.holds.lock().remove(request_id);
-        let mut balance = self.balance.lock();
-        let debited = actual_amount.min(*balance);
-        *balance -= debited;
-        Ok(actual_amount - debited)
-    }
-
+#[async_trait]
+impl BillingLedger for FakeLedger {
     async fn release(&self, user_id: Id, request_id: &str) -> Result<(), BillingError> {
         self.calls.lock().push(LedgerCall::Release { user_id });
         self.holds.lock().remove(request_id);
@@ -132,6 +150,11 @@ impl BillingLedger for FakeLedger {
         }
         let balance = self.balance.lock();
         let mut holds = self.holds.lock();
+        // Same contract as the Lua hold script: a repeated request id is a
+        // no-op, not a second reservation.
+        if holds.contains_key(request_id) {
+            return Ok(HoldAdmit::Reserved);
+        }
         let available = Self::available_after_holds(*balance, &holds);
         if available < min_available {
             return Ok(HoldAdmit::Insufficient { available });
@@ -289,8 +312,7 @@ impl UsageStore for FakeUsageStore {
         if *self.commit_fails.lock() {
             anyhow::bail!("settle transaction failed");
         }
-        if commit.skip_if_already_logged && self.logged_requests.lock().contains(&commit.request_id)
-        {
+        if self.logged_requests.lock().contains(&commit.request_id) {
             return Ok(SettleReceipt::AlreadySettled);
         }
         self.commits.lock().push(commit.clone());
@@ -303,6 +325,7 @@ impl UsageStore for FakeUsageStore {
             shortfall,
             balance_before: *self.balance_before.lock(),
             balance_after: *self.balance_after.lock(),
+            balance_version: Some(1),
         })
     }
 
@@ -317,7 +340,12 @@ impl UsageStore for FakeUsageStore {
         Ok(())
     }
 
-    async fn clear_hold(&self, _user_id: Id, request_id: &str) -> anyhow::Result<()> {
+    async fn clear_hold(
+        &self,
+        _user_id: Id,
+        request_id: &str,
+        _published: Option<(f64, i64)>,
+    ) -> anyhow::Result<()> {
         self.cleared_holds.lock().push(request_id.to_owned());
         Ok(())
     }

@@ -15,12 +15,26 @@ interface AuthState {
   logout: () => void
 }
 
+// 会话持久化（v1 版本化键）：token 与 user 一并落 localStorage。
+// 刷新后由这里恢复 token，UserLayout 的 useProfile 静默校验；
+// token 失效时 client.ts 收到 401 统一 logout，无需额外的过期刷新逻辑。
+const TOKEN_KEY = 'agw_token:v1'
 const USER_KEY = 'agw_user:v1'
 
-function readCachedUser(): User | null {
-  const raw = localStorage.getItem(USER_KEY)
-  if (!raw) return null
+function readCachedToken(): string | null {
   try {
+    const raw = localStorage.getItem(TOKEN_KEY)
+    return raw && raw.length > 0 ? raw : null
+  } catch {
+    // private mode / storage blocked
+    return null
+  }
+}
+
+function readCachedUser(): User | null {
+  try {
+    const raw = localStorage.getItem(USER_KEY)
+    if (!raw) return null
     const parsed: unknown = JSON.parse(raw)
     if (!parsed || typeof parsed !== 'object') return null
     const row = parsed as Partial<User>
@@ -34,23 +48,37 @@ function readCachedUser(): User | null {
       balance: typeof row.balance === 'number' ? row.balance : undefined,
     }
   } catch {
-    localStorage.removeItem(USER_KEY)
+    try {
+      localStorage.removeItem(USER_KEY)
+    } catch {
+      // private mode / storage blocked
+    }
     return null
   }
 }
 
+// 历史遗留键（cpa-* 品牌与未版本化的 agw 裸键），一律清掉。
 function dropObsoleteAuthKeys() {
-  localStorage.removeItem('cpa_token')
-  localStorage.removeItem('cpa_user')
-  localStorage.removeItem('agw_token')
-  localStorage.removeItem('agw_user')
+  try {
+    localStorage.removeItem('cpa_token')
+    localStorage.removeItem('cpa_user')
+    localStorage.removeItem('agw_token')
+    localStorage.removeItem('agw_user')
+  } catch {
+    // private mode / storage blocked
+  }
 }
 
 export const useAuthStore = create<AuthState>((set, get) => ({
-  token: null,
+  token: readCachedToken(),
   user: readCachedUser(),
   setAuth: (token, user) => {
-    localStorage.setItem(USER_KEY, JSON.stringify(user))
+    try {
+      localStorage.setItem(TOKEN_KEY, token)
+      localStorage.setItem(USER_KEY, JSON.stringify(user))
+    } catch {
+      // private mode / storage blocked
+    }
     dropObsoleteAuthKeys()
     set({ token, user })
   },
@@ -58,11 +86,28 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const current = get().user
     if (!current) return
     const updated = { ...current, ...userUpdate }
-    localStorage.setItem(USER_KEY, JSON.stringify(updated))
+    if (
+      updated.id === current.id &&
+      updated.email === current.email &&
+      updated.role === current.role &&
+      updated.balance === current.balance
+    ) {
+      return
+    }
+    try {
+      localStorage.setItem(USER_KEY, JSON.stringify(updated))
+    } catch {
+      // private mode / storage blocked
+    }
     set({ user: updated })
   },
   logout: () => {
-    localStorage.removeItem(USER_KEY)
+    try {
+      localStorage.removeItem(TOKEN_KEY)
+      localStorage.removeItem(USER_KEY)
+    } catch {
+      // private mode / storage blocked
+    }
     dropObsoleteAuthKeys()
     set({ token: null, user: null })
   },

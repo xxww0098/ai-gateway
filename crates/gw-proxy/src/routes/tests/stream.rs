@@ -57,6 +57,7 @@ async fn a_stream_settles_once_it_has_finished_and_uses_the_usage_it_carried() {
     ];
 
     collect_stream(&harness, stream_body("gpt-4o")).await;
+    harness.wait_idle().await;
 
     let logs = harness.usage_store.logs.lock();
     assert_eq!(logs.len(), 1, "a stream must settle exactly once");
@@ -77,6 +78,7 @@ async fn a_stream_that_reports_an_error_releases_instead_of_charging() {
     ];
 
     collect_stream(&harness, stream_body("gpt-4o")).await;
+    harness.wait_idle().await;
 
     assert!(
         harness
@@ -94,6 +96,7 @@ async fn a_stream_without_a_usage_chunk_falls_back_rather_than_billing_zero() {
     *harness.provider.stream_chunks.lock() = vec![StreamChunk::Payload("data: one\n\n".into())];
 
     collect_stream(&harness, stream_body("gpt-4o")).await;
+    harness.wait_idle().await;
 
     let costs = harness.usage_store.settled_costs();
     assert_eq!(costs.len(), 1);
@@ -233,9 +236,10 @@ async fn stream_headers_drop_hop_by_hop_and_keep_repeated_values() {
 }
 
 #[tokio::test]
-async fn a_stream_that_runs_to_completion_settles_inline_and_leaves_the_tracker_empty() {
-    // The tracker is the disconnect path only. A stream the client actually
-    // read has already settled by the time the body ends, so nothing detaches.
+async fn a_stream_that_runs_to_completion_settles_through_the_tracker_exactly_once() {
+    // Completion and hang-up share StreamSettler::Drop → ProxyState::drain.
+    // Awaiting settle inside poll_next used to mark `done` first, so a client
+    // that disconnected during that future lost the charge.
     let harness = Harness::build();
     *harness.provider.stream_chunks.lock() = vec![
         StreamChunk::Payload("data: one\n\n".into()),
@@ -243,11 +247,12 @@ async fn a_stream_that_runs_to_completion_settles_inline_and_leaves_the_tracker_
     ];
 
     collect_stream(&harness, stream_body("gpt-4o")).await;
+    harness.wait_idle().await;
 
     assert_eq!(harness.usage_store.logs.lock().len(), 1);
     assert_eq!(
         harness.drain.len(),
         0,
-        "an inline settlement must not also queue a detached one",
+        "the detached settlement must run exactly once and leave the tracker empty",
     );
 }

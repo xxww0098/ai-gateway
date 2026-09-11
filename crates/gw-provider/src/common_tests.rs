@@ -270,31 +270,6 @@ fn the_surface_comes_from_the_inbound_path_and_defaults_to_chat() {
 // --- small helpers -----------------------------------------------------------
 
 #[test]
-fn token_estimate_rounds_up_to_the_next_whole_token() {
-    assert_eq!(approximate_tokens_from_bytes(0), 0);
-    // Monotonic, and never under-counts a partial token.
-    let mut previous = 0;
-    for size in 1..64usize {
-        let got = approximate_tokens_from_bytes(size);
-        assert!(got >= previous, "estimate must be monotonic in size");
-        assert!(got * 4 >= size as i64, "estimate must not under-count");
-        assert!((got - 1) * 4 < size as i64, "estimate must not over-count");
-        previous = got;
-    }
-}
-
-#[test]
-fn failure_body_is_clipped_without_splitting_a_code_point() {
-    let long = "é".repeat(8 * 1024);
-    let clipped = truncate_failure_body(long.as_bytes());
-    assert!(clipped.len() <= 4 * 1024);
-    assert!(long.starts_with(&clipped) || clipped.ends_with('\u{fffd}'));
-    // Short bodies survive intact, including non-UTF-8 ones.
-    assert_eq!(truncate_failure_body(b"boom"), "boom");
-    assert!(!truncate_failure_body(&[0xff, 0xfe]).is_empty());
-}
-
-#[test]
 fn requested_model_prefers_the_translated_name_then_the_router_hint() {
     let mut req = ProviderRequest {
         model: "  gpt-4o  ".to_owned(),

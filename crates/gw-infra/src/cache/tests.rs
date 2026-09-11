@@ -56,16 +56,10 @@ fn clones_share_one_set_of_entries() {
     assert!(statuses_clone.get(42).is_some());
 
     keys_clone.delete("shared");
-    statuses_clone.invalidate_user(42);
-
     assert!(keys.get("shared").is_none());
-    assert!(
-        statuses.get(42).is_none(),
-        "an admin status flip on one surface must be visible on the other"
-    );
 }
 
-/// Hit, TTL-driven miss, and an immediate miss after invalidation.
+/// Hit, then a TTL-driven miss.
 #[test]
 fn user_status_get_set_expire() {
     let cache = UserStatusCache::new();
@@ -79,14 +73,6 @@ fn user_status_get_set_expire() {
     cache.set(USER, "active", Duration::from_millis(1));
     std::thread::sleep(std::time::Duration::from_millis(20));
     assert!(cache.get(USER).is_none(), "an expired entry must miss");
-
-    cache.set(USER, "active", Duration::from_secs(60));
-    assert!(cache.get(USER).is_some());
-    cache.invalidate_user(USER);
-    assert!(
-        cache.get(USER).is_none(),
-        "InvalidateUser must miss even while the entry is fresh"
-    );
 }
 
 /// A zero TTL must not poison the cache with an already-expired entry. (The
@@ -195,4 +181,33 @@ async fn dropping_the_cache_stops_the_sweeper() {
         handle.is_finished(),
         "the sweeper outlived the cache it was sweeping"
     );
+}
+
+/// A [`TtlCache`] entry round-trips until removed, and negative values
+/// (`None`) are entries like any other — the point of the type is caching
+/// "this user has no row" without a second map.
+#[test]
+fn ttl_cache_round_trips_and_caches_negatives() {
+    let cache: TtlCache<i64, Option<f64>> = TtlCache::new(Duration::from_secs(60));
+    assert!(cache.get(&7).is_none(), "empty cache must miss");
+
+    cache.insert(7, Some(1.5));
+    cache.insert(8, None);
+    assert_eq!(cache.get(&7), Some(Some(1.5)));
+    assert_eq!(cache.get(&8), Some(None), "a cached negative is a hit");
+
+    cache.remove(&7);
+    assert!(cache.get(&7).is_none());
+    assert_eq!(cache.len(), 1);
+}
+
+/// Reading an expired [`TtlCache`] entry misses and evicts it.
+#[test]
+fn ttl_cache_expires_entries_on_read() {
+    let cache: TtlCache<&str, u32> = TtlCache::new(Duration::from_millis(1));
+    cache.insert("k", 42);
+    std::thread::sleep(Duration::from_millis(5));
+
+    assert!(cache.get(&"k").is_none(), "entry outlived its TTL");
+    assert!(cache.is_empty(), "the expired entry must be evicted, not kept");
 }

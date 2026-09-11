@@ -28,9 +28,6 @@ mod tests;
 /// valid JSON for the `jsonb` column.
 pub const CRED_ENC_ENVELOPE_KEY: &str = "__agw_enc_v1";
 
-/// Environment variable holding the credential-encryption key.
-pub const CREDENTIAL_ENCRYPTION_KEY_ENV: &str = "CREDENTIAL_ENCRYPTION_KEY";
-
 /// AES-256 key length.
 const KEY_LEN: usize = 32;
 
@@ -80,16 +77,6 @@ impl CredentialCipher {
         Ok(Self {
             aead: Some(Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&raw))),
         })
-    }
-
-    /// Builds a cipher from [`CREDENTIAL_ENCRYPTION_KEY_ENV`], for callers that
-    /// have no [`gw_config::Config`] at hand. An unset variable disables
-    /// encryption, matching an empty config value.
-    ///
-    /// # Errors
-    /// Same as [`CredentialCipher::new`].
-    pub fn from_env() -> Result<Self, AuthError> {
-        Self::new(&std::env::var(CREDENTIAL_ENCRYPTION_KEY_ENV).unwrap_or_default())
     }
 
     /// Whether encryption is active.

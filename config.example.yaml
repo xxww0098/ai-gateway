@@ -9,7 +9,7 @@ database:
   password: ""
   dbname: ai_gateway
   sslmode: disable
-  # Connection pool tuning (optional). Omit/0 → gateway defaults (25/200/30m),
+  # Connection pool tuning (optional). Omit/0 → gateway defaults (25/50/30m),
   # sized for a hot proxy path. Also settable via DB_MAX_IDLE_CONNS /
   # DB_MAX_OPEN_CONNS / DB_CONN_MAX_LIFETIME_MINUTES.
   max_idle_conns: 0
@@ -29,12 +29,13 @@ auth:
   # provider credentials (auth_records.metadata). Empty = cleartext (not
   # recommended for production). Prefer the CREDENTIAL_ENCRYPTION_KEY env var.
   credential_encryption_key: ""
-  # First-run admin bootstrap: on a fresh deploy with no admin yet, the user
-  # with this exact email is promoted to admin (at startup if already registered,
-  # otherwise the moment they register) so you can reach the ops panel without
-  # manual SQL. Inert once any admin exists. Prefer the BOOTSTRAP_ADMIN_EMAIL env
-  # var. Leave empty to disable.
+  # First-run owner bootstrap: on a fresh deploy with no super_admin yet, the
+  # user with this exact email is promoted to super_admin (at startup if already
+  # registered, otherwise the moment they register). Set BOOTSTRAP_ADMIN_PASSWORD
+  # to create the account immediately. Inert once any super_admin exists.
+  # Prefer the BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD env vars.
   bootstrap_admin_email: ""
+  bootstrap_admin_password: ""
 
 sdk:
   base_url: https://sdk.example.com
@@ -72,10 +73,9 @@ sdk:
   # auth file or call the kiro executor directly.
 
 frontend:
-  port: 3000
+  port: 3030
 
 billing:
-  hold_amount: 100
   default_price_per_1k_tokens: 0.001
   hold_ttl_seconds: 3600
   # strict_usage_metadata_mode controls how billing settles a successful
@@ -87,3 +87,15 @@ billing:
   #     until it expires via TTL (or out-of-band reconciliation), and write
   #     a UsageLog row with Failed=true for operator follow-up.
   strict_usage_metadata_mode: false
+
+# 服务面 /api/service —— ozon-pod 集成用的内网接口（建号 / 发 key / 余额 / 用量 /
+# 入账）。契约见 docs/service-api.md。token 为空 = 整组路由不挂载（404）；
+# 生产按部署密钥对待，走 SERVICE_TOKEN 注入，不要写进版本库。
+service:
+  token: ""
+  # 供给账号的初始额度；契约要求 0（不赠注册额度）。
+  initial_credit: 0
+  # 余额 / 金额的币种标签，只作展示与透传。
+  currency: USD
+  # 单次入账上限。
+  max_credit: 100000

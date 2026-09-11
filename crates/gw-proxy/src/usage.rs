@@ -23,7 +23,6 @@ use chrono::Utc;
 use gw_provider::types::UsageRecord;
 use serde_json::json;
 
-use crate::budget_token::BudgetTokenStore;
 use crate::ports::{
     BalanceEvent, BillingLedger, PricingCalculator, SettleReceipt, SettlementCommit, TokenUsage,
     UsageLogEntry, UsageStore,
@@ -119,41 +118,102 @@ pub struct SettlementInputs {
 /// GenerateContent，`usageMetadata` 的字段语义因此完全一致。
 const GOOGLE_SHAPED_PROVIDERS: [&str; 2] = ["gemini", "vertex"];
 
-/// 把上游原话的 token 计数归一成**可计价**的视图。
+/// 一个上游的四个**原始**计数列之间是怎么嵌套的。
 ///
-/// # Google 的 usage 会让网关每次都少收钱
+/// 四个计费列必须互斥，而四家上游里有两家报的是**重叠**计数 —— 这是 wire 格式
+/// 的事实，不是价格表的策略，所以判定放在中继/计费侧而不是计算器里。
 ///
-/// | 上游 | 「输出」字段 | 含不含思考 token |
+/// 依据（厂商一手文档，2026-09 核）：
+///
+/// * OpenAI `prompt_tokens_details.cached_tokens` 是 `prompt_tokens` 的**明细**
+///   （"Breakdown of tokens used in the prompt"）；官方 prompt-caching 指南直接
+///   给出减法公式 `ordinaryInputTokens = inputTokens - cachedTokens - cacheWriteTokens`。
+///   `completion_tokens_details.reasoning_tokens` 同理是 `completion_tokens` 的明细。
+/// * Google `promptTokenCount` 原文写着 "this includes the number of tokens in the
+///   cached content"；而 `totalTokenCount = prompt + thoughts + candidates` ——
+///   即 thoughts 与 candidates **并列**，与前两家相反。
+/// * Anthropic 原文："Total input tokens in a request is the summation of
+///   `input_tokens`, `cache_creation_input_tokens`, and `cache_read_input_tokens`" ——
+///   三者并列，**不能**再减；`output_tokens` 本身已含 thinking token。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenNesting {
+    /// `cached ⊆ input` 且 `reasoning ⊆ output`（OpenAI / Codex）。
+    BothNested,
+    /// `cached ⊆ input`，但 `reasoning ⊥ output`（Gemini / Vertex）。
+    CachedNestedReasoningSibling,
+    /// 四列互斥，原样计价（Anthropic，以及所有不认识的上游）。
+    Disjoint,
+}
+
+fn nesting(provider: &str) -> TokenNesting {
+    if GOOGLE_SHAPED_PROVIDERS.contains(&provider) {
+        TokenNesting::CachedNestedReasoningSibling
+    } else if matches!(provider, "openai" | "codex") {
+        TokenNesting::BothNested
+    } else {
+        TokenNesting::Disjoint
+    }
+}
+
+/// `total - subset`，两端都夹在合法区间里。
+///
+/// 上游只报了子集、没报总数时，这里拿到的是已经 `unwrap_or(0)` 的 0，
+/// 减出来仍是 0 —— 与中继层「缺失不塌缩成零」的三态约定不同，但这一层
+/// 的 `TokenUsage` 本来就是计费视图的整数列，缺失在进入本函数之前就已经归零，
+/// 不存在把「没报」误当成「报了 0」的额外损失。
+///
+/// `saturating_sub` 挡的是上游自相矛盾的数据（子集比总数还大）；`.max(0)` 是
+/// 冗余的一层保险，去掉任何一个都不会让负数漏到计费列上。
+fn subtract(total: i64, subset: i64) -> i64 {
+    total.saturating_sub(subset).max(0)
+}
+
+/// 把上游原话的 token 计数归一成**可计价**的视图：四个计费列两两互斥。
+///
+/// # 为什么必须互斥
+///
+/// 计算器把四列**相加**计价（`Calculator::compute`）。只要某一列是另一列的
+/// 子集，这一块 token 就会被卖两次。两家上游报的正是重叠计数：
+///
+/// | 上游 | 嵌套 | 不减的后果 |
 /// | --- | --- | --- |
-/// | OpenAI / Codex | `usage.completion_tokens` | **含**（`completion_tokens_details.reasoning_tokens` 是它的一个明细） |
-/// | Anthropic | `usage.output_tokens` | **含** |
-/// | Google（gemini / vertex） | `usageMetadata.candidatesTokenCount` | **不含**（思考在 `thoughtsTokenCount` 里，是并列项） |
+/// | OpenAI / Codex | `cached ⊆ input`，`reasoning ⊆ output` | 缓存命中的 token 收「全价 input + 缓存价」，比不命中还贵 |
+/// | Google（gemini / vertex） | `cached ⊆ input`，`reasoning ⊥ output` | 同上；思考 token 还必须折进 output |
+/// | Anthropic | 四列互斥 | ——（减了反而少收） |
 ///
-/// 而 `model_prices.reasoning_price_per1_m` 的建表默认值是 **0**
-/// （`migrations/0001_init.sql`）。两件事叠起来的后果是确定的：
-/// 一个 Gemini 思考型模型的**每一个思考 token 都是免费的** ——
-/// `candidatesTokenCount` 不含它，`reasoning_price` 又是 0。
-/// 思考 token 在推理型模型上经常是输出的数倍，所以这不是舍入误差，
-/// 是**每次调用都少收一大块**。
+/// 判据与原文引用见 [`nesting`]。这是**静默多收费**，不是舍入误差：按 OpenAI 的
+/// 缓存折扣（0.1×~0.5× input），命中一块缓存会被收成 1.1×~1.5× 全价。
 ///
-/// 修法是把 Google 的思考 token 折进 `output`，按**输出费率**计价 ——
-/// 这正是 Google 自己的计费口径（thinking token 按 output 价收）。
-/// 折进去之后 `reasoning` 清零，避免配了 `reasoning_price` 的部署被重复计价。
+/// # 只作用于计价
 ///
-/// OpenAI / Anthropic **不折**：它们的输出字段本来就含思考，
-/// 折进去就是实打实的重复计费。这条不对称是上游语义的不对称，不是本函数的选择。
+/// 写进 `usage_logs` 的仍然是上游原话（四列各归各位），否则审计就对不上上游账单了。
+/// `Calculator::compute` 拿到的才是互斥视图 —— 这个分工由
+/// `crates/gw-proxy/src/usage.rs` 的调用点和 `Settlement::build_entry` 共同守着。
 ///
-/// 归一只作用于**计价**。写进 `usage_logs` 的仍然是上游原话
-/// （`input/output/cached/reasoning` 四列各归各位），否则审计就对不上上游账单了。
+/// # 减完之后那一块不是免费的
+///
+/// 被减出来的 `cached` / `reasoning` 仍然按各自的费率计价；费率留空（0）时回落到
+/// 基准费率，见 `gw_pricing::Calculator::compute` 的费率解析。
 #[must_use]
 pub fn billable_tokens(provider: &str, tokens: TokenUsage) -> TokenUsage {
-    if !GOOGLE_SHAPED_PROVIDERS.contains(&provider) {
-        return tokens;
-    }
-    TokenUsage {
-        output: tokens.output.saturating_add(tokens.reasoning),
-        reasoning: 0,
-        ..tokens
+    match nesting(provider) {
+        // OpenAI：两列都是明细，各自把子集从总数里摘出去。
+        TokenNesting::BothNested => TokenUsage {
+            input: subtract(tokens.input, tokens.cached),
+            output: subtract(tokens.output, tokens.reasoning),
+            ..tokens
+        },
+        // Google：输入侧同上；思考 token 是**并列**的，折进 output 按输出价收，
+        // 这正是 Google 自己的口径（"Output price (including thinking tokens)"）。
+        TokenNesting::CachedNestedReasoningSibling => TokenUsage {
+            input: subtract(tokens.input, tokens.cached),
+            output: tokens.output.saturating_add(tokens.reasoning),
+            reasoning: 0,
+            ..tokens
+        },
+        // Anthropic 与不认识的上游：四列本来就是并列的，原样交给计算器。
+        // 不认识就**不减**是刻意的：多减会少收，风险方向比多数更糟。
+        TokenNesting::Disjoint => tokens,
     }
 }
 
@@ -193,7 +253,6 @@ pub struct Settlement {
     ledger: Arc<dyn BillingLedger>,
     calc: Arc<dyn PricingCalculator>,
     store: Arc<dyn UsageStore>,
-    budget_tokens: Option<Arc<BudgetTokenStore>>,
     low_balance_threshold: f64,
     strict_usage_metadata: AtomicBool,
 }
@@ -209,17 +268,9 @@ impl Settlement {
             ledger,
             calc,
             store,
-            budget_tokens: None,
             low_balance_threshold: DEFAULT_LOW_BALANCE_THRESHOLD,
             strict_usage_metadata: AtomicBool::new(false),
         }
-    }
-
-    /// Attach the process-local budget-token store.
-    #[must_use]
-    pub fn with_budget_tokens(mut self, store: Arc<BudgetTokenStore>) -> Self {
-        self.budget_tokens = Some(store);
-        self
     }
 
     /// Set the low-balance threshold; non-positive keeps the $1 default.
@@ -377,7 +428,6 @@ impl Settlement {
             actual_cost: cost,
             entry,
             subscription_id: ctx.subscription_id,
-            skip_if_already_logged: false,
         };
 
         let receipt = match self.store.commit_settlement(&commit).await {
@@ -396,8 +446,20 @@ impl Settlement {
                 );
                 let mut failed = commit.entry.clone();
                 failed.failed = true;
+                // 事务回滚了，所以**一分钱都没动** —— 这条审计行的金额列必须
+                // 归零。面板的总花费直接 `SUM(usage_logs.cost)`、不按 `failed`
+                // 过滤（`gw-panel/src/ops/dashboard.rs`、`billing/usage/user.rs`、
+                // `upstream/usage_stats.rs`），留着全额就会把一个「尝试收 but 失败」
+                // 的请求算成真花掉的钱，与 `balance_logs` 对不上账。
+                //
+                // 尝试收多少不能丢：它是运维判断「这次回滚值不值得追」的唯一线索，
+                // 所以挪进 metadata，而不是留在会被求和的列里。
+                failed.total_cost = 0.0;
+                failed.actual_cost = 0.0;
+                failed.cost = 0.0;
                 failed.raw_metadata = Some(json!({
                     "reason": err.to_string(),
+                    "attempted_cost": cost,
                     "timestamp": Utc::now().to_rfc3339(),
                 }));
                 self.write_log(&failed).await;
@@ -409,6 +471,7 @@ impl Settlement {
             shortfall,
             balance_before,
             balance_after,
+            balance_version,
         } = receipt
         else {
             return; // AlreadySettled: nothing further to do (reconcile path)
@@ -423,12 +486,17 @@ impl Settlement {
         }
 
         // Post-commit, non-transactional side effects.
-        if let Err(err) = self.store.clear_hold(ctx.user_id, &ctx.request_id).await {
+        if let Err(err) = self
+            .store
+            .clear_hold(
+                ctx.user_id,
+                &ctx.request_id,
+                balance_version.map(|version| (balance_after, version)),
+            )
+            .await
+        {
             tracing::warn!(user_id = ctx.user_id, request_id = %ctx.request_id, %err,
                 "clear hold failed; reservation will TTL-expire");
-        }
-        if let Some(bts) = &self.budget_tokens {
-            bts.deduct_settle(ctx.user_id, cost);
         }
         self.check_balance_events(ctx, balance_before, balance_after)
             .await;

@@ -110,42 +110,6 @@ fn unknown_ssl_mode_is_rejected_with_its_field_name() {
     }
 }
 
-/// Every settings field must reach the DSN under its libpq keyword. Parsing the
-/// rendered string back into pairs tests the mapping without restating the
-/// format string.
-#[test]
-fn dsn_carries_every_field_under_its_libpq_keyword() {
-    let settings = DbSettings {
-        host: "db.internal".to_owned(),
-        port: 6543,
-        user: "gateway".to_owned(),
-        password: "s3cret".to_owned(),
-        dbname: "agw".to_owned(),
-        sslmode: "require".to_owned(),
-        ..DbSettings::default()
-    };
-
-    let dsn = settings.dsn();
-    let pairs: Vec<(&str, &str)> = dsn
-        .split(' ')
-        .map(|kv| kv.split_once('=').expect("every DSN token is key=value"))
-        .collect();
-
-    let get = |key: &str| {
-        pairs
-            .iter()
-            .find(|(k, _)| *k == key)
-            .unwrap_or_else(|| panic!("DSN is missing the {key} keyword"))
-            .1
-    };
-    assert_eq!(get("host"), settings.host);
-    assert_eq!(get("port"), settings.port.to_string());
-    assert_eq!(get("user"), settings.user);
-    assert_eq!(get("password"), settings.password);
-    assert_eq!(get("dbname"), settings.dbname);
-    assert_eq!(get("sslmode"), settings.sslmode);
-}
-
 /// End-to-end pool bootstrap. Ignored because it needs a live Postgres; run it
 /// with `cargo test -p gw-infra -- --ignored` once one is reachable at the
 /// `config.example.yaml` coordinates.

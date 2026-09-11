@@ -1,12 +1,13 @@
+import { lazy, Suspense } from 'react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/shared/components/ui/tabs'
 import { Settings as SettingsIcon, ScrollText, Bell, MessageSquareText, Wallet } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 
-import AdminProxyConfigPage from '../proxy/AdminProxyConfigPage'
-import AdminProxyLogsPage from '../proxy/AdminProxyLogsPage'
-import Announcements from '../announcements/AdminAnnouncementsPage'
-import AdminTicketQuickRepliesPage from './AdminTicketQuickRepliesPage'
-import AdminPaymentConfig from '../payment-config/AdminPaymentConfigPage'
+const AdminProxyConfigPage = lazy(() => import('../proxy/AdminProxyConfigPage'))
+const AdminProxyLogsPage = lazy(() => import('../proxy/AdminProxyLogsPage'))
+const Announcements = lazy(() => import('../announcements/AdminAnnouncementsPage'))
+const AdminTicketQuickRepliesPage = lazy(() => import('./AdminTicketQuickRepliesPage'))
+const AdminPaymentConfig = lazy(() => import('../payment-config/AdminPaymentConfigPage'))
 
 const tabs = [
   { id: 'config', label: '网关配置', icon: SettingsIcon },
@@ -33,14 +34,7 @@ export default function AdminSettings() {
   }
 
   return (
-    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-7xl mx-auto" style={{ willChange: 'transform, opacity' }}>
-      <div>
-        <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">系统设置</h2>
-        <p className="text-gray-500 dark:text-dark-300 mt-1">
-          网关运行参数、日志、公告、工单快捷回复与支付渠道配置。
-        </p>
-      </div>
-
+    <div className="mx-auto max-w-7xl space-y-6">
       <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
         <TabsList className="grid h-auto w-full max-w-4xl grid-cols-2 gap-1 p-1 sm:grid-cols-3 lg:grid-cols-5 bg-muted rounded-xl">
           {tabs.map(tab => (
@@ -55,22 +49,26 @@ export default function AdminSettings() {
           ))}
         </TabsList>
 
-        <TabsContent value="config" className="mt-6 focus-visible:outline-none">
-          <AdminProxyConfigPage />
-        </TabsContent>
-        <TabsContent value="logs" className="mt-6 focus-visible:outline-none">
-          <AdminProxyLogsPage />
-        </TabsContent>
-        <TabsContent value="announcements" className="mt-6 focus-visible:outline-none">
-          <Announcements />
-        </TabsContent>
-        <TabsContent value="ticket-replies" className="mt-6 focus-visible:outline-none">
-          <AdminTicketQuickRepliesPage />
-        </TabsContent>
-        <TabsContent value="payment" className="mt-6 focus-visible:outline-none">
-          <AdminPaymentConfig />
+        <TabsContent value={activeTab} className="mt-6 focus-visible:outline-none">
+          <Suspense fallback={<TabFallback />}>
+            {activeTab === 'config' && <AdminProxyConfigPage />}
+            {activeTab === 'logs' && <AdminProxyLogsPage />}
+            {activeTab === 'announcements' && <Announcements />}
+            {activeTab === 'ticket-replies' && <AdminTicketQuickRepliesPage />}
+            {activeTab === 'payment' && <AdminPaymentConfig />}
+          </Suspense>
         </TabsContent>
       </Tabs>
+    </div>
+  )
+}
+
+function TabFallback() {
+  return (
+    <div className="space-y-3 py-6" role="status" aria-label="加载中">
+      <div className="h-10 rounded-xl bg-muted animate-pulse" />
+      <div className="h-10 rounded-xl bg-muted/70 animate-pulse" />
+      <div className="h-32 rounded-xl bg-muted/50 animate-pulse" />
     </div>
   )
 }

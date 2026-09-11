@@ -25,12 +25,8 @@ use crate::{AdminUser, AuthUser, PanelState, err, ok};
 #[cfg(test)]
 mod tests;
 
-/// Business code paired with 400 across the panel. 对应 `apiErrorBadRequest`。
-const ERR_BAD_REQUEST: i32 = 4000;
-/// Business code paired with 404. 对应 `apiErrorNotFound`。
-const ERR_NOT_FOUND: i32 = 4004;
-/// Business code paired with 500. 对应 `apiErrorInternal`。
-const ERR_INTERNAL: i32 = 5000;
+use crate::codes::{BAD_REQUEST as ERR_BAD_REQUEST, INTERNAL as ERR_INTERNAL};
+use crate::identity::ERR_NOT_FOUND;
 
 /// The group whose multiplier is the system baseline; it cannot be deleted.
 /// 对应 `AdminDeletePricingGroupHandler` 里 `name == "default"` 的守卫。

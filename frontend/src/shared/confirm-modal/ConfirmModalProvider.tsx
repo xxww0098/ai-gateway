@@ -65,13 +65,13 @@ export function ConfirmModalProvider({
     variant === "danger"
       ? "bg-red-50 text-red-600 ring-red-100 dark:bg-red-950/40 dark:text-red-300 dark:ring-red-900/70"
       : variant === "warning"
-        ? "bg-amber-50 text-amber-600 ring-amber-100 dark:bg-amber-950/40 dark:text-amber-300 dark:ring-amber-900/70"
+        ? "bg-amber-50 text-amber-700 dark:text-amber-400 ring-amber-100 dark:bg-amber-950/40 dark:text-amber-300 dark:ring-amber-900/70"
         : "bg-primary-50 text-primary-600 ring-primary-100 dark:bg-primary-950/40 dark:text-primary-300 dark:ring-primary-900/70"
   const confirmClassName =
     variant === "danger"
       ? "bg-red-600 text-white shadow-sm hover:bg-red-700 focus-visible:ring-red-500 dark:bg-red-500 dark:hover:bg-red-400"
       : variant === "warning"
-        ? "bg-amber-600 text-white shadow-sm hover:bg-amber-700 focus-visible:ring-amber-500 dark:bg-amber-500 dark:text-amber-950 dark:hover:bg-amber-400"
+        ? "bg-amber-700 text-white shadow-sm hover:bg-amber-800 focus-visible:ring-amber-500 dark:bg-amber-500 dark:text-amber-950 dark:hover:bg-amber-400"
         : "bg-primary text-primary-foreground shadow-sm hover:bg-primary/90 focus-visible:ring-ring"
   const dismiss =
     opts?.dismissViaOverlayOrEscape !== undefined

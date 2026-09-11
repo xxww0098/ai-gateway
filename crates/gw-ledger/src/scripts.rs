@@ -1,4 +1,4 @@
-//! The two atomic Lua scripts the hold accounting runs inside Redis.
+//! Hold admission and available-balance Lua, plus a separate publish script.
 //!
 //! Both scripts are the only place where "available balance" is computed, and
 //! they must stay verbatim: multiple binaries can share one Redis during a
@@ -21,7 +21,7 @@ use redis::Script;
 ///
 /// The expiry cutoff (`now - ttl`) and the summation are the cutover
 /// contract: two binaries may share one Redis, and they must admit against
-/// the same view of the balance. `EXPIRE` and the optional floor (`ARGV[7]`)
+/// the same view of the balance. `EXPIRE` and the optional floor (`ARGV[6]`)
 /// are additive — a new script SHA can coexist with an old one; they do not
 /// change who is admitted for a given `(balance, holds, amount)`.
 ///
@@ -33,9 +33,8 @@ use redis::Script;
 /// ARGV[2] = request ID
 /// ARGV[3] = current timestamp (unix seconds)
 /// ARGV[4] = hold TTL seconds
-/// ARGV[5] = idempotency key (empty string if none)
-/// ARGV[6] = hold-key EXPIRE seconds (hold TTL + margin)
-/// ARGV[7] = min available (floor); defaults to ARGV[1] when absent/invalid
+/// ARGV[5] = hold-key EXPIRE seconds (hold TTL + margin)
+/// ARGV[6] = min available (floor); defaults to ARGV[1] when absent/invalid
 /// ```
 ///
 /// Re-holding an existing request id is idempotent: the script replies `OK`
@@ -57,8 +56,8 @@ local amount = tonumber(ARGV[1])
 local request_id = ARGV[2]
 local now = tonumber(ARGV[3])
 local ttl_seconds = tonumber(ARGV[4])
-local key_ttl = tonumber(ARGV[6])
-local min_available = tonumber(ARGV[7])
+local key_ttl = tonumber(ARGV[5])
+local min_available = tonumber(ARGV[6])
 if not min_available then
     min_available = amount
 end
@@ -171,6 +170,22 @@ end
 -- Return available balance
 local available = balance - sum_holds
 return tostring(available)
+",
+    )
+});
+
+/// Conditional balance publish. Not the hold/get-balance admission scripts.
+///
+/// KEYS[1] = balance string, KEYS[2] = version string
+/// ARGV[1] = balance, ARGV[2] = version, ARGV[3] = ttl seconds
+pub(crate) static PUBLISH_BALANCE_SCRIPT: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(
+        r"
+local cur = tonumber(redis.call('GET', KEYS[2]) or '0')
+if tonumber(ARGV[2]) < cur then return 'STALE' end
+redis.call('SETEX', KEYS[1], ARGV[3], ARGV[1])
+redis.call('SETEX', KEYS[2], ARGV[3], ARGV[2])
+return 'OK'
 ",
     )
 });

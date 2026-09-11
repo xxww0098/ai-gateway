@@ -1,29 +1,59 @@
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useEffect } from 'react'
 import { useAuthStore } from '@/features/auth/auth_store'
-import { Search, RefreshCw, Cpu, Pencil } from 'lucide-react'
+import { isStaff } from '@/shared/role_core'
 import {
   getModelProviderKey,
   getProviderDisplayName,
   getProviderOptions,
   matchesModelSearch,
+  type ModelCatalogItem,
 } from '@/features/pricing/model_catalog'
 import { ModelCatalogCard } from '@/features/pricing/components/ModelCatalogCard'
-import { getProviderStyle } from '@/features/pricing/modelCatalogUtils'
+import { ModelCatalogTable } from '@/features/pricing/components/ModelCatalogTable'
+import { ModelCatalogHeader } from '@/features/pricing/components/ModelCatalogHeader'
+import {
+  ModelCatalogFilters,
+  type CapabilityFilter,
+  type SortOption,
+  type ViewMode,
+} from '@/features/pricing/components/ModelCatalogFilters'
+import { ModelEmptyState } from '@/features/pricing/components/ModelEmptyState'
+import { ModelQuickCodeDialog } from '@/features/pricing/components/ModelQuickCodeDialog'
+import { ModelCatalogSkeleton } from '@/features/pricing/components/ModelCatalogSkeleton'
 import { useModels } from '@/features/pricing/hooks'
-import { EmptyState } from '@/shared/components/EmptyState'
-import { userRoutes } from '@/shared/routes/user'
 
-// ── Main Component ──────────────────────────────────────────────────────────
+const VIEW_MODE_STORAGE_KEY = 'agw_models_view_mode'
 
 export default function Models() {
   const [search, setSearch] = useState('')
   const [filterProvider, setFilterProvider] = useState('all')
+  const [filterCapability, setFilterCapability] = useState<CapabilityFilter>('all')
+  const [sort, setSort] = useState<SortOption>('default')
+  const [viewMode, setViewMode] = useState<ViewMode>(() => {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem(VIEW_MODE_STORAGE_KEY)
+      if (stored === 'grid' || stored === 'table') return stored
+    }
+    return 'grid'
+  })
+
   const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [quickCodeModel, setQuickCodeModel] = useState<ModelCatalogItem | null>(null)
+  const [quickCodeOpen, setQuickCodeOpen] = useState(false)
 
   const user = useAuthStore((s) => s.user)
-  const isAdmin = user?.role === 'admin'
+  const isAdmin = isStaff(user?.role)
 
   const { models, rateMultiplier, isLoading: loading, refetch } = useModels()
+
+  const handleViewModeChange = useCallback((mode: ViewMode) => {
+    setViewMode(mode)
+    try {
+      localStorage.setItem(VIEW_MODE_STORAGE_KEY, mode)
+    } catch {
+      // ignore storage errors
+    }
+  }, [])
 
   const providers = useMemo(() => {
     return getProviderOptions(models)
@@ -31,14 +61,58 @@ export default function Models() {
 
   const filtered = useMemo(() => {
     let items = [...models]
+
+    // 1. Provider filter
     if (filterProvider !== 'all') {
       items = items.filter((m) => getModelProviderKey(m) === filterProvider)
     }
-    if (search.trim()) {
-      items = items.filter(m => matchesModelSearch(m, search))
+
+    // 2. Capability filter
+    if (filterCapability === 'reasoning') {
+      items = items.filter((m) => Boolean(m.thinking || (m.reasoning_price_per_1m ?? 0) > 0))
+    } else if (filterCapability === 'vision') {
+      items = items.filter((m) =>
+        Boolean(
+          m.supportedInputModalities?.includes('image') ||
+            m.supportedOutputModalities?.includes('image') ||
+            m.id.toLowerCase().includes('vision') ||
+            m.id.toLowerCase().includes('4o') ||
+            m.id.toLowerCase().includes('omni')
+        )
+      )
+    } else if (filterCapability === 'longContext') {
+      items = items.filter((m) => {
+        const limit = m.context_length ?? m.inputTokenLimit ?? 0
+        return limit >= 128000
+      })
+    } else if (filterCapability === 'caching') {
+      items = items.filter((m) => (m.cached_input_price_per_1m ?? 0) > 0)
     }
+
+    // 3. Search filter
+    if (search.trim()) {
+      items = items.filter((m) => matchesModelSearch(m, search))
+    }
+
+    // 4. Sorting
+    if (sort === 'price_input_asc') {
+      items.sort((a, b) => (a.input_price_per_1m ?? 0) - (b.input_price_per_1m ?? 0))
+    } else if (sort === 'price_input_desc') {
+      items.sort((a, b) => (b.input_price_per_1m ?? 0) - (a.input_price_per_1m ?? 0))
+    } else if (sort === 'price_output_asc') {
+      items.sort((a, b) => (a.output_price_per_1m ?? 0) - (b.output_price_per_1m ?? 0))
+    } else if (sort === 'context_desc') {
+      items.sort((a, b) => {
+        const aLimit = a.context_length ?? a.inputTokenLimit ?? 0
+        const bLimit = b.context_length ?? b.inputTokenLimit ?? 0
+        return bLimit - aLimit
+      })
+    } else if (sort === 'name_asc') {
+      items.sort((a, b) => a.id.localeCompare(b.id))
+    }
+
     return items
-  }, [models, filterProvider, search])
+  }, [models, filterProvider, filterCapability, search, sort])
 
   const handleCopy = useCallback((id: string) => {
     navigator.clipboard.writeText(id)
@@ -46,128 +120,114 @@ export default function Models() {
     setTimeout(() => setCopiedId(null), 1500)
   }, [])
 
+  const handleOpenCode = useCallback((model: ModelCatalogItem) => {
+    setQuickCodeModel(model)
+    setQuickCodeOpen(true)
+  }, [])
+
+  const handleClearFilters = useCallback(() => {
+    setSearch('')
+    setFilterProvider('all')
+    setFilterCapability('all')
+    setSort('default')
+  }, [])
+
+  // Keyboard shortcut '/' to search
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === '/' && document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'TEXTAREA') {
+        e.preventDefault()
+        const input = document.querySelector<HTMLInputElement>('input[placeholder*="搜索"]')
+        input?.focus()
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [])
+
   return (
-    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500" style={{ willChange: 'transform, opacity' }}>
-      {/* Header */}
-      <div>
-        <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">模型</h2>
-        <p className="text-gray-500 dark:text-dark-300 mt-1">
-          当前 API 代理网关支持的所有 AI 模型及其定价信息。
-          {rateMultiplier !== 1 && (
-            <span className="ml-2 inline-flex items-center rounded-md bg-primary-50 dark:bg-primary-950/30 px-2 py-0.5 text-xs font-medium text-primary-700 dark:text-primary-300">
-              当前倍率 ×{rateMultiplier}
-            </span>
-          )}
-          {isAdmin && (
-            <span className="ml-2 inline-flex items-center rounded-md bg-amber-50 dark:bg-amber-950/30 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-300 gap-1">
-              <Pencil className="h-3 w-3" />
-              点击价格可直接编辑
-            </span>
-          )}
-        </p>
-      </div>
+    <div className="space-y-6">
+      {/* Header Banner */}
+      <ModelCatalogHeader
+        totalModels={models.length}
+        totalProviders={providers.length}
+        rateMultiplier={rateMultiplier}
+      />
 
-      {/* Toolbar */}
-      <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between">
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Provider filter pills */}
-          <button
-            onClick={() => setFilterProvider('all')}
-            className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
-              filterProvider === 'all'
-                ? 'border-primary-300 bg-primary-50 text-primary-700 dark:border-primary-800 dark:bg-primary-950/30 dark:text-primary-300'
-                : 'border-gray-200 dark:border-dark-600 text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-dark-500'
-            }`}
-          >
-            全部
-            <span className="rounded bg-black/5 dark:bg-white/10 px-1.5 py-0.5 text-[10px] tabular-nums">{models.length}</span>
-          </button>
-          {providers.map(({ key, label, count }) => {
-            const style = getProviderStyle(key)
-            return (
-              <button
-                key={key}
-                onClick={() => setFilterProvider(key)}
-                className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium capitalize transition-colors ${
-                  filterProvider === key
-                    ? `${style.border} ${style.bg} ${style.text}`
-                    : 'border-gray-200 dark:border-dark-600 text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-dark-500'
-                }`}
-              >
-                {label}
-                <span className="rounded bg-black/5 dark:bg-white/10 px-1.5 py-0.5 text-[10px] tabular-nums">{count}</span>
-              </button>
-            )
-          })}
-        </div>
+      {/* Filters Toolbar */}
+      <ModelCatalogFilters
+        totalCount={models.length}
+        providers={providers}
+        selectedProvider={filterProvider}
+        onSelectProvider={setFilterProvider}
+        selectedCapability={filterCapability}
+        onSelectCapability={setFilterCapability}
+        search={search}
+        onSearchChange={setSearch}
+        sort={sort}
+        onSortChange={setSort}
+        viewMode={viewMode}
+        onViewModeChange={handleViewModeChange}
+        loading={loading}
+        onRefresh={() => refetch()}
+      />
 
-        <div className="flex items-center gap-2">
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
-            <input
-              className="h-9 w-56 rounded-lg border border-gray-200 dark:border-dark-600 bg-white dark:bg-dark-900 pl-8 pr-3 text-sm text-gray-700 dark:text-gray-200 placeholder:text-gray-400 outline-none focus:border-primary-400 focus:ring-1 focus:ring-primary-400/30 transition-colors"
-              placeholder="搜索模型、名称或供应商..."
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-            />
-          </div>
-          <button
-            onClick={() => refetch()}
-            disabled={loading}
-            className="h-9 rounded-lg border border-gray-200 dark:border-dark-600 bg-white dark:bg-dark-900 px-3 text-sm font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-dark-800 transition-colors inline-flex items-center gap-1.5 disabled:opacity-50"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
-            刷新
-          </button>
-        </div>
-      </div>
-
-      {/* Models Grid */}
+      {/* Main Content Area */}
       {loading ? (
-        <div className="flex items-center justify-center py-20">
-          <RefreshCw className="h-6 w-6 animate-spin text-primary-500" />
-          <span className="ml-3 text-gray-500 dark:text-dark-400">加载模型列表...</span>
-        </div>
+        <ModelCatalogSkeleton viewMode={viewMode} />
       ) : filtered.length === 0 ? (
         models.length === 0 ? (
-          <EmptyState
-            bordered
-            icon={Cpu}
-            title="暂无可用模型"
-            description="网关当前未开放任何上游模型。如需特定模型支持，可提交工单联系管理员。"
-            action={{ label: '提交工单咨询', to: userRoutes.tickets }}
-          />
+          <ModelEmptyState isAdmin={isAdmin} />
         ) : (
-          <EmptyState
-            bordered
-            tone="no-results"
-            icon={Cpu}
-            title="未找到匹配的模型"
-            description="请尝试调整搜索关键词，或清除提供商筛选条件。"
+          <ModelEmptyState
+            isAdmin={isAdmin}
+            isFilterMiss
+            onClearFilter={handleClearFilters}
           />
         )
+      ) : viewMode === 'table' ? (
+        <ModelCatalogTable
+          models={filtered}
+          isAdmin={isAdmin}
+          copiedId={copiedId}
+          onCopy={handleCopy}
+          onOpenCode={handleOpenCode}
+          onPriceSaved={() => refetch()}
+        />
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {filtered.map(m => (
+          {filtered.map((m) => (
             <ModelCatalogCard
               key={m.id}
               model={m}
               isAdmin={isAdmin}
               copied={copiedId === m.id}
               onCopy={handleCopy}
+              onOpenCode={handleOpenCode}
               onPriceSaved={() => refetch()}
             />
           ))}
         </div>
       )}
 
-      {/* Footer */}
+      {/* Footer Info */}
       {!loading && filtered.length > 0 && (
-        <div className="text-xs text-gray-400 dark:text-dark-500 text-center pb-2 tabular-nums">
-          共 {filtered.length} 个模型{filterProvider !== 'all' ? `（${getProviderDisplayName(filterProvider)}）` : ''}
-          {filtered.length !== models.length && ` / 总计 ${models.length} 个`}
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-muted-foreground pt-2 border-t border-border/40 tabular-nums">
+          <div>
+            显示 {filtered.length} 个模型
+            {filterProvider !== 'all' && `（${getProviderDisplayName(filterProvider)}）`}
+            {filtered.length !== models.length && ` / 共 ${models.length} 个`}
+          </div>
+          <div>按真实 Token 精算 · 输入 / 输出 / 缓存 / 推理四列独立单价</div>
         </div>
       )}
+
+      {/* Quick Integration Code Dialog */}
+      <ModelQuickCodeDialog
+        model={quickCodeModel}
+        open={quickCodeOpen}
+        onOpenChange={setQuickCodeOpen}
+      />
     </div>
   )
 }

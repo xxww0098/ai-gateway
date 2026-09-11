@@ -1,14 +1,13 @@
-//! 身份域：注册/登录/登出、用户 CRUD、API Key、分组、面板鉴权中间件。
+//! 身份域：注册/登录/登出、用户资料、API Key、分组、面板鉴权中间件。
 //!
-//! Owner: worker `panel-identity`。注册/登录/登出、用户 CRUD、API Key、分组、
+//! Owner: worker `panel-identity`。注册/登录/登出、用户资料、API Key、分组、
 //! 面板鉴权中间件。
 //!
-//! # 这个域为什么装得下「用户」和「管理员」两侧
+//! # 为什么自助能力都住在身份域
 //!
-//! 规则 1.6：删掉一个功能应该等于删掉一个文件夹。「API Key」既有
-//! `GET /user/api-keys` 也有 `GET /admin/users/{id}/api-keys`，两条路由读的是同一张
-//! 表、同一套语义，所以它们住在同一个 [`apikey`] 里，而不是被 admin/user 的角色边界
-//! 劈成两半。分组、用户资料同理。
+//! 规则 1.6：删掉一个功能应该等于删掉一个文件夹。密钥、分组、用户资料都只面向
+//! 用户自己（管理员侧的「用户管理」已下线），所以它们按领域收在 [`apikey`] /
+//! [`groups`] / [`users`] 里，而不是按 admin/user 的角色边界劈开。
 //!
 //! # 子模块
 //!
@@ -17,9 +16,10 @@
 //! | [`auth`] | 鉴权（`AuthMiddleware` 的鉴权部分） |
 //! | [`apikey`] | `GenerateAPIKey` + 各 API Key handler |
 //! | [`groups`] | available-groups + 分组 CRUD |
-//! | [`users`] | profile + 用户 CRUD/deposit |
+//! | [`users`] | profile（自己的资料） |
 //! | [`entitlement`] | `UserHoldsEntitlement` 谓词 |
-//! | [`bootstrap`] | 管理员引导 |
+//! | [`bootstrap`] | `super_admin` 引导 |
+//! | — | 三档角色 re-export 自 `gw_role`（[`Role`]） |
 //! | [`oplog`] | `recordOperation` 的**写**一半（哈希与 canonical 在 [`crate::audit`]） |
 //! | [`paging`] | `queryInt` / `parseUintParam` 与分页信封 |
 //!
@@ -34,6 +34,8 @@ pub mod entitlement;
 pub mod groups;
 pub mod oplog;
 pub mod users;
+
+pub use gw_role::Role;
 
 use axum::Router;
 use axum::http::StatusCode;
@@ -171,20 +173,6 @@ pub fn router() -> Router<PanelState> {
         .route("/user/api-keys/{id}", delete(apikey::delete_own))
         .route("/user/api-keys/{id}/group", patch(apikey::rebind_group))
         .route("/user/available-groups", get(groups::available))
-        // ── 管理员：用户 ──
-        .route(
-            "/admin/users",
-            get(users::admin_list).post(users::admin_create),
-        )
-        .route(
-            "/admin/users/{id}",
-            put(users::admin_update).delete(users::admin_delete),
-        )
-        .route("/admin/users/{id}/deposit", post(users::admin_deposit))
-        .route(
-            "/admin/users/{id}/api-keys",
-            get(apikey::admin_list_for_user),
-        )
         // ── 管理员：分组（即 subscription_packages） ──
         .route(
             "/admin/groups",

@@ -7,11 +7,11 @@
 //! the whole HTTP lifecycle and treats persisted credential records as data
 //! only, with [`gw_authcore::AuthRecord`] as the record.
 
+use crate::claude::shared::{base_url_attribute, default_content_negotiation, upstream_error};
 use crate::common::{
-    DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_CODEX, ProviderConfig, attach_body,
-    chat_completions_endpoint, ensure_include_usage, nested_string, request_surface,
-    requested_model, resolve_timeout, responses_endpoint, shared_client, stream_response,
-    string_from_map, usage_stream,
+    PROVIDER_CODEX, ProviderConfig, attach_body, chat_completions_endpoint, ensure_include_usage,
+    nested_string, relay_usage_stream, request_surface, requested_model, resolve_timeout,
+    responses_endpoint, shared_client, string_from_map,
 };
 use crate::openai::bearer;
 use crate::types::{
@@ -22,7 +22,8 @@ use crate::usage::{parse_codex_stream_usage, parse_codex_usage};
 use chrono::{SecondsFormat, Utc};
 use gw_authcore::{AuthRecord, AuthStatus};
 use gw_relay::Surface;
-use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use gw_relay::endpoint::top_level_field;
+use http::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
 use http::{HeaderMap, HeaderValue};
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -118,19 +119,8 @@ impl CodexProvider {
     /// [`AuthRecord`] has no separate storage field — everything lives in
     /// `metadata` — so the cascade ends at four.
     fn resolve_credentials(&self, auth: &AuthRecord) -> (String, String) {
-        let mut base_url = self.base_url.trim().to_owned();
-        if base_url.is_empty() {
-            base_url = CODEX_DEFAULT_BASE_URL.to_owned();
-        }
-        for key in ["base_url", "base-url"] {
-            if let Some(value) = auth.attributes.get(key) {
-                let value = value.trim().trim_end_matches('/');
-                if !value.is_empty() {
-                    base_url = value.to_owned();
-                    break;
-                }
-            }
-        }
+        // `new()` 已保证 `self.base_url` 非空且已修剪。
+        let base_url = base_url_attribute(auth).unwrap_or_else(|| self.base_url.clone());
 
         let token = string_from_map(&auth.metadata, CODEX_METADATA_ACCESS_TOKEN)
             .or_else(|| {
@@ -186,30 +176,43 @@ impl CodexProvider {
                 chat_completions_endpoint(base_url, &req.query)?
             }
         };
+        let mut headers = HeaderMap::new();
+        copy_outbound_headers(&mut headers, &req.headers);
+        default_content_negotiation(&mut headers, stream);
+        headers.insert(AUTHORIZATION, bearer(access_token)?);
+        headers.insert(USER_AGENT, HeaderValue::from_static(gw_oauth::codex::USER_AGENT));
+        headers.insert(
+            http::HeaderName::from_static("originator"),
+            HeaderValue::from_static(gw_oauth::codex::ORIGINATOR),
+        );
+
+        let payload = match serde_json::from_slice::<Value>(&req.payload) {
+            Ok(value) => {
+                let rewritten = gw_oauth::rewrite_body(gw_oauth::Family::Codex, value, None);
+                let cache_headers = gw_oauth::cache_headers(
+                    gw_oauth::Family::Codex,
+                    rewritten.cache_session_id.as_deref(),
+                    &gw_oauth::HeaderExtra::default(),
+                );
+                for (name, value) in cache_headers.iter() {
+                    headers.append(name.clone(), value.clone());
+                }
+                bytes::Bytes::from(serde_json::to_vec(&rewritten.payload).unwrap_or_else(|_| req.payload.to_vec()))
+            }
+            Err(_) => req.payload.clone(),
+        };
         // Like the OpenAI executor: force the terminal usage envelope on
         // streams, but only after re-verifying `stream: true` in the body.
         // `None` 表示一个字节都不动。
         let spliced = if stream {
-            ensure_include_usage(&req.payload, surface)
+            ensure_include_usage(&payload, surface)
         } else {
             None
         };
 
-        let mut headers = HeaderMap::new();
-        copy_outbound_headers(&mut headers, &req.headers);
-        if !headers.contains_key(CONTENT_TYPE) {
-            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        }
-        if stream {
-            headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
-        } else if !headers.contains_key(ACCEPT) {
-            headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-        }
-        headers.insert(AUTHORIZATION, bearer(access_token)?);
-
         let mut builder = attach_body(
             self.client.post(endpoint).headers(headers),
-            &req.payload,
+            &payload,
             spliced,
         );
         if !stream {
@@ -245,10 +248,7 @@ impl CodexProvider {
             ProviderError::Other(anyhow::anyhow!("reading codex refresh response: {err}"))
         })?;
         if status >= 400 {
-            return Err(ProviderError::Upstream {
-                status,
-                body: String::from_utf8_lossy(&payload).into_owned(),
-            });
+            return Err(upstream_error(status, &payload));
         }
         serde_json::from_slice(&payload).map_err(|err| {
             ProviderError::Other(anyhow::anyhow!("parsing codex refresh response: {err}"))
@@ -263,16 +263,12 @@ impl CodexProvider {
 /// absent.
 #[must_use]
 pub fn codex_model_from_body(body: &[u8]) -> String {
-    if body.is_empty() {
-        return String::new();
-    }
-    let Ok(value) = serde_json::from_slice::<Value>(body) else {
-        return String::new();
-    };
-    match value.get("model") {
-        Some(Value::String(model)) => model.trim().to_owned(),
-        _ => String::new(),
-    }
+    // 零分配的顶层字段扫描（与 `usage.rs` 同一把梳子）：一个 ~900 KB 的
+    // payload 不必为读一个 `model` 字符串建整棵 `Value` 树。
+    top_level_field(body, "model")
+        .and_then(|raw| serde_json::from_slice::<String>(raw).ok())
+        .map(|model| model.trim().to_owned())
+        .unwrap_or_default()
 }
 
 /// Merges a refresh response into the stored `token_data` blob.
@@ -364,10 +360,7 @@ impl Provider for CodexProvider {
         let headers = response.headers().clone();
         let body = response.bytes().await?;
         if status >= 400 {
-            return Err(ProviderError::Upstream {
-                status,
-                body: String::from_utf8_lossy(&body).into_owned(),
-            });
+            return Err(upstream_error(status, &body));
         }
         let usage = parse_codex_usage(&body).map(|t| t.to_record(model, PROVIDER_CODEX));
         Ok(ProviderResponse {
@@ -393,21 +386,14 @@ impl Provider for CodexProvider {
         let status = response.status().as_u16();
         if status >= 400 {
             let body = response.bytes().await.unwrap_or_default();
-            return Err(ProviderError::Upstream {
-                status,
-                body: String::from_utf8_lossy(&body).into_owned(),
-            });
+            return Err(upstream_error(status, &body));
         }
-        Ok(stream_response(response, move |response, status| {
-            usage_stream(
-                response.bytes_stream(),
-                DEFAULT_STREAM_IDLE_TIMEOUT,
-                model,
-                PROVIDER_CODEX,
-                parse_codex_stream_usage,
-                status,
-            )
-        }))
+        Ok(relay_usage_stream(
+            response,
+            model,
+            PROVIDER_CODEX,
+            parse_codex_stream_usage,
+        ))
     }
 
     /// Rotates the OAuth credential.

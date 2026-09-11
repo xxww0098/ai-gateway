@@ -7,8 +7,17 @@
 
 mod common;
 
+#[path = "postgres_ledger/balance_tx.rs"]
+mod balance_tx;
+
+#[path = "postgres_ledger/intent.rs"]
+mod intent;
+
+#[path = "postgres_ledger/plan.rs"]
+mod plan;
+
 use common::{FAULT_PREFIX, Fixture, Rng};
-use gw_ledger::{LedgerError, shortfall_resolve_reference};
+use gw_ledger::{LedgerError, WriteOff, shortfall_resolve_reference};
 
 const EPSILON: f64 = 1e-9;
 
@@ -335,13 +344,15 @@ async fn an_overrun_records_debt_and_blocks_the_user() {
     fx.cleanup().await;
 }
 
-/// The compensating credit clears the debt, and only through the paired
-/// reference — which is the whole point of pinning it to the debt row's id.
+/// The write-off clears the debt, and only through the paired reference —
+/// which is the whole point of pinning it to the debt row's id. And it is a
+/// *zero-amount* credit: the gate opens, the balance does not move.
 #[tokio::test]
 #[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
 async fn a_paired_credit_resolves_the_debt_and_an_unpaired_one_does_not() {
     let mut fx = Fixture::postgres_only().await;
     let user = fx.seed_user(0.0).await;
+    let admin = fx.seed_user(0.0).await;
 
     let debit_id = fx.insert_shortfall_row(user, "req-debt", 5.0).await;
     assert!(
@@ -364,21 +375,164 @@ async fn a_paired_credit_resolves_the_debt_and_an_unpaired_one_does_not() {
         "an unpaired credit must not clear a tracked debt"
     );
 
-    // The paired reference does.
-    fx.ledger
-        .resolve_shortfall(user, "req-debt", debit_id, 5.0)
-        .await
-        .expect("resolve");
+    // The paired reference does — and the user's money is not touched by it.
+    let before = fx.balance(user).await;
+    assert_eq!(
+        fx.ledger
+            .write_off_shortfall(debit_id, admin)
+            .await
+            .expect("write off"),
+        WriteOff::Written
+    );
     assert!(
         !fx.ledger
             .has_unresolved_shortfall(user)
             .await
             .expect("probe")
     );
+    assert!(
+        approx(fx.balance(user).await, before),
+        "a write-off must not hand the user any balance"
+    );
 
-    // And the resolving row is exactly the reference the SQL predicate builds.
+    // And the resolving row is exactly the reference the SQL predicate builds,
+    // carrying a zero amount so the integrity replay is undisturbed.
     let reference = shortfall_resolve_reference("req-debt", debit_id);
-    assert_eq!(fx.logs_for(user, &reference).await.len(), 1);
+    let rows = fx.logs_for(user, &reference).await;
+    assert_eq!(rows.len(), 1);
+    assert!(approx(rows[0].1, 0.0));
+    assert_eq!(rows[0].2["written_off_by"].as_i64(), Some(admin));
+    assert_eq!(
+        fx.ledger
+            .verify_balance_integrity(user)
+            .await
+            .expect("integrity"),
+        0
+    );
+
+    fx.cleanup().await;
+}
+
+/// The three states of a write-off, and the fact that a second one cannot add
+/// a second resolving row (the partitioned unique index enforces it in the DB,
+/// so this holds under concurrency too).
+#[tokio::test]
+#[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
+async fn a_write_off_happens_at_most_once_and_only_against_a_real_debt() {
+    let mut fx = Fixture::postgres_only().await;
+    let user = fx.seed_user(10.0).await;
+    let admin = fx.seed_user(0.0).await;
+
+    let debit_id = fx.insert_shortfall_row(user, "req-twice", 2.5).await;
+    assert_eq!(
+        fx.ledger
+            .write_off_shortfall(debit_id, admin)
+            .await
+            .expect("write off"),
+        WriteOff::Written
+    );
+    assert_eq!(
+        fx.ledger
+            .write_off_shortfall(debit_id, admin)
+            .await
+            .expect("write off again"),
+        WriteOff::AlreadyResolved
+    );
+
+    let reference = shortfall_resolve_reference("req-twice", debit_id);
+    assert_eq!(
+        fx.logs_for(user, &reference).await.len(),
+        1,
+        "a repeated write-off must not append a second resolving row"
+    );
+
+    // An id nobody ever issued.
+    assert_eq!(
+        fx.ledger
+            .write_off_shortfall(i64::MAX, admin)
+            .await
+            .expect("write off a phantom"),
+        WriteOff::Missing
+    );
+
+    // A settle row that carries no debt is not a write-off target either.
+    fx.ledger
+        .settle(user, "req-paid", 1.0)
+        .await
+        .expect("settle");
+    let paid_id: i64 = sqlx::query_scalar(
+        "SELECT id FROM balance_logs WHERE user_id = $1 AND reference = 'req-paid'",
+    )
+    .bind(user)
+    .fetch_one(&fx.pool)
+    .await
+    .expect("read the settle row");
+    assert_eq!(
+        fx.ledger
+            .write_off_shortfall(paid_id, admin)
+            .await
+            .expect("write off a settled row"),
+        WriteOff::Missing
+    );
+
+    fx.cleanup().await;
+}
+
+/// The admin list shows exactly the rows the gate is blocking on, and stops
+/// showing one the moment it is written off.
+#[tokio::test]
+#[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
+async fn the_admin_list_shows_the_debts_the_gate_blocks_on() {
+    let mut fx = Fixture::postgres_only().await;
+    let user = fx.seed_user(0.0).await;
+    let admin = fx.seed_user(0.0).await;
+
+    let first = fx.insert_shortfall_row(user, "req-a", 1.5).await;
+    let second = fx.insert_shortfall_row(user, "req-b", 2.5).await;
+
+    let (rows, total) = fx
+        .ledger
+        .list_unresolved_shortfalls(10, 0)
+        .await
+        .expect("list");
+    assert_eq!(total, 2);
+    let ids: Vec<i64> = rows.iter().map(|row| row.log_id).collect();
+    assert!(ids.contains(&first) && ids.contains(&second));
+    let listed = rows
+        .iter()
+        .find(|row| row.log_id == first)
+        .expect("the first debt is listed");
+    assert_eq!(listed.user_id, user);
+    assert_eq!(listed.reference, "req-a");
+    assert!(approx(listed.shortfall_usd, 1.5));
+
+    // Paging hands back one row at a time without repeating one.
+    let (page_one, _) = fx
+        .ledger
+        .list_unresolved_shortfalls(1, 0)
+        .await
+        .expect("page 1");
+    let (page_two, _) = fx
+        .ledger
+        .list_unresolved_shortfalls(1, 1)
+        .await
+        .expect("page 2");
+    assert_eq!(page_one.len(), 1);
+    assert_eq!(page_two.len(), 1);
+    assert_ne!(page_one[0].log_id, page_two[0].log_id);
+
+    fx.ledger
+        .write_off_shortfall(first, admin)
+        .await
+        .expect("write off");
+    let (rest, total) = fx
+        .ledger
+        .list_unresolved_shortfalls(10, 0)
+        .await
+        .expect("list again");
+    assert_eq!(total, 1);
+    assert_eq!(rest.len(), 1);
+    assert_eq!(rest[0].log_id, second);
 
     fx.cleanup().await;
 }
@@ -408,9 +562,14 @@ async fn the_shortfall_predicate_tracks_unpaired_debts_only() {
                 paired += 1;
             }
         }
+        // 孤儿 credit 的 reference 必须逐条唯一：0008 的分区唯一索引对
+        // `shortfall_resolve:%` 全局生效，两轮循环撞出同一个字符串会插不进去。
         for o in 0..orphans {
-            fx.insert_credit_row(user, &format!("shortfall_resolve:orphan-{o}:9999999"))
-                .await;
+            fx.insert_credit_row(
+                user,
+                &format!("shortfall_resolve:orphan-{user}-{o}:9999999"),
+            )
+            .await;
         }
 
         let want = paired < debts;
@@ -569,6 +728,95 @@ async fn balance_integrity_ignores_audit_only_rows() {
         0,
         "hold/release rows must not move the recomputed balance"
     );
+
+    fx.cleanup().await;
+}
+
+/// `balance_logs.reference` 在热路径上就是 request id，而 request id 认客户端传来的
+/// `X-Trace-Id`。所以「一条欠款只能注销一次」那个唯一索引**必须**同时钉住
+/// `type = 'credit'`：只按 reference 前缀分区的话，客户端发一个
+/// `X-Trace-Id: shortfall_resolve:…` 就能让自己的结算行撞进索引 —— 超预留结算本来
+/// 就在同一个事务里写两条 reference 相同的 settle 行（扣款行 + 欠款标记行），
+/// 必然自撞、整个事务回滚、余额一分不扣，等于无限白嫖。
+#[tokio::test]
+#[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
+async fn a_client_chosen_trace_id_cannot_poison_the_settle_path() {
+    let mut fx = Fixture::postgres_only().await;
+    let user = fx.seed_user(1.0).await;
+
+    // 攻击者把 request id 取成注销行的前缀，并且故意超预留触发 partial debit，
+    // 好让同一个事务写出两条 reference 相同的 settle 行。
+    let poisoned = "shortfall_resolve:free";
+    fx.ledger
+        .settle(user, poisoned, 5.0)
+        .await
+        .expect("结算不能因为客户端选的 trace id 而失败");
+
+    assert!(
+        approx(fx.balance(user).await, 0.0),
+        "余额必须照常被扣到 0，而不是因事务回滚而分文未动"
+    );
+    assert!(
+        fx.ledger
+            .has_unresolved_shortfall(user)
+            .await
+            .expect("probe"),
+        "欠款也必须照常记下来，否则这次改动要修的机制被自己废掉了"
+    );
+
+    fx.cleanup().await;
+}
+
+/// `reference` 列可空。判定谓词与注销语句必须用同一个 COALESCE 拼法，否则这类
+/// 历史行会「列表里看得见、门锁着、却注销不掉」—— 正是本功能要救的那种账号。
+#[tokio::test]
+#[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
+async fn a_debt_row_with_no_reference_is_listed_and_can_still_be_written_off() {
+    let mut fx = Fixture::postgres_only().await;
+    let user = fx.seed_user(0.0).await;
+    let admin = fx.seed_user(0.0).await;
+
+    let orphan_id: i64 = sqlx::query_scalar(
+        "INSERT INTO balance_logs (user_id, amount, type, reference, metadata, created_at) \
+         VALUES ($1, 0, 'settle', NULL, $2, NOW()) RETURNING id",
+    )
+    .bind(user)
+    .bind(serde_json::json!({ "shortfall_usd": 3.0 }))
+    .fetch_one(&fx.pool)
+    .await
+    .expect("insert a reference-less debt row");
+
+    assert!(
+        fx.ledger
+            .has_unresolved_shortfall(user)
+            .await
+            .expect("probe"),
+        "空 reference 的欠款照样该挡住计费"
+    );
+    let (rows, total) = fx
+        .ledger
+        .list_unresolved_shortfalls(10, 0)
+        .await
+        .expect("list");
+    assert_eq!(total, 1);
+    assert_eq!(rows[0].log_id, orphan_id);
+
+    assert_eq!(
+        fx.ledger
+            .write_off_shortfall(orphan_id, admin)
+            .await
+            .expect("write off"),
+        WriteOff::Written,
+        "列表里给得出的行，必须注销得掉"
+    );
+    assert!(
+        !fx.ledger
+            .has_unresolved_shortfall(user)
+            .await
+            .expect("probe"),
+        "注销之后门必须真的开"
+    );
+    assert!(approx(fx.balance(user).await, 0.0), "零额注销不许动余额");
 
     fx.cleanup().await;
 }

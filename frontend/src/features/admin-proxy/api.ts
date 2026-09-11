@@ -1,6 +1,6 @@
 import { sdkClient } from '@/shared/api/client'
 import { useAuthStore } from '@/features/auth/auth_store'
-import { extractErrorMessage } from '@/shared/api/errors'
+import { extractErrorMessage, httpFallbackMessage } from '@/shared/api/errors'
 import type { AuthFilesResponse, AuthFileStatusRequest, AuthFileUploadResponse } from './types'
 
 // ── SDK Management API (uses sdkClient with base /api/panel/admin/sdk-management) ──
@@ -36,14 +36,6 @@ export function deleteProviderConfig<T = unknown>(endpoint: string, body?: unkno
  */
 export function postProviderConfig<T = unknown>(endpoint: string, body?: unknown): Promise<T> {
   return sdkClient.post<T>(endpoint, body)
-}
-
-/** SDK-style manual OAuth callback (antigravity, etc.) via redirect_url. */
-export function submitSdkOAuthCallback(body: {
-  provider: string
-  redirect_url: string
-}): Promise<unknown> {
-  return sdkClient.post('/oauth-callback', body)
 }
 
 /** Gateway DB OAuth session completion with code + state. */
@@ -204,7 +196,10 @@ export async function uploadAuthFiles(formData: FormData): Promise<AuthFileUploa
     if (response.status === 401) {
       useAuthStore.getState().logout()
     }
-    const message = extractErrorMessage(data, response.statusText || '请求异常')
+    const message = extractErrorMessage(
+      data,
+      httpFallbackMessage(response.status, response.statusText),
+    )
     throw new Error(message)
   }
   // Unwrap standard wrapper if present
@@ -330,7 +325,10 @@ export async function fetchMgmtApiFormData(endpoint: string, formData: FormData)
     if (response.status === 401) {
       useAuthStore.getState().logout()
     }
-    const message = extractErrorMessage(data, response.statusText || '请求异常')
+    const message = extractErrorMessage(
+      data,
+      httpFallbackMessage(response.status, response.statusText),
+    )
     throw new Error(message)
   }
   if (data && typeof data === 'object' && 'code' in (data as object)) {

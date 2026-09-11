@@ -8,17 +8,19 @@
 //! Unary reuses the same settler: the HTTP response is built as soon as the
 //! upstream body and usage (or the fallback / strict / release decision
 //! inputs) are in hand, and the ledger write is spawned onto
-//! [`ProxyState::drain`] via [`StreamSettler`]'s `Drop`. That is the same
-//! path a hung-up stream already uses — not a second queue.
+//! [`ProxyState::drain`] via [`StreamSettler`]'s `Drop`. A stream that
+//! runs to completion takes that same Drop path — awaiting settle inside
+//! `poll_next` would (a) block the end-frame on Redis/Postgres and (b)
+//! lose the charge if the client hung up while that future sat in
+//! `finishing` with `done` already set.
 //!
 //! `claim_finalize` 四入口（每请求恰一次结算权）：
 //! | 入口 | 语义 |
-//! | [`stream_response`] | 流式：settler 持票，中间件 finalize 让位 |
+//! | [`stream_response`] | 流式：settler 持票，中间件 finalize 让位；结束或断开都走 Drop |
 //! | [`unary_response`] | 一元：同上，Drop 时结算 |
 //! | [`schedule_release`] | 上游未出 body：Release |
 //! | [`crate::hold::HoldMiddleware::finalize`] | 兜底：handler 未结算时 settle_missing 或 Release |
 
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
@@ -38,8 +40,8 @@ use crate::usage::{Settlement, UsageOutcome};
 /// Relays a streamed response, settling when the stream ends.
 ///
 /// Settlement is claimed up-front so the hold middleware's finalizer stands
-/// down; the actual charge is applied by [`StreamSettler`] once the last chunk
-/// has been forwarded, or by its `Drop` if the client hangs up mid-stream.
+/// down; the actual charge is applied by [`StreamSettler`]'s `Drop` — both
+/// when the last chunk has been forwarded and when the client hangs up.
 pub(super) fn stream_response(
     state: &ProxyState,
     upstream: StreamResponse,
@@ -47,6 +49,7 @@ pub(super) fn stream_response(
     auth_id: String,
     provider: &str,
     started: Instant,
+    channel_slot: Option<crate::channel::ChannelSlot>,
 ) -> Response {
     let StreamResponse {
         status,
@@ -71,7 +74,7 @@ pub(super) fn stream_response(
     let mut response = Response::new(Body::from_stream(RelayBody {
         chunks,
         settler,
-        finishing: None,
+        channel_slot,
     }));
     *response.status_mut() = status;
     apply_upstream_headers(response.headers_mut(), headers);
@@ -160,7 +163,8 @@ pub(super) fn schedule_release(state: &ProxyState, billing: Option<&BillingHandl
 struct RelayBody {
     chunks: Pin<Box<dyn Stream<Item = StreamChunk> + Send>>,
     settler: Option<StreamSettler>,
-    finishing: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    /// Held until the stream ends or the client hangs up.
+    channel_slot: Option<crate::channel::ChannelSlot>,
 }
 
 impl Stream for RelayBody {
@@ -169,11 +173,6 @@ impl Stream for RelayBody {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         loop {
-            if let Some(fut) = this.finishing.as_mut() {
-                ready!(fut.as_mut().poll(cx));
-                this.finishing = None;
-                return Poll::Ready(None);
-            }
             match ready!(this.chunks.as_mut().poll_next(cx)) {
                 Some(StreamChunk::Payload(bytes)) => {
                     return Poll::Ready(Some(Ok(bytes)));
@@ -189,20 +188,16 @@ impl Stream for RelayBody {
                         s.failed = true;
                     }
                 }
-                None => match this.settler.take() {
-                    Some(mut s) => {
-                        // Same order as the old unfold: mark done first so
-                        // Drop does not also spawn, then await settle inline.
-                        s.done = true;
-                        let settlement = s.settlement.clone();
-                        let ctx = s.ctx.clone();
-                        let outcome = s.into_outcome();
-                        this.finishing = Some(Box::pin(async move {
-                            settlement.settle(&ctx, outcome).await;
-                        }));
-                    }
-                    None => return Poll::Ready(None),
-                },
+                None => {
+                    this.channel_slot.take();
+                    // Drop the settler with `done` still false so `Drop`
+                    // spawns onto `ProxyState::drain` — the same path a
+                    // hung-up stream already uses. Marking `done` here and
+                    // awaiting settle inline lost the charge whenever the
+                    // client disconnected during that future.
+                    drop(this.settler.take());
+                    return Poll::Ready(None);
+                }
             }
         }
     }
@@ -225,16 +220,6 @@ struct StreamSettler {
 }
 
 impl StreamSettler {
-    fn into_outcome(mut self) -> UsageOutcome {
-        UsageOutcome {
-            usage: self.usage.take(),
-            failed: self.failed,
-            auth_id: std::mem::take(&mut self.auth_id),
-            provider: std::mem::take(&mut self.provider),
-            duration_ms: self.started.elapsed().as_millis() as i64,
-        }
-    }
-
     fn outcome(&self) -> UsageOutcome {
         UsageOutcome {
             usage: self.usage.clone(),
@@ -249,10 +234,11 @@ impl StreamSettler {
 impl Drop for StreamSettler {
     /// Detaches the ledger write onto [`ProxyState::drain`].
     ///
-    /// Two callers land here: a stream body dropped mid-flight, and a unary
-    /// response that already has its usage (or the release / strict inputs)
-    /// and must not make the client wait for Redis / Postgres. Either way
-    /// the hold must not be left to its TTL — that is free upstream output.
+    /// Three callers land here: a stream that ran to completion, a stream
+    /// body dropped mid-flight, and a unary response that already has its
+    /// usage (or the release / strict inputs) and must not make the client
+    /// wait for Redis / Postgres. Either way the hold must not be left to
+    /// its TTL — that is free upstream output.
     ///
     /// The task goes to [`ProxyState::drain`], **not** to `tokio::spawn`. A
     /// bare spawn is aborted the instant the runtime is dropped, which for a

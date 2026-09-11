@@ -1,7 +1,12 @@
 //! Locking, rotation and persistence of the quota counters.
 
 use super::*;
-use crate::testsupport::fresh_db;
+use crate::adapters::usage::SqlUsageStore;
+use crate::hold::evaluate_quota;
+use crate::ports::{SettleReceipt, SettlementCommit, UsageLogEntry, UsageStore};
+use crate::testsupport::{fresh_db, seed_user};
+use gw_ledger::Ledger;
+use std::sync::Arc;
 
 /// Seeds one subscription whose three reset boundaries are set individually,
 /// so a test can make exactly one period elapse.
@@ -148,5 +153,79 @@ async fn a_zero_boundary_means_the_period_never_rotates() {
         .0
         .0,
         5.0,
+    );
+}
+
+/// D0 characterization: lock_and_rotate commits before evaluate_quota, so two
+/// 1.0 admissions against 9/10 both pass and usage lands at 11. Slice 06 only
+/// if the product wants a hard cap. Kept green for `--ignored` CI.
+#[tokio::test]
+#[ignore = "needs a local Postgres: see testsupport::PG_HOWTO"]
+async fn concurrent_quota_admission_currently_overshoots_the_daily_limit() {
+    let pool = fresh_db("quota_d0").await;
+    seed_user(&pool, 7, 100.0).await;
+    sqlx::query(
+        "INSERT INTO subscriptions (id, user_id, package_id, group_id, group_name, status,              starts_at, expires_at, daily_usage_usd, daily_limit_usd, daily_reset_at,              weekly_usage_usd, weekly_reset_at, monthly_usage_usd, monthly_reset_at,              funding_source, funding_reference, price_paid_usd, notes, created_at, updated_at)          VALUES (1, 7, 1, 3, '', 'active', NOW(), NOW() + INTERVAL '30 days',                  9, 10, NOW() + INTERVAL '1 day', 0, NOW() + INTERVAL '7 days',                  0, NOW() + INTERVAL '30 days', '', '', 0, '', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed quota");
+
+    let quota_store = SqlSubscriptionQuotaStore::new(pool.clone());
+    let usage = SqlUsageStore::new(pool.clone(), Arc::new(Ledger::new(pool.clone(), None)));
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let mut handles = Vec::new();
+    for i in 0..2 {
+        let quota_store = quota_store.clone();
+        let usage = usage.clone();
+        let barrier = barrier.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            let snapshot = quota_store
+                .lock_and_rotate(1, Utc::now())
+                .await
+                .expect("lock")
+                .expect("row");
+            if evaluate_quota(&snapshot, 1.0).is_some() {
+                return false;
+            }
+            let request_id = format!("req-d0-{i}");
+            let commit = SettlementCommit {
+                user_id: 7,
+                request_id: request_id.clone(),
+                actual_cost: 1.0,
+                entry: UsageLogEntry {
+                    user_id: 7,
+                    api_key_id: 1,
+                    request_id,
+                    model: "gpt-4o".to_owned(),
+                    provider: "openai".to_owned(),
+                    total_cost: 1.0,
+                    actual_cost: 1.0,
+                    cost: 1.0,
+                    rate_multiplier: 1.0,
+                    ..UsageLogEntry::default()
+                },
+                subscription_id: Some(1),
+            };
+            matches!(
+                usage.commit_settlement(&commit).await.expect("settle"),
+                SettleReceipt::Committed { .. }
+            )
+        }));
+    }
+    for handle in handles {
+        handle.await.expect("join");
+    }
+
+    let used: (gw_model::compat::Money,) =
+        sqlx::query_as("SELECT daily_usage_usd FROM subscriptions WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .expect("used");
+    assert!(
+        (used.0.0 - 11.0).abs() < 1e-9,
+        "soft-cap window currently admits both requests, got {}",
+        used.0.0
     );
 }

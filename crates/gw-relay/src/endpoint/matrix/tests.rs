@@ -93,22 +93,6 @@ fn the_responses_entry_does_not_collapse_onto_chat_completions() {
     }
 }
 
-/// 入口 → 路径的逆映射与 `contract.rs` 里的正映射一致。
-///
-/// `Surface::from_path` 住在协调者独占的 `contract.rs`，`path_of` 是它在本模块里
-/// 唯一的逆。守护的 bug：改了其中一边忘了改另一边 —— 那会让 400 的
-/// 「请改用 POST /v1/xxx」指向一个不存在的路径，客户端照着改还是 404。
-#[test]
-fn the_path_mapping_round_trips() {
-    for surface in ALL_SURFACES {
-        assert_eq!(
-            Surface::from_path(path_of(surface)),
-            Some(surface),
-            "{surface:?} 的路径逆映射与 contract.rs 的正映射漂移了"
-        );
-    }
-}
-
 /// 400 用**入口自身方言**的错误信封，且两种方言的结构确实不同。
 ///
 /// 守护的 bug：两个入口回同一个网关自有格式。客户端 SDK 只解析它自己那套结构 ——
@@ -190,9 +174,9 @@ fn the_rejection_tells_the_client_somewhere_that_actually_works() {
         );
         for alt in alternatives {
             assert!(
-                text.contains(path_of(alt)),
+                text.contains(alt.path()),
                 "指引里没提到真正可用的入口 {}",
-                path_of(alt)
+                alt.path()
             );
             assert_ne!(
                 cell(alt, provider),
@@ -300,23 +284,19 @@ fn every_translating_cell_gets_the_translator_that_claims_it() {
     }
 }
 
-/// executor 名与 provider 之间是一一对应的双射。
+/// executor 名两两不同。
 ///
-/// 守护的 bug：两个 provider 复制粘贴出同一个 `as_str()`。那样
-/// `Provider::from_name` 会把其中一个永远解析成另一个，配置里写 `vertex`
+/// `as_str` 是 `gw-relay` 与 `gw-provider` 之间 executor 注册名的唯一约定。
+/// 守护的 bug：两个 provider 复制粘贴出同一个 `as_str()` —— 配置里写 `vertex`
 /// 的渠道会静默走到 gemini 的账号池上。
 #[test]
-fn provider_names_are_a_bijection() {
-    for p in Provider::ALL {
-        assert_eq!(Provider::from_name(p.as_str()), Some(p));
-    }
-    let names: Vec<&str> = Provider::ALL.iter().map(|p| p.as_str()).collect();
-    let mut deduped = names.clone();
-    deduped.sort_unstable();
-    deduped.dedup();
-    assert_eq!(deduped.len(), names.len(), "有两个 provider 共用了一个名字");
-    assert!(
-        Provider::from_name("nope").is_none(),
-        "不认识的名字不许兜底"
+fn provider_names_are_pairwise_distinct() {
+    let mut names: Vec<&str> = Provider::ALL.iter().map(|p| p.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(
+        names.len(),
+        Provider::ALL.len(),
+        "有两个 provider 共用了一个名字"
     );
 }

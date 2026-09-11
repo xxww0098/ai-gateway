@@ -42,7 +42,7 @@ fn the_idempotency_scope_digest_shares_the_key_hash_primitive() {
 #[test]
 fn a_token_this_secret_signed_verifies_and_carries_its_subject() {
     let secret = "0123456789abcdef0123456789abcdef";
-    let token = gw_authcore::generate_jwt(42, "user@example.test", secret, 1)
+    let token = gw_authcore::generate_jwt_with_version(42, "user@example.test", secret, 1, 0)
         .expect("the secret is long enough to sign with");
 
     let claims = AuthcoreCrypto::new(secret)
@@ -53,11 +53,12 @@ fn a_token_this_secret_signed_verifies_and_carries_its_subject() {
 
 #[test]
 fn a_token_signed_by_a_different_secret_is_rejected() {
-    let token = gw_authcore::generate_jwt(
+    let token = gw_authcore::generate_jwt_with_version(
         42,
         "user@example.test",
         "0123456789abcdef0123456789abcdef",
         1,
+        0,
     )
     .expect("signs");
     assert!(
@@ -71,11 +72,12 @@ fn a_token_signed_by_a_different_secret_is_rejected() {
 fn an_empty_secret_verifies_nothing_rather_than_accepting_everything() {
     // Fail closed: a misconfigured deployment must reject tokens, not honour
     // unsigned ones.
-    let token = gw_authcore::generate_jwt(
+    let token = gw_authcore::generate_jwt_with_version(
         42,
         "user@example.test",
         "0123456789abcdef0123456789abcdef",
         1,
+        0,
     )
     .expect("signs");
     assert!(AuthcoreCrypto::new("").verify_jwt(&token).is_none());

@@ -11,12 +11,12 @@
 use bytes::Bytes;
 use serde_json::{Map, Value, json};
 
-use super::{
-    OPENAI_DONE, SseSplit, openai_frame, parse_object, parse_upstream_object, present, sse_data,
-    str_at, to_bytes,
-};
+use super::{OPENAI_DONE, SseSplit, present, str_at, to_bytes};
 use crate::contract::{
     RelayUsage, StreamTranslator, Surface, TranslateError, Translator, UpstreamDialect,
+};
+use crate::translate::common::{
+    openai_frame, parse_object, parse_upstream_object, sse_data, unix_secs,
 };
 
 /// Anthropic Messages 的 `max_tokens` 是**必填**，OpenAI Chat 的是选填。
@@ -615,7 +615,7 @@ fn response(body: &[u8]) -> Result<Bytes, TranslateError> {
         src.get("id").cloned().unwrap_or(Value::Null),
     );
     out.insert("object".to_owned(), json!("chat.completion"));
-    out.insert("created".to_owned(), json!(unix_now()));
+    out.insert("created".to_owned(), json!(unix_secs()));
     out.insert(
         "model".to_owned(),
         src.get("model").cloned().unwrap_or(Value::Null),
@@ -729,7 +729,7 @@ impl AnthropicSseToOpenAi {
                 let msg = ev.get("message");
                 self.id = str_at(msg, "id").to_owned();
                 self.model = str_at(msg, "model").to_owned();
-                self.created = unix_now();
+                self.created = unix_secs();
                 if let Some(u) = msg.and_then(|m| m.get("usage")) {
                     self.absorb_usage(u);
                 }
@@ -884,12 +884,4 @@ impl AnthropicSseToOpenAi {
             self.usage.cached_tokens = Some(v);
         }
     }
-}
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_secs()).ok())
-        .unwrap_or_default()
 }

@@ -260,12 +260,6 @@ impl RuntimeAuthStore {
         }
         Arc::new(Self::new(underlying, runtime))
     }
-
-    /// The config-seeded credentials this store injects.
-    #[must_use]
-    pub fn runtime_records(&self) -> &[AuthRecord] {
-        &self.runtime
-    }
 }
 
 #[async_trait::async_trait]

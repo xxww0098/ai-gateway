@@ -7,6 +7,7 @@ use super::*;
 use crate::types::is_skipped_proxy_header;
 use bytes::Bytes;
 use gw_authcore::AuthRecord;
+use http::header::{ACCEPT, CONTENT_TYPE};
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -14,7 +15,6 @@ fn config(base_url: &str) -> ProviderConfig {
     ProviderConfig {
         base_url: base_url.to_owned(),
         api_key: "sk-config".to_owned(),
-        enabled: true,
     }
 }
 
@@ -44,15 +44,8 @@ fn bare_auth() -> AuthRecord {
 // --- construction ------------------------------------------------------------
 
 #[test]
-fn construction_requires_an_enabled_provider_with_both_credentials() {
+fn construction_requires_both_credentials() {
     let cases = [
-        (
-            "disabled",
-            ProviderConfig {
-                enabled: false,
-                ..config("https://api.example.com")
-            },
-        ),
         (
             "no base url",
             ProviderConfig {
@@ -338,14 +331,21 @@ async fn count_tokens_refuses_rather_than_fabricating_a_number() {
     }
 }
 
-
 /// 大小写与两侧空白都不该改变「这个头该不该转发」的判定。
 ///
 /// 守护的 bug：改回 `to_ascii_lowercase()`（每头一次分配），或者改成
 /// 只认小写、把 `Authorization` 漏出去打到上游。
 #[test]
 fn hop_by_hop_header_names_match_without_regard_to_case() {
-    for name in ["Authorization", "AUTHORIZATION", " authorization ", "Host", "content-length"] {
+    for name in [
+        "Authorization",
+        "AUTHORIZATION",
+        " authorization ",
+        "Host",
+        "content-length",
+        "X-Api-Key",
+        "x-goog-api-key",
+    ] {
         assert!(
             is_skipped_proxy_header(name),
             "{name} must stay on the denylist"

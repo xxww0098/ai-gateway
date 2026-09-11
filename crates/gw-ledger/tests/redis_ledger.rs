@@ -324,8 +324,8 @@ async fn an_expired_hold_does_not_block_a_new_one() {
     fx.cleanup().await;
 }
 
-/// After any credit or debit the cached balance is dropped, so the next
-/// admission decision sees the new number instead of a stale one.
+/// After any credit or debit the cached balance is the SQL remaining, so the
+/// next admission decision sees the new number instead of a stale one.
 #[tokio::test]
 #[ignore = "requires a local Redis and Postgres (set GW_TEST_REDIS_URL, GW_TEST_DATABASE_URL)"]
 async fn moving_money_drops_the_cached_balance() {
@@ -349,8 +349,8 @@ async fn moving_money_drops_the_cached_balance() {
         }
 
         assert!(
-            !fx.balance_cache_exists(user).await,
-            "the cached balance must be dropped after a {} ",
+            fx.balance_cache_exists(user).await,
+            "the cached balance must stay populated after a {} ",
             if credit { "credit" } else { "debit" }
         );
 
@@ -526,5 +526,171 @@ async fn a_cold_cache_is_filled_and_the_hold_retried() {
         40.0
     ));
 
+    fx.cleanup().await;
+}
+
+/// B0: a hold aged 400s is younger than the 30-minute scan cutoff, so the
+/// orphan scanner reports nothing even though Redis keys would already have
+/// expired under the default 360s key TTL.
+#[tokio::test]
+#[ignore = "requires a local Redis and Postgres (set GW_TEST_REDIS_URL, GW_TEST_DATABASE_URL)"]
+async fn a_four_hundred_second_hold_is_invisible_to_the_thirty_minute_scan() {
+    let mut fx = Fixture::with_redis(FIVE_MINUTES).await;
+    let user = fx.seed_user(100.0).await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs() as i64;
+    fx.plant_hold(user, "req-400", 5.0, now - 400).await;
+
+    let stale: Vec<_> = fx
+        .ledger
+        .scan_stale_holds(Duration::from_secs(30 * 60))
+        .await
+        .expect("scan")
+        .into_iter()
+        .filter(|h| h.user_id == user)
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "a 400s hold is still younger than the 30-minute cutoff: {stale:?}"
+    );
+    fx.cleanup().await;
+}
+
+/// C0: an older remaining must not overwrite Redis after a newer settle.
+#[tokio::test]
+#[ignore = "requires a local Redis and Postgres (set GW_TEST_REDIS_URL, GW_TEST_DATABASE_URL)"]
+async fn delayed_publish_must_not_resurrect_an_older_remaining() {
+    use redis::AsyncCommands as _;
+
+    let mut fx = Fixture::with_redis(FIVE_MINUTES).await;
+    let user = fx.seed_user(100.0).await;
+    let out_a;
+    {
+        let mut tx = fx.pool.begin().await.expect("tx a");
+        out_a = fx
+            .ledger
+            .settle_tx(&mut tx, user, "req-a", 10.0)
+            .await
+            .expect("debit a");
+        tx.commit().await.expect("commit a");
+    }
+    let out_b;
+    {
+        let mut tx = fx.pool.begin().await.expect("tx b");
+        out_b = fx
+            .ledger
+            .settle_tx(&mut tx, user, "req-b", 20.0)
+            .await
+            .expect("debit b");
+        tx.commit().await.expect("commit b");
+    }
+    fx.ledger
+        .clear_hold(
+            user,
+            "req-b",
+            Some((out_b.balance_after.unwrap(), out_b.balance_version.unwrap())),
+        )
+        .await
+        .expect("publish b");
+    fx.ledger
+        .clear_hold(
+            user,
+            "req-a",
+            Some((out_a.balance_after.unwrap(), out_a.balance_version.unwrap())),
+        )
+        .await
+        .expect("publish a");
+
+    let mut conn = fx.conn();
+    let cached: String = conn
+        .get(gw_ledger::balance_key(user))
+        .await
+        .expect("cache get");
+    let cached: f64 = cached.parse().expect("cached f64");
+    let persistent = fx.balance(user).await;
+    assert!(
+        approx(cached, 70.0),
+        "Redis must keep the later remaining, got {cached}"
+    );
+    assert!(
+        approx(persistent, 70.0),
+        "Postgres kept the later remaining, got {persistent}"
+    );
+    fx.cleanup().await;
+}
+
+/// A delayed A after B and C still cannot resurrect 90.
+#[tokio::test]
+#[ignore = "requires a local Redis and Postgres (set GW_TEST_REDIS_URL, GW_TEST_DATABASE_URL)"]
+async fn delayed_first_publish_cannot_beat_later_commits() {
+    let mut fx = Fixture::with_redis(FIVE_MINUTES).await;
+    let user = fx.seed_user(100.0).await;
+    let mut published = Vec::new();
+    for (req, amount) in [("req-a", 10.0), ("req-b", 10.0), ("req-c", 10.0)] {
+        let mut tx = fx.pool.begin().await.expect("tx");
+        let out = fx
+            .ledger
+            .settle_tx(&mut tx, user, req, amount)
+            .await
+            .expect("settle");
+        tx.commit().await.expect("commit");
+        published.push((
+            req,
+            out.balance_after.unwrap(),
+            out.balance_version.unwrap(),
+        ));
+    }
+    for (req, balance, version) in published.into_iter().rev() {
+        fx.ledger
+            .clear_hold(user, req, Some((balance, version)))
+            .await
+            .expect("publish");
+    }
+    let persistent = fx.balance(user).await;
+    assert!(approx(persistent, 70.0));
+    assert!(approx(
+        fx.ledger.get_balance(user).await.expect("cached"),
+        70.0
+    ));
+    fx.cleanup().await;
+}
+
+/// A cold fill of an older SELECT must not overwrite a newer published remaining.
+#[tokio::test]
+#[ignore = "requires a local Redis and Postgres (set GW_TEST_REDIS_URL, GW_TEST_DATABASE_URL)"]
+async fn a_stale_fill_must_not_overwrite_a_newer_publish() {
+    let mut fx = Fixture::with_redis(FIVE_MINUTES).await;
+    let user = fx.seed_user(100.0).await;
+    fx.ledger
+        .refresh_balance_cache(user)
+        .await
+        .expect("prime 100");
+    {
+        let mut tx = fx.pool.begin().await.expect("tx");
+        let out = fx
+            .ledger
+            .settle_tx(&mut tx, user, "req-later", 30.0)
+            .await
+            .expect("settle");
+        tx.commit().await.expect("commit");
+        fx.ledger
+            .clear_hold(
+                user,
+                "req-later",
+                Some((out.balance_after.unwrap(), out.balance_version.unwrap())),
+            )
+            .await
+            .expect("publish 70");
+    }
+    fx.ledger
+        .publish_balance(user, 100.0, 0)
+        .await
+        .expect("stale fill");
+    assert!(approx(
+        fx.ledger.get_balance(user).await.expect("cached"),
+        70.0
+    ));
     fx.cleanup().await;
 }

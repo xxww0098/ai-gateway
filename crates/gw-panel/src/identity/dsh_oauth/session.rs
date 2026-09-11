@@ -125,7 +125,13 @@ pub fn normalize_user_code(raw: &str) -> String {
         .collect()
 }
 
-fn require_pending(session: &DeviceSession, now: DateTime<Utc>) -> Result<(), TransitionError> {
+/// Can this session still transition? Same gate [`approve`] / [`deny`] apply.
+/// Public so the handler can refuse a doomed approval **before** minting an
+/// API key — otherwise an expired/resolved session leaves an orphaned key.
+///
+/// # Errors
+/// Same as [`approve`].
+pub fn require_pending(session: &DeviceSession, now: DateTime<Utc>) -> Result<(), TransitionError> {
     if now >= session.expires_at {
         return Err(TransitionError::Expired);
     }

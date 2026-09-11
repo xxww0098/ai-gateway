@@ -10,7 +10,7 @@
 //!
 //! - `parse_*_usage(..) -> None` means no parseable usage envelope at all. That
 //!   is the "usage detail NOT present" signal the `UsagePlugin` fallback /
-//!   strict paths trigger on — see [`usage_detail_present`].
+//!   strict paths trigger on — `None` *is* "not presented".
 //! - a per-column `None` inside a returned [`UsageTokens`] is the finer-grained
 //!   "this one column was omitted" signal.
 
@@ -95,15 +95,6 @@ impl UsageTokens {
 #[must_use]
 pub fn max_usage_tokens(a: UsageTokens, b: UsageTokens) -> UsageTokens {
     UsageTokens::max_merge(a, b)
-}
-
-/// Whether a terminal upstream usage envelope was observed.
-///
-/// The signal is structural and a missing marker is unrepresentable: `None`
-/// *is* "not presented".
-#[must_use]
-pub fn usage_detail_present(parsed: Option<&UsageTokens>) -> bool {
-    parsed.is_some()
 }
 
 /// Trims surrounding whitespace and rejects an empty remainder.

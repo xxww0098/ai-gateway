@@ -154,6 +154,7 @@ round_trip!(channel_policy_round_trip, ChannelPolicy, {
     "weight": 1,
     "priority": 0,
     "enabled": true,
+    "max_concurrent": 0,
     "created_at": "2026-01-02T03:04:05Z",
     "updated_at": "2026-01-02T03:04:05Z"
 });
@@ -342,7 +343,10 @@ fn type_column_keeps_its_name_in_json() {
 fn channel_policy_default_is_enabled_with_weight_one() {
     let p = ChannelPolicy::default_for("auth-x");
     assert_eq!(p.auth_id, "auth-x");
-    assert_eq!((p.weight, p.priority, p.enabled), (1, 0, true));
+    assert_eq!(
+        (p.weight, p.priority, p.enabled, p.max_concurrent),
+        (1, 0, true, 0)
+    );
 }
 
 // ── 连库：实体 ↔ 列名映射 ────────────────────────────────────────────────────

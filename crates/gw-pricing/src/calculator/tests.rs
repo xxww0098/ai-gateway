@@ -389,3 +389,56 @@ async fn a_price_edit_is_visible_to_an_already_built_calculator() {
         after.total_cost
     );
 }
+/// `cached_input_price_per1_m` / `reasoning_price_per1_m` 的建表默认值都是 0，
+/// 运维新加一行 `model_prices` 时最容易留空。
+///
+/// 留空必须读成「这一块按基准费率走」，不能读成「这一块免费」—— 上游对这些
+/// token 是真收了钱的，只是相对基准价打折或另计。这条也是 `PRODUCT.md` 第三条
+/// 产品原则（不把空值画成零成本）在钱这一侧的落点。
+#[test]
+fn an_unset_sub_rate_falls_back_to_its_base_rate() {
+    // 两个子费率都留空。
+    let unset = calc_with(&[("m", 2.0, 10.0, 0.0, 0.0)], 0.0);
+    // 把子费率显式填成基准价 —— 这是「没有折扣」的唯一自洽写法。
+    let explicit = calc_with(&[("m", 2.0, 10.0, 2.0, 10.0)], 0.0);
+    let tokens = TokenUsage {
+        input: 1_000_000,
+        output: 1_000_000,
+        cached: 1_000_000,
+        reasoning: 1_000_000,
+    };
+
+    let got = unset.compute("m", tokens, 1.0);
+    assert!(
+        approx_eq(got.cached_cost, 2.0),
+        "留空的缓存价被当成了免费：{}",
+        got.cached_cost,
+    );
+    assert!(
+        approx_eq(got.reasoning_cost, 10.0),
+        "留空的推理价被当成了免费：{}",
+        got.reasoning_cost,
+    );
+    assert_eq!(got, explicit.compute("m", tokens, 1.0));
+}
+
+/// 折扣方向：配了缓存折扣价，总价必须**低于**留空（= 按基准价）的那次。
+///
+/// 若哪天有人把子费率改回「在基准价之上再加一笔」，这条立刻反号。
+#[test]
+fn a_configured_cache_discount_costs_less_than_an_unset_one() {
+    let tokens = TokenUsage {
+        input: 100_000,
+        cached: 80_000,
+        ..TokenUsage::default()
+    };
+    let discounted = calc_with(&[("gpt-4o", 2.5, 10.0, 1.25, 0.0)], 0.0).compute("gpt-4o", tokens, 1.0);
+    let undiscounted = calc_with(&[("gpt-4o", 2.5, 10.0, 0.0, 0.0)], 0.0).compute("gpt-4o", tokens, 1.0);
+
+    assert!(
+        discounted.total_cost < undiscounted.total_cost,
+        "缓存折扣价没有便宜过不留折扣：{} vs {}",
+        discounted.total_cost,
+        undiscounted.total_cost,
+    );
+}

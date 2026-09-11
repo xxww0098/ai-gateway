@@ -378,7 +378,29 @@ async fn a_rolled_back_transaction_leaves_the_reservation_for_reconciliation() {
         "a hold cleared after a rollback would charge nothing but lose the reservation",
     );
     assert_eq!(fixture.ledger.held_amount("req-1"), Some(1.0));
-    assert!(fixture.store.logs.lock()[0].failed);
+
+    let logs = fixture.store.logs.lock();
+    let failed = &logs[0];
+    assert!(failed.failed);
+    // 回滚意味着**一分钱都没动**，所以这条审计行的金额列必须是 0：面板的总花费
+    // 直接 SUM(usage_logs.cost)、不按 failed 过滤，留着全额就会把一次失败的尝试
+    // 算成真花掉的钱，与 balance_logs 对不上账。
+    assert_eq!(
+        (failed.total_cost, failed.actual_cost, failed.cost),
+        (0.0, 0.0, 0.0),
+        "回滚的结算行不许带可汇总的金额",
+    );
+    // 尝试收多少不能丢 —— 它是运维判断这次回滚值不值得追的唯一线索。
+    let attempted = failed
+        .raw_metadata
+        .as_ref()
+        .and_then(|meta| meta.get("attempted_cost"))
+        .and_then(serde_json::Value::as_f64);
+    assert!(
+        attempted.is_some_and(|cost| cost > 0.0),
+        "失败行必须留下尝试扣款的金额：{:?}",
+        failed.raw_metadata,
+    );
 }
 
 #[tokio::test]
@@ -474,41 +496,31 @@ fn strict_mode_can_be_toggled_at_runtime() {
     assert!(!fixture.settlement.strict_usage_metadata());
 }
 
-// ------------------------------------------------- Google 的思考 token 计费
+// --------------------------------------- 四列互斥 + 真实费率解析的计价
 
-/// 一个只给 `output` 列定价、`reasoning` 列定价为 **0** 的计价器。
+/// 真价目表上的**真**计价器，不是替身。
 ///
-/// 这不是随手编的：`model_prices.reasoning_price_per1_m` 的**建表默认值就是 0**
-/// （`migrations/0001_init.sql`），绝大多数部署从没填过这一列。
-struct OutputOnlyCalculator;
-
-impl PricingCalculator for OutputOnlyCalculator {
-    fn estimate(&self, _model: &str, _stream: bool, _rate_mult: f64) -> f64 {
-        0.0
-    }
-    fn estimate_with_max_tokens(
-        &self,
-        _model: &str,
-        _max_output_tokens: i64,
-        _stream: bool,
-        _rate_mult: f64,
-    ) -> f64 {
-        0.0
-    }
-    fn estimate_with_tokens(
-        &self,
-        _model: &str,
-        _input_tokens: i64,
-        _max_output_tokens: i64,
-        _stream: bool,
-        _rate_mult: f64,
-    ) -> f64 {
-        0.0
-    }
-    fn compute(&self, _model: &str, tokens: TokenUsage, rate_mult: f64) -> f64 {
-        // reasoning 列不计价 —— 这正是建表默认值下的真实行为。
-        (tokens.input + tokens.output + tokens.cached) as f64 * rate_mult
-    }
+/// 这一节测的是「某一块 token 有没有被白送或被卖两次」，而两件事都由真
+/// `gw_pricing::Calculator` 的两条规则共同决定（四列相加 + 子费率留空时回落到
+/// 基准费率）。把费率抄进一个替身里，测出来的就只是替身的行为；所以这里直接搭
+/// 真 `Calculator`。行取 `ModelPrice` 实体的形状 —— 缓存读的就是这个实体。
+fn priced_calculator(rows: &[(&str, f64, f64, f64, f64)]) -> Arc<gw_pricing::Calculator> {
+    let rows = rows.iter().map(|&(model_id, input, output, cached, reasoning)| {
+        gw_model::ModelPrice {
+            id: 1,
+            model_id: model_id.to_owned(),
+            input_price_per_1m: input,
+            output_price_per_1m: output,
+            cached_input_price_per_1m: cached,
+            reasoning_price_per_1m: reasoning,
+            created_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            updated_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        }
+    });
+    Arc::new(gw_pricing::Calculator::new(
+        Some(Arc::new(gw_pricing::ModelPriceCache::from_rows(rows))),
+        0.0,
+    ))
 }
 
 fn google_usage(candidates: i64, thoughts: i64) -> UsageRecord {
@@ -537,43 +549,138 @@ async fn google_thinking_tokens_are_not_free() {
     );
 }
 
+// --------------------------------------------------- 四列互斥（计价视图）
+
+/// `specs/billing-hardening/slices/06` 的金样。
+///
+/// OpenAI 官方 prompt-caching 指南给的正是这个减法：
+/// `ordinaryInputTokens = inputTokens - cachedTokens - cacheWriteTokens`；
+/// `cached_tokens` 与 `reasoning_tokens` 在 API 参考里都写作「Breakdown of
+/// tokens used in ...」，即子集而不是并列项。
 #[test]
-fn only_googles_output_field_needs_the_fold() {
+fn openai_nested_columns_are_priced_once() {
     let raw = TokenUsage {
-        input: 10,
+        input: 120,
+        output: 80,
+        cached: 40,
+        reasoning: 30,
+    };
+    let billable = billable_tokens("openai", raw);
+    assert_eq!(billable.input, 80, "cached ⊆ prompt_tokens，不减就是全价再收一次");
+    assert_eq!(billable.output, 50, "reasoning ⊆ completion_tokens，同理");
+    assert_eq!(billable.cached, 40, "缓存那一段本身仍要按缓存价收");
+    assert_eq!(billable.reasoning, 30, "思考那一段本身仍要按推理价收");
+    assert_eq!(
+        billable_tokens("codex", raw),
+        billable,
+        "codex 走同一条 OpenAI 线格式，不能只在 openai 上修",
+    );
+}
+
+/// Google 只在**输入**侧与 OpenAI 同形。
+///
+/// `promptTokenCount` 的原文是 "this includes the number of tokens in the cached
+/// content"；而 `totalTokenCount = prompt + thoughts + candidates` ——
+/// 思考与候选是**并列**项，所以输出侧要相加而不是相减。
+#[test]
+fn google_folds_thoughts_and_excludes_cached_from_the_prompt() {
+    let raw = TokenUsage {
+        input: 1_000,
         output: 100,
-        cached: 0,
+        cached: 800,
         reasoning: 400,
     };
     for google in ["gemini", "vertex"] {
-        let folded = billable_tokens(google, raw);
+        let billable = billable_tokens(google, raw);
         assert_eq!(
-            folded.output,
-            raw.output + raw.reasoning,
-            "{google} 的输出字段不含思考 token，必须折进来",
+            billable.input, 200,
+            "{google}: promptTokenCount 含 cachedContentTokenCount，不减就是收两次",
         );
-        assert_eq!(folded.reasoning, 0, "折进来之后不能再按 reasoning 计一次");
-        assert_eq!(folded.input, raw.input);
-    }
-    for other in ["openai", "codex", "claude"] {
         assert_eq!(
-            billable_tokens(other, raw),
-            raw,
-            "{other} 的输出字段本来就含思考 token，再折一次就是重复计费",
+            billable.output, 500,
+            "{google}: candidatesTokenCount 不含 thoughtsTokenCount，必须折进来",
         );
+        assert_eq!(billable.reasoning, 0, "{google}: 折进来之后不能再计一次");
+        assert_eq!(billable.cached, 800);
     }
 }
 
+/// Anthropic 的四列本来就是并列的。
+///
+/// 原文："Total input tokens in a request is the summation of `input_tokens`,
+/// `cache_creation_input_tokens`, and `cache_read_input_tokens`"，且
+/// `output_tokens` 已含 thinking token。照着 OpenAI 的样子减一次就是实打实少收。
+#[test]
+fn anthropic_columns_are_already_disjoint() {
+    let raw = TokenUsage {
+        input: 100,
+        output: 200,
+        cached: 910,
+        reasoning: 0,
+    };
+    assert_eq!(billable_tokens("claude", raw), raw);
+}
+
+/// 判定标准是**线格式**，不是「不是 Google 就要折」。
+///
+/// 不认识的上游一律原样计价：多减会少收，少减只是按原价收，两个方向的风险
+/// 不对称。
+#[test]
+fn an_unknown_provider_is_priced_as_reported() {
+    let raw = TokenUsage {
+        input: 10,
+        output: 20,
+        cached: 3,
+        reasoning: 4,
+    };
+    assert_eq!(billable_tokens("some-new-vendor", raw), raw);
+}
+
+/// 端到端金样：一次缓存很重的 OpenAI 请求，落账金额必须等于厂商口径。
+///
+/// 这一条才是「静默多收费」的回归门禁 —— 上面几条只盯 token 视图，
+/// 这里把真计价器接上，金额对不上就是账错了。
+#[tokio::test]
+async fn an_openai_cache_hit_is_not_sold_twice() {
+    // gpt-4o 的官方档位（USD / 1M）：input 2.5 / cached input 1.25 / output 10，
+    // reasoning 没有独立档位，所以留 0 由费率解析回落到 output 价。
+    let calculator = priced_calculator(&[("gpt-4o", 2.5, 10.0, 1.25, 0.0)]);
+    let usage = UsageRecord {
+        model: "gpt-4o".to_owned(),
+        provider: "openai".to_owned(),
+        input_tokens: Some(100_000),
+        output_tokens: Some(25_000),
+        cached_tokens: Some(80_000),
+        reasoning_tokens: Some(20_000),
+    };
+
+    let charged = settle_with(calculator, usage).await;
+
+    // 厂商口径：普通输入 (100k−80k)×2.5 + 缓存 80k×1.25 + 输出 25k×10
+    //         = 50_000 + 100_000 + 250_000 = 400_000 → $0.40/1M 单位
+    // 修之前是 100k×2.5 + 25k×10 + 80k×1.25 = 600_000 → $0.60，缓存那 80k
+    // 被「全价 input + 缓存价」卖了两次，贵 50%。
+    let expected = 0.4;
+    assert!(
+        (charged - expected).abs() < 1e-9,
+        "OpenAI 缓存命中被卖两次：落账 {charged}，厂商口径 {expected}",
+    );
+}
+
 /// 跑一次完整结算，返回落账的金额。
-async fn settle_google(usage: UsageRecord) -> f64 {
+async fn settle_with(calculator: Arc<gw_pricing::Calculator>, usage: UsageRecord) -> f64 {
     let ledger = FakeLedger::with_balance(1_000.0);
     let store = FakeUsageStore::shared();
-    let settlement = Settlement::new(ledger, Arc::new(OutputOnlyCalculator), store.clone());
+    let settlement = Settlement::new(
+        ledger,
+        Arc::new(crate::adapters::pricing::SharedCalculator::new(calculator)),
+        store.clone(),
+    );
     settlement
         .settle(
             &ctx(),
             UsageOutcome {
-                provider: "gemini".to_owned(),
+                provider: usage.provider.clone(),
                 ..UsageOutcome::precise(usage)
             },
         )
@@ -581,4 +688,15 @@ async fn settle_google(usage: UsageRecord) -> f64 {
     let costs = store.settled_costs();
     assert_eq!(costs.len(), 1, "一次请求恰好结算一次");
     costs[0]
+}
+
+/// 一次 Gemini 结算。价目表的 `reasoning` 列**留空** —— 建表默认值就是 0，
+/// 而费率解析会把它读成「按 output 价走」，这正是 Google 自己的口径
+/// （"Output price (including thinking tokens)"）。
+async fn settle_google(usage: UsageRecord) -> f64 {
+    settle_with(
+        priced_calculator(&[("a-thinking-model", 1.0, 4.0, 0.25, 0.0)]),
+        usage,
+    )
+    .await
 }

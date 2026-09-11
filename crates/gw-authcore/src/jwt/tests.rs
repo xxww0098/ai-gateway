@@ -2,9 +2,7 @@
 //! Python HMAC-SHA256 script following RFC 7519), so they check interoperability
 //! with an independent issuer rather than restating our own implementation.
 
-use super::{
-    Claims, DEFAULT_EXPIRY_HOURS, generate_jwt, generate_jwt_with_version, sign_at, validate_jwt,
-};
+use super::{Claims, DEFAULT_EXPIRY_HOURS, generate_jwt_with_version, sign_at, validate_jwt};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{TimeDelta, Utc};
 use jsonwebtoken::errors::ErrorKind;
@@ -95,7 +93,8 @@ fn roundtrip_preserves_identity_and_version() {
 fn version_zero_is_omitted_from_the_wire_like_gos_omitempty() {
     let with_version =
         generate_jwt_with_version(1, "a@b.c", "s3cret", 1, 4).expect("issuing succeeds");
-    let without_version = generate_jwt(1, "a@b.c", "s3cret", 1).expect("issuing succeeds");
+    let without_version =
+        generate_jwt_with_version(1, "a@b.c", "s3cret", 1, 0).expect("issuing succeeds");
 
     assert_eq!(payload_json(&with_version)["tv"], 4);
     assert!(
@@ -107,7 +106,8 @@ fn version_zero_is_omitted_from_the_wire_like_gos_omitempty() {
 #[test]
 fn positive_expiry_hours_are_honoured_exactly() {
     for hours in [1_i64, 2, 24, 168, 720] {
-        let token = generate_jwt(1, "a@b.c", "s3cret", hours).expect("issuing succeeds");
+        let token =
+            generate_jwt_with_version(1, "a@b.c", "s3cret", hours, 0).expect("issuing succeeds");
         let claims: Claims =
             serde_json::from_value(payload_json(&token)).expect("payload decodes as Claims");
 
@@ -122,7 +122,8 @@ fn positive_expiry_hours_are_honoured_exactly() {
 #[test]
 fn non_positive_expiry_hours_fall_back_to_the_default_window() {
     for hours in [0_i64, -1, -720] {
-        let token = generate_jwt(1, "a@b.c", "s3cret", hours).expect("issuing succeeds");
+        let token =
+            generate_jwt_with_version(1, "a@b.c", "s3cret", hours, 0).expect("issuing succeeds");
         let claims: Claims =
             serde_json::from_value(payload_json(&token)).expect("payload decodes as Claims");
 
@@ -153,7 +154,7 @@ fn a_token_that_is_not_yet_valid_is_rejected() {
 #[test]
 fn an_unconfigured_secret_fails_closed_on_both_sides() {
     assert!(matches!(
-        generate_jwt(1, "a@b.c", "", 1),
+        generate_jwt_with_version(1, "a@b.c", "", 1, 0),
         Err(crate::AuthError::MissingJwtSecret)
     ));
     assert!(matches!(

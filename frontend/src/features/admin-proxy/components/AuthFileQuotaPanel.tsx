@@ -5,6 +5,8 @@ export function AuthFileQuotaPanel({ item, quota, loading, onRefresh }: AuthFile
   const hasAuthIndex = (item.auth_index ?? item.authIndex) !== undefined
   if (!hasAuthIndex && !quota) return null
 
+  const cap = item.max_concurrent ?? 0
+
   return (
     <div className="rounded-xl border border-gray-200 dark:border-dark-600 overflow-hidden">
       <div className="flex items-center justify-between px-4 py-2.5 bg-gray-50/80 dark:bg-dark-800/60 border-b border-gray-200 dark:border-dark-600">
@@ -13,13 +15,24 @@ export function AuthFileQuotaPanel({ item, quota, loading, onRefresh }: AuthFile
           {quota?.planLabel && <span className="rounded bg-sky-100 dark:bg-sky-900/30 px-1.5 py-0.5 text-[10px] text-sky-700 dark:text-sky-300">{quota.planLabel}</span>}
         </span>
         <button
-          className="text-[11px] text-primary-500 hover:text-primary-600 font-medium disabled:opacity-50 inline-flex items-center gap-1"
+          className="text-[11px] text-primary-700 hover:text-primary-800 font-medium disabled:opacity-50 inline-flex items-center gap-1"
           onClick={onRefresh}
           disabled={loading}
         >
           <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
           {loading ? '查询中' : '刷新'}
         </button>
+      </div>
+      <div className="px-4 py-2.5 border-b border-gray-200 dark:border-dark-600 flex items-center gap-4 text-[11px] text-gray-500 dark:text-gray-400">
+        <span className="inline-flex items-center gap-1">
+          <span className="text-emerald-600 dark:text-emerald-400">{item.success ?? 0}</span> 成功
+        </span>
+        <span className="inline-flex items-center gap-1">
+          <span className="text-red-500 dark:text-red-400">{item.failed ?? 0}</span> 失败
+        </span>
+        <span className="inline-flex items-center gap-1">
+          并发上限 <span className="font-mono tabular-nums text-gray-700 dark:text-gray-200">{cap > 0 ? cap : '∞'}</span>
+        </span>
       </div>
       <div className="px-4 py-3 space-y-2.5">
         {loading && !quota && (

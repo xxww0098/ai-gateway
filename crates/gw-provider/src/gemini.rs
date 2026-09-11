@@ -18,8 +18,8 @@ use crate::claude::shared::{
     upstream_error,
 };
 use crate::common::{
-    DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_GEMINI, ProviderConfig, nested_string, requested_model,
-    resolve_timeout, shared_client, stream_response, string_from_map, usage_stream,
+    PROVIDER_GEMINI, ProviderConfig, nested_string, relay_usage_stream, requested_model,
+    resolve_timeout, shared_client, string_from_map,
 };
 use crate::types::{
     Provider, ProviderError, ProviderRequest, ProviderResponse, StreamResponse,
@@ -59,12 +59,6 @@ impl GeminiProvider {
             timeout: resolve_timeout(timeout_seconds),
             client: shared_client(),
         })
-    }
-
-    /// The configured upstream base URL.
-    #[must_use]
-    pub fn base_url(&self) -> &str {
-        &self.base_url
     }
 
     /// Resolves the API key and base URL for one request.
@@ -284,16 +278,12 @@ impl Provider for GeminiProvider {
             let body = response.bytes().await.unwrap_or_default();
             return Err(upstream_error(status, &body));
         }
-        Ok(stream_response(response, move |response, status| {
-            usage_stream(
-                response.bytes_stream(),
-                DEFAULT_STREAM_IDLE_TIMEOUT,
-                model,
-                PROVIDER_GEMINI,
-                parse_gemini_stream_usage,
-                status,
-            )
-        }))
+        Ok(relay_usage_stream(
+            response,
+            model,
+            PROVIDER_GEMINI,
+            parse_gemini_stream_usage,
+        ))
     }
 
     /// Deliberately a no-op: Gemini records hold an API key, so there is

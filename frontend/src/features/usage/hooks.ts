@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { queryKeys } from "@/shared/api/query-keys"
 import { errorMessage } from "@/shared/api/errors"
 import { toast } from "sonner"
-import { useCallback } from "react"
+import { useCallback, useEffect } from "react"
 import { fetchAdminUsageLogs } from "./api"
 import type { AdminUsageLogsFilter } from "./types"
 
@@ -26,9 +26,11 @@ export function useAdminUsageLogs(filter: AdminUsageLogsFilter) {
     queryFn: () => fetchAdminUsageLogs(filter),
   })
 
-  if (query.error) {
-    toast.error(errorMessage(query.error, '加载使用日志失败'))
-  }
+  useEffect(() => {
+    if (query.error) {
+      toast.error(errorMessage(query.error, '加载使用日志失败'))
+    }
+  }, [query.error])
 
   return {
     logs: query.data?.items ?? [],

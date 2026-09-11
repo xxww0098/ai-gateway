@@ -2,11 +2,11 @@
 //!
 //! OWNER: worker `provider-openai`.
 
+use crate::claude::shared::{base_url_attribute, default_content_negotiation, upstream_error};
 use crate::common::{
-    DEFAULT_STREAM_IDLE_TIMEOUT, PROVIDER_OPENAI, ProviderConfig, attach_body,
-    chat_completions_endpoint, ensure_include_usage, nested_string, request_surface,
-    requested_model, resolve_timeout, responses_endpoint, shared_client, stream_response,
-    string_from_map, usage_stream,
+    PROVIDER_OPENAI, ProviderConfig, attach_body, chat_completions_endpoint, ensure_include_usage,
+    nested_string, relay_usage_stream, request_surface, requested_model, resolve_timeout,
+    responses_endpoint, shared_client, string_from_map,
 };
 use crate::types::{
     Provider, ProviderError, ProviderRequest, ProviderResponse, StreamResponse,
@@ -15,7 +15,7 @@ use crate::types::{
 use crate::usage::{parse_openai_stream_usage, parse_openai_usage};
 use gw_authcore::{AuthRecord, AuthStatus};
 use gw_relay::Surface;
-use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use http::header::AUTHORIZATION;
 use http::{HeaderMap, HeaderValue};
 use std::borrow::Cow;
 use std::time::Duration;
@@ -35,13 +35,14 @@ pub struct OpenAiCompatibleProvider {
 impl OpenAiCompatibleProvider {
     /// Builds an executor from provider config.
     ///
-    /// A disabled provider, a blank base URL or a blank API key are all
-    /// rejected up front, so a misconfigured upstream fails at wiring time
-    /// rather than on the first request.
+    /// A blank base URL or a blank API key is rejected up front, so a
+    /// misconfigured upstream fails at wiring time rather than on the first
+    /// request. (Config-level `enabled` gating happens in the composition
+    /// root via `SdkProviderConfig::complete`.)
     pub fn new(cfg: &ProviderConfig, timeout_seconds: i64) -> Result<Self, ProviderError> {
         let base_url = cfg.base_url.trim().trim_end_matches('/').to_owned();
         let api_key = cfg.api_key.trim().to_owned();
-        if !cfg.enabled || base_url.is_empty() || api_key.is_empty() {
+        if base_url.is_empty() || api_key.is_empty() {
             return Err(ProviderError::Other(anyhow::anyhow!(
                 "sdk base_url and api_key are required"
             )));
@@ -80,16 +81,9 @@ impl OpenAiCompatibleProvider {
             .or_else(|| nested_string(&auth.metadata, "token_data", "access_token"))
             .map(Cow::Owned)
             .unwrap_or(Cow::Borrowed(self.api_key.as_str()));
-        let mut base_url = Cow::Borrowed(self.base_url.as_str());
-        for key in ["base_url", "base-url"] {
-            if let Some(value) = auth.attributes.get(key) {
-                let value = value.trim().trim_end_matches('/');
-                if !value.is_empty() {
-                    base_url = Cow::Owned(value.to_owned());
-                    break;
-                }
-            }
-        }
+        let base_url = base_url_attribute(auth)
+            .map(Cow::Owned)
+            .unwrap_or(Cow::Borrowed(self.base_url.as_str()));
         (api_key, base_url)
     }
 
@@ -124,14 +118,7 @@ impl OpenAiCompatibleProvider {
 
         let mut headers = HeaderMap::new();
         copy_outbound_headers(&mut headers, &req.headers);
-        if !headers.contains_key(CONTENT_TYPE) {
-            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        }
-        if stream {
-            headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
-        } else if !headers.contains_key(ACCEPT) {
-            headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-        }
+        default_content_negotiation(&mut headers, stream);
         let authorization = if api_key == self.api_key {
             self.bearer.clone()
         } else {
@@ -190,10 +177,7 @@ impl Provider for OpenAiCompatibleProvider {
         let headers = response.headers().clone();
         let body = response.bytes().await?;
         if status >= 400 {
-            return Err(ProviderError::Upstream {
-                status,
-                body: String::from_utf8_lossy(&body).into_owned(),
-            });
+            return Err(upstream_error(status, &body));
         }
         let usage = parse_openai_usage(&body).map(|t| t.to_record(model, self.provider));
         Ok(ProviderResponse {
@@ -219,22 +203,14 @@ impl Provider for OpenAiCompatibleProvider {
         let status = response.status().as_u16();
         if status >= 400 {
             let body = response.bytes().await.unwrap_or_default();
-            return Err(ProviderError::Upstream {
-                status,
-                body: String::from_utf8_lossy(&body).into_owned(),
-            });
+            return Err(upstream_error(status, &body));
         }
-        let provider = self.provider;
-        Ok(stream_response(response, move |response, status| {
-            usage_stream(
-                response.bytes_stream(),
-                DEFAULT_STREAM_IDLE_TIMEOUT,
-                model,
-                provider,
-                parse_openai_stream_usage,
-                status,
-            )
-        }))
+        Ok(relay_usage_stream(
+            response,
+            model,
+            self.provider,
+            parse_openai_stream_usage,
+        ))
     }
 
     /// A static API key never expires, so the record is only re-marked

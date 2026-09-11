@@ -14,6 +14,7 @@ use super::wire::{self, GenerateContentResponse, GenerationConfig};
 use crate::contract::{
     RelayUsage, StreamTranslator, Surface, TranslateError, Translator, UpstreamDialect,
 };
+use crate::translate::common;
 
 /// `POST /v1/chat/completions` ↔ Google GenerateContent 的转义器。
 ///
@@ -98,7 +99,7 @@ const MSG_MAPPED: &[&str] = &["role", "content", "tool_calls", "tool_call_id"];
 const MSG_DROPPED: &[&str] = &["name", "refusal", "annotations"];
 
 fn build_request(body: &[u8]) -> Result<Bytes, TranslateError> {
-    let root = wire::as_object(body)?;
+    let root = common::parse_object(body)?;
     wire::reject_unknown(&root, REQ_MAPPED, REQ_DROPPED, "chat.completions")?;
     wire::reject_non_default_bool(
         root.get("parallel_tool_calls"),
@@ -244,7 +245,7 @@ fn content_parts(value: Option<&Value>) -> Result<Vec<Value>, TranslateError> {
         Some(Value::Array(items)) => items.iter().map(content_part).collect(),
         Some(other) => Err(TranslateError::Malformed(format!(
             "message content must be a string or an array, got {}",
-            wire::kind_of(other)
+            common::kind_of(other)
         ))),
     }
 }
@@ -426,7 +427,7 @@ fn tool_config(value: Option<&Value>) -> Result<Option<Value>, TranslateError> {
         other => {
             return Err(TranslateError::Malformed(format!(
                 "tool_choice must be a string or an object, got {}",
-                wire::kind_of(other)
+                common::kind_of(other)
             )));
         }
     };
@@ -513,7 +514,7 @@ fn build_response(body: &[u8]) -> Result<Bytes, TranslateError> {
         "object".to_owned(),
         Value::String("chat.completion".to_owned()),
     );
-    out.insert("created".to_owned(), json!(wire::unix_secs()));
+    out.insert("created".to_owned(), json!(common::unix_secs()));
     if let Some(model) = resp.model_version {
         out.insert("model".to_owned(), Value::String(model));
     }
@@ -589,6 +590,11 @@ struct OpenAiStream {
     model: Option<String>,
     role_sent: bool,
     finished: bool,
+    /// 跨帧的 tool_call 计数。OpenAI 客户端按 `tool_calls[].index` **跨帧**累加
+    /// 参数增量 —— Google 把并行 functionCall 拆在不同 chunk 里送达时（同
+    /// `super::anthropic::AnthropicStream` 的 `next_index` 处理的场景），
+    /// index 每帧从 0 重来会让两个调用被客户端并成一个、参数被拼接。
+    tool_count: i64,
     usage: RelayUsage,
 }
 
@@ -600,7 +606,7 @@ impl OpenAiStream {
                     .clone()
                     .unwrap_or_else(|| wire::synthetic_id("chatcmpl-")),
             );
-            self.created = wire::unix_secs();
+            self.created = common::unix_secs();
         }
         if self.model.is_none() {
             self.model.clone_from(&resp.model_version);
@@ -640,11 +646,11 @@ impl StreamTranslator for OpenAiStream {
             let mut tool_calls: Vec<Value> = Vec::new();
             let candidate = resp.candidates.first();
             if let Some(content) = candidate.and_then(|c| c.content.as_ref()) {
-                for (idx, part) in content.parts.iter().enumerate() {
+                for part in &content.parts {
                     if let Some(call) = part.function_call.as_ref() {
                         tool_calls.push(json!({
-                            "index": tool_calls.len(),
-                            "id": format!("call_{idx}"),
+                            "index": self.tool_count,
+                            "id": format!("call_{}", self.tool_count),
                             "type": "function",
                             "function": {
                                 "name": call.name,
@@ -652,6 +658,7 @@ impl StreamTranslator for OpenAiStream {
                                     .unwrap_or_else(|_| "{}".to_owned()),
                             }
                         }));
+                        self.tool_count += 1;
                     }
                     if let Some(chunk) = part.text.as_deref() {
                         if part.thought.unwrap_or(false) {
@@ -709,7 +716,7 @@ impl StreamTranslator for OpenAiStream {
                     "finish_reason": finish_reason.unwrap_or(Value::Null),
                 }]),
             );
-            frames.push(wire::openai_frame(&Value::Object(chunk))?);
+            frames.push(common::openai_frame(&Value::Object(chunk)));
         }
         Ok(frames)
     }
@@ -726,7 +733,7 @@ impl StreamTranslator for OpenAiStream {
                 "choices".to_owned(),
                 json!([{ "index": 0, "delta": {}, "finish_reason": "stop" }]),
             );
-            frames.push(wire::openai_frame(&Value::Object(chunk))?);
+            frames.push(common::openai_frame(&Value::Object(chunk)));
         }
         frames.push(Bytes::from_static(b"data: [DONE]\n\n"));
         Ok(frames)

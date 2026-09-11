@@ -366,17 +366,7 @@ fn to_record_carries_every_column_through_unchanged() {
 
 // --- parser / carrier boundary ----------------------------------------------
 
-/// `None` is the only representation of "not presented".
-#[test]
-fn usage_detail_present_tracks_the_parse_outcome() {
-    assert!(!usage_detail_present(None));
-    assert!(usage_detail_present(Some(&UsageTokens {
-        input: Some(1),
-        ..Default::default()
-    })));
-}
-
-/// Same invariant, driven by a deterministic sweep over the shape space:
+/// Parser determinism, driven by a deterministic sweep over the shape space:
 /// present / absent / null / empty envelopes, zero and non-zero counts, and
 /// non-JSON bytes.
 #[test]
@@ -402,11 +392,6 @@ fn every_parser_is_deterministic_and_agrees_with_its_carrier() {
                 second.is_some(),
                 "{name} parser is non-deterministic for {:?}",
                 String::from_utf8_lossy(&body)
-            );
-            assert_eq!(
-                usage_detail_present(first.as_ref()),
-                first.is_some(),
-                "{name} carrier disagrees with the parser"
             );
             // Whenever a tally is produced it must clear the non-zero bar, or
             // the fallback path would never fire on an all-zero envelope.

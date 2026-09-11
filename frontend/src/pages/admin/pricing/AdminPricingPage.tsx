@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react"
 import { fetchApi } from "@/shared/api/client"
 import { toast } from "sonner"
-import { Plus, Percent, PencilLine } from "lucide-react"
+import { Plus, PencilLine } from "lucide-react"
 import { Card, CardContent } from "@/shared/components/ui/card"
 import { Button } from "@/shared/components/ui/button"
 import { Input } from "@/shared/components/ui/input"
@@ -75,17 +75,16 @@ export default function Pricing() {
   }
 
   return (
-    <div className="space-y-12 animate-in fade-in duration-500" style={{ willChange: 'transform, opacity' }}>
+    <div className="space-y-12">
       
       {/* Group Discounts Section */}
       <section className="space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="space-y-1">
-             <h3 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
-               <Percent className="w-5 h-5 text-amber-500" />
+             <h2 className="text-xl font-bold text-foreground">
                分组计费倍率
-             </h3>
-             <p className="text-sm text-gray-500 max-w-2xl">
+             </h2>
+             <p className="max-w-2xl text-sm text-muted-foreground">
                为不同用户分组（如 vip、internal）配置结算倍率。API 密钥创建时可绑定到指定分组。
              </p>
           </div>
@@ -133,7 +132,7 @@ export default function Pricing() {
                              {g.discount_rate < 1 ? (
                                <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium bg-emerald-500/10 px-1.5 py-0.5 rounded">优惠</span>
                              ) : g.discount_rate > 1 ? (
-                               <span className="text-[10px] text-amber-600 dark:text-amber-400 font-medium bg-amber-500/10 px-1.5 py-0.5 rounded">溢价</span>
+                               <span className="text-[10px] text-amber-700 dark:text-amber-400 font-medium bg-amber-500/10 px-1.5 py-0.5 rounded">溢价</span>
                              ) : null}
                            </div>
                         </div>
@@ -204,10 +203,10 @@ export default function Pricing() {
                 min="0"
                 required
               />
-              <div className="bg-gray-50 dark:bg-dark-900 p-3 rounded-lg text-xs text-gray-500 mt-2 space-y-1">
-                 <p><span className="font-semibold text-gray-700 dark:text-gray-300">1.0</span> = 原价（基准价结账）</p>
-                 <p><span className="font-semibold text-gray-700 dark:text-gray-300">0.5</span> = 五折（比原价便宜一半）</p>
-                 <p><span className="font-semibold text-gray-700 dark:text-gray-300">2.0</span> = 双倍（比原价贵一倍）</p>
+              <div className="bg-muted p-3 rounded-lg text-xs text-muted-foreground mt-2 space-y-1">
+                 <p><span className="font-semibold tabular-nums text-foreground">1.0</span> = 原价（基准价结账）</p>
+                 <p><span className="font-semibold tabular-nums text-foreground">0.5</span> = 五折（比原价便宜一半）</p>
+                 <p><span className="font-semibold tabular-nums text-foreground">2.0</span> = 双倍（比原价贵一倍）</p>
               </div>
             </div>
             <div className="flex justify-end gap-3 pt-4">

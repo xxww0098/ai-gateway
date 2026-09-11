@@ -12,6 +12,13 @@ use serde_json::json;
 /// tenant actually recharges (same origin as `/v1`).
 pub const TOP_UP_URL: &str = "/finance?tab=topup";
 
+/// `Retry-After` hint on rate-limit 429s. The limiter is an in-flight slot
+/// count plus a sliding window — neither yields a deterministic wait, so the
+/// header is a floor hint (a caller retrying in a second either wins a freed
+/// slot or is refused again cheaply). Callers that proxy the response through
+/// — e.g. ozon-pod — map this header onto their own retry contract.
+const RATE_LIMIT_RETRY_AFTER: &str = "1";
+
 /// Authentication failure shapes produced by [`crate::access`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AuthError {
@@ -57,7 +64,8 @@ pub enum HoldRejection {
     #[error("invalid user_id in access metadata")]
     InvalidUserId,
 
-    /// `429 {"error":"Too Many Requests","message":"rate limit exceeded"}`.
+    /// `429 {"error":"Too Many Requests","message":"rate limit exceeded"}`
+    /// with `Retry-After: 1` — see [`RATE_LIMIT_RETRY_AFTER`].
     #[error("rate limit exceeded")]
     RateLimited,
 
@@ -157,7 +165,14 @@ impl IntoResponse for HoldRejection {
             }),
             _ => json!({ "error": self.code(), "message": self.to_string() }),
         };
-        (status, Json(body)).into_response()
+        let mut response = (status, Json(body)).into_response();
+        if matches!(self, Self::RateLimited) {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static(RATE_LIMIT_RETRY_AFTER),
+            );
+        }
+        response
     }
 }
 
@@ -167,7 +182,9 @@ pub enum DispatchError {
     /// No upstream account is registered / enabled for the resolved provider.
     #[error("no upstream credential available for provider {0}")]
     NoUpstream(String),
-    /// Every candidate account is already at its in-flight cap.
+    /// Every candidate account is already at its in-flight cap. Answered with
+    /// `Retry-After` like the tenant-side limiter — the slot frees whenever an
+    /// in-flight call ends, so a short floor hint is the honest value.
     #[error("upstream account concurrency limit reached")]
     ChannelBusy,
     /// The model name did not resolve to any known provider.
@@ -209,13 +226,20 @@ impl IntoResponse for DispatchError {
             )
                 .into_response();
         }
-        (
+        let mut response = (
             status,
             Json(json!({
                 "error": { "message": self.to_string(), "type": "upstream_error" }
             })),
         )
-            .into_response()
+            .into_response();
+        if matches!(self, Self::ChannelBusy) {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static(RATE_LIMIT_RETRY_AFTER),
+            );
+        }
+        response
     }
 }
 

@@ -32,7 +32,7 @@ ai-gateway（AGW）是 ozon-pod-web 的 AI 上游与唯一计费方。ozon-pod �
 - email 先 trim + 小写；不含 `@` → 4000。
 - 已存在同 email：返回既有 `user_id` 与 `created:false`，**不改余额、不改状态**。
 - 已存在但 `status != 'active'` → HTTP 409 + 4009。
-- 新行：`role='user'`、`balance=0`、`status='active'`、`concurrency=1`。
+- 新行：`role='user'`、`balance=0`、`status='active'`、`concurrency=0`（0 = 沿用限流器 `rate_limit.max_concurrent`，默认 10；与面板注册账号同规则，见迁移 0016）。
 
 ### 3.2 `POST /api/service/users/{user_id}/keys` — 发/轮换 Key
 
@@ -63,12 +63,12 @@ ai-gateway（AGW）是 ozon-pod-web 的 AI 上游与唯一计费方。ozon-pod �
   "id": 100, "request_id": "…", "idempotency_key": "ozon:req-1",
   "model": "gpt-4o", "provider": "openai",
   "tokens_in": 120, "tokens_out": 30, "tokens": 150,
-  "cost": "0.00015000", "actual_cost": "0.00015000",
+  "cost": "0.00015000", "actual_cost": "0.00015000", "currency": "USD",
   "failed": false, "duration_ms": 812, "created_at": "2026-09-11T10:00:00Z"
 }
 ```
 
-**扣款口径**：`actual_cost` 是实际扣款（失败请求为 `"0.00000000"`），`cost` 是价表算出额；ozon-pod 以 `actual_cost` 记账，两者都原样透传，不做运算。
+**扣款口径**：`actual_cost` 是实际扣款（失败请求为 `"0.00000000"`），`cost` 是价表算出额；ozon-pod 以 `actual_cost` 记账，两者都原样透传，不做运算；`currency` 是部署级 `service.currency`，与余额端点同一取值，随行返回。
 
 实现口径（与面板用量明细同一套四列回退规则，别名只是历史列名）：
 
@@ -78,6 +78,7 @@ ai-gateway（AGW）是 ozon-pod-web 的 AI 上游与唯一计费方。ozon-pod �
 | `tokens` | `tokens_in + tokens_out` |
 | `cost` | `total_cost > 0 ? total_cost : cost` |
 | `actual_cost` | `failed = true` → `"0.00000000"`；否则 `actual_cost > 0 ? actual_cost : cost` |
+| `currency` | 部署级 `service.currency`，与余额端点同一取值；金额的币种标签 |
 | `created_at` | 秒精度 RFC3339 UTC（与 §2 的示例同形，无小数秒） |
 
 ### 3.5 `GET /api/service/users/{user_id}/usage/by-idempotency-key/{key}` — 单笔对账

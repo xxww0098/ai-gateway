@@ -86,6 +86,38 @@ async fn insufficient_balance_reports_the_gap_and_where_to_fix_it() {
 }
 
 #[tokio::test]
+async fn rate_limit_rejections_carry_a_retry_after_hint() {
+    for rejection in [HoldRejection::RateLimited] {
+        let response = rejection.into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some(RATE_LIMIT_RETRY_AFTER),
+        );
+    }
+    // Non-429 rejections must not grow the header — clients map its presence
+    // onto their own retry contract.
+    let response = HoldRejection::CircuitOpen.into_response();
+    assert!(response.headers().get(axum::http::header::RETRY_AFTER).is_none());
+}
+
+#[tokio::test]
+async fn channel_busy_carries_a_retry_after_hint() {
+    let response = DispatchError::ChannelBusy.into_response();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok()),
+        Some(RATE_LIMIT_RETRY_AFTER),
+    );
+}
+
+#[tokio::test]
 async fn quota_rejections_pass_the_reason_through() {
     let reason = "subscription weekly quota exceeded";
     let body = body_of(HoldRejection::QuotaExceeded(reason.to_owned()).into_response()).await;

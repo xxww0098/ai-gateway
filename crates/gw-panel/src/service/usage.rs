@@ -98,6 +98,8 @@ pub struct UsageRowView {
     pub cost: String,
     /// 实际扣款，8 位小数；失败请求恒为 `"0.00000000"`。
     pub actual_cost: String,
+    /// 金额的币种：部署级 `service.currency`，与余额端点同一取值。
+    pub currency: String,
     pub failed: bool,
     pub duration_ms: i64,
     /// 秒精度 RFC3339 UTC。
@@ -143,8 +145,9 @@ struct UsageRow {
     created_at: DateTime<Utc>,
 }
 
-impl From<&UsageRow> for UsageRowView {
-    fn from(row: &UsageRow) -> Self {
+impl UsageRowView {
+    /// 行里只存金额，币种归部署级 `service.currency`（契约 §3.4 与 §3.6 同一取值）。
+    fn of(row: &UsageRow, currency: &str) -> Self {
         Self {
             id: row.id,
             request_id: row.request_id.clone(),
@@ -156,6 +159,7 @@ impl From<&UsageRow> for UsageRowView {
             tokens: row.tokens_in + row.tokens_out,
             cost: amount_str(row.cost),
             actual_cost: amount_str(row.actual_cost),
+            currency: currency.to_owned(),
             failed: row.failed,
             duration_ms: row.duration_ms,
             created_at: timestamp(row.created_at),
@@ -267,7 +271,10 @@ pub async fn list(
         page,
         page_size,
         total,
-        rows: rows.iter().map(UsageRowView::from).collect(),
+        rows: rows
+            .iter()
+            .map(|row| UsageRowView::of(row, state.cfg.service.effective_currency()))
+            .collect(),
     })
 }
 
@@ -305,7 +312,9 @@ pub async fn by_idempotency_key(
     match row {
         Ok(row) => ok(UsageLookup {
             found: row.is_some(),
-            row: row.as_ref().map(UsageRowView::from),
+            row: row
+                .as_ref()
+                .map(|row| UsageRowView::of(row, state.cfg.service.effective_currency())),
         }),
         Err(error) => db_failure("service_usage_lookup", &error, "查询用量失败，请稍后重试"),
     }

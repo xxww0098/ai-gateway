@@ -91,7 +91,7 @@ export function AuthFileTable({
                   colSpan={8}
                   tone="first-use"
                   icon={FileJson}
-                  title="暂无凭证文件"
+                  title="还没有凭证文件"
                   description="凭证用于网关访问上游服务。支持通过 OAuth 授权自动生成或直接导入凭证文件。"
                 />
               ) : (
@@ -239,7 +239,7 @@ export function AuthFileTable({
                             <Download className={`h-4 w-4 text-indigo-500 ${downloadLoading[file.name] ? 'animate-pulse' : ''}`} /> 下载 JSON
                           </DropdownMenuPrimitive.Item>
                           <DropdownMenuPrimitive.Item
-                            className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-sky-600 dark:text-sky-400 cursor-pointer outline-none hover:bg-sky-50 dark:hover:bg-sky-900/20"
+                            className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-sky-700 dark:text-sky-400 cursor-pointer outline-none hover:bg-sky-50 dark:hover:bg-sky-900/20"
                             onSelect={() => onLoadQuota(file)}
                           >
                             <Activity className={`h-4 w-4 ${quotaLoading[file.name] ? 'animate-pulse' : ''}`} /> 查询额度

@@ -5,7 +5,6 @@ import {
   Wallet,
   Ticket,
   MoreHorizontal,
-  Users,
   Network,
   CreditCard,
   ClipboardList,
@@ -17,6 +16,7 @@ import { adminRoutes } from '@/shared/routes/admin'
 import { useAppStore } from '@/shared/store/app_store'
 import { useAuthStore } from '@/features/auth/auth_store'
 import { isAdminPanelPath } from '@/shared/routes/admin'
+import { isStaff } from '@/shared/role_core'
 
 type NavItem = {
   label: string
@@ -33,7 +33,6 @@ const userPrimary: NavItem[] = [
 ]
 
 const adminPrimary: NavItem[] = [
-  { label: '用户', path: adminRoutes.users, icon: Users },
   { label: '渠道', path: adminRoutes.channels, icon: Network },
   { label: '计费', path: adminRoutes.billing, icon: CreditCard },
   { label: '交易', path: adminRoutes.commerce, icon: ClipboardList },
@@ -84,19 +83,19 @@ function pathActive(pathname: string, item: NavItem): boolean {
 
 /**
  * Thumb-zone primary nav (&lt;lg).
- * User: 4 keys + 更多; Admin on /admin/*: 5 ops + 更多.
+ * User: 4 keys + 更多; Admin on /admin/*: 4 ops + 更多.
  */
 export function MobileBottomNav() {
   const location = useLocation()
   const setMobileOpen = useAppStore((s) => s.setMobileOpen)
   const role = useAuthStore((s) => s.user?.role)
-  const onAdminSurface = role === 'admin' && isAdminPanelPath(location.pathname)
+  const onAdminSurface = isStaff(role) && isAdminPanelPath(location.pathname)
   const items = onAdminSurface ? adminPrimary : userPrimary
-  const cols = onAdminSurface ? 6 : 5
+  const cols = onAdminSurface ? 5 : 5
 
   return (
     <nav
-      className="fixed bottom-0 inset-x-0 z-30 border-t border-border bg-white/95 dark:bg-dark-900/95 backdrop-blur-xl lg:hidden"
+      className="fixed inset-x-0 bottom-0 z-30 border-t border-border bg-background/95 backdrop-blur-xl lg:hidden"
       style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}
       aria-label={onAdminSurface ? '管理主导航' : '主导航'}
     >
@@ -114,8 +113,8 @@ export function MobileBottomNav() {
                 className={cn(
                   'flex h-full min-h-[44px] flex-col items-center justify-center gap-0.5 px-0.5 text-[10px] font-medium transition-colors',
                   active
-                    ? 'text-primary-600 dark:text-primary-400'
-                    : 'text-gray-500 dark:text-dark-400 active:text-gray-800 dark:active:text-gray-200'
+                    ? 'text-primary'
+                    : 'text-muted-foreground active:text-foreground'
                 )}
               >
                 <Icon className={cn('h-5 w-5', active && 'stroke-[2.25]')} aria-hidden />
@@ -128,7 +127,7 @@ export function MobileBottomNav() {
           <button
             type="button"
             onClick={() => setMobileOpen(true)}
-            className="flex h-full min-h-[44px] w-full flex-col items-center justify-center gap-0.5 px-0.5 text-[10px] font-medium text-gray-500 dark:text-dark-400 active:text-gray-800 dark:active:text-gray-200"
+            className="flex h-full min-h-[44px] w-full flex-col items-center justify-center gap-0.5 px-0.5 text-[10px] font-medium text-muted-foreground active:text-foreground"
           >
             {onAdminSurface ? (
               <BarChart3 className="h-5 w-5" aria-hidden />

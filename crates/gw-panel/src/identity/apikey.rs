@@ -1,11 +1,8 @@
 //! API Key 的增删查与改绑分组。
 //!
 //! 对应既有实现的 `apikey`（`GenerateAPIKey`）+ `handler_user` 的四个
-//! key handler + `handler_admin_expanded` 的 `AdminUsersAPIKeysHandler`。
-//!
-//! 用户自己的 key 路由和管理员查看某用户 key 的路由住在同一个文件里 —— 它们读的
-//! 是同一张表、同一套语义，按角色劈开只会让「API Key」这个功能横跨两个目录
-//! （规则 1.6）。
+//! key handler。密钥的创建、列表、撤销、改绑都面向用户自己 —— 管理员侧的
+//! 「用户管理」已下线，不再有查某用户全部 key 的入口。
 //!
 //! # 明文只出现一次
 //!
@@ -22,7 +19,7 @@ use gw_infra::Db;
 
 use super::{bad_request, db_failure, forbidden, internal, not_found, parse_json_body};
 use crate::paging::{Page, parse_id};
-use crate::{AdminUser, AuthUser, PanelState, ok};
+use crate::{AuthUser, PanelState, ok};
 
 #[cfg(test)]
 mod tests;
@@ -75,19 +72,6 @@ struct CreateRequest {
 #[serde(default)]
 struct RebindRequest {
     group_id: Option<i64>,
-}
-
-/// 管理员视图的一行。字段与旧实现的 `gin.H` 逐个对齐 —— 注意它用的是 `prefix`
-/// 而不是用户侧的 `key_prefix`，`quota` / `quota_used` 是恒为 0 的占位列。
-#[derive(Debug, Serialize)]
-pub struct AdminApiKeyItem {
-    pub id: i64,
-    pub name: String,
-    pub prefix: String,
-    pub status: String,
-    pub quota: i64,
-    pub quota_used: i64,
-    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -372,45 +356,4 @@ pub async fn rebind_group(
     state.api_key_cache.delete(&key_hash);
 
     ok(serde_json::json!({ "id": key_id, "group_id": req.group_id }))
-}
-
-/// `GET /admin/users/{id}/api-keys` —— 管理员看某个用户的全部 key（含已撤销）。
-///
-/// Ports `AdminUsersAPIKeysHandler`。响应是**裸数组**，不是分页信封。
-pub async fn admin_list_for_user(
-    State(state): State<PanelState>,
-    _admin: AdminUser,
-    Path(id): Path<String>,
-) -> Response {
-    let Some(user_id) = parse_id(&id) else {
-        return bad_request("无效的用户 ID");
-    };
-
-    let rows: Result<Vec<ApiKeyRow>, _> = sqlx::query_as(
-        "SELECT id, name, key_prefix, status, group_id, last_used_at, created_at \
-         FROM api_keys WHERE user_id = $1 ORDER BY id DESC",
-    )
-    .bind(user_id)
-    .fetch_all(&state.pg)
-    .await;
-
-    match rows {
-        Ok(rows) => ok(rows
-            .into_iter()
-            .map(|r| AdminApiKeyItem {
-                id: r.id,
-                name: r.name,
-                prefix: r.key_prefix,
-                status: r.status,
-                quota: 0,
-                quota_used: 0,
-                created_at: r.created_at,
-            })
-            .collect::<Vec<_>>()),
-        Err(error) => db_failure(
-            "admin_list_api_keys",
-            &error,
-            "获取 API Key 列表失败，请稍后重试",
-        ),
-    }
 }

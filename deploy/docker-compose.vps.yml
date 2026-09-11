@@ -61,6 +61,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?set CREDENTIAL_ENCRYPTION_KEY}
       BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
     command: ["--config", "/app/config.example.yaml"]
     healthcheck:
       test: ["CMD", "/usr/local/bin/ai-gateway", "--health-check"]

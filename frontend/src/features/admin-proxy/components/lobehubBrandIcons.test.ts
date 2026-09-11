@@ -20,4 +20,12 @@ describe('LOBE_BRAND_ICONS', () => {
     expect(LOBE_BRAND_ICONS.qwen).toBeDefined()
     expect(LOBE_BRAND_ICONS.qwen).not.toBe(LOBE_BRAND_ICONS.bailian)
   })
+
+  it('国内各平台的图标别名正确映射', () => {
+    expect(LOBE_BRAND_ICONS.siliconflow).toBe(LOBE_BRAND_ICONS.siliconcloud)
+    expect(LOBE_BRAND_ICONS.lingyi).toBe(LOBE_BRAND_ICONS.yi)
+    expect(LOBE_BRAND_ICONS.volcengine).toBe(LOBE_BRAND_ICONS.doubao)
+    expect(LOBE_BRAND_ICONS.step).toBe(LOBE_BRAND_ICONS.stepfun)
+    expect(LOBE_BRAND_ICONS.xiaomi).toBe(LOBE_BRAND_ICONS.mimo)
+  })
 })

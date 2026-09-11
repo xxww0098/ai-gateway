@@ -24,6 +24,9 @@ use gw_ledger::Ledger;
 use sqlx::PgPool;
 use sqlx::postgres::PgConnectOptions;
 
+/// HTTP 层的架子（起 router、签 JWT、打请求）。只有走 router 的那一档用得上。
+pub(crate) mod http;
+
 /// 缺环境变量时的报错文案。fail-loud 的一半 —— 另一半是 `#[ignore]`。
 const HOWTO: &str = "连库集成测试需要 GW_TEST_DATABASE_URL，例如：\n  \
      GW_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5432/postgres \

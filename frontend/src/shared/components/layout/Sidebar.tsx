@@ -5,15 +5,16 @@ import {
   LayoutDashboard, Key,
   Settings, Cpu, FileBarChart, Crown,
   ShoppingCart, Ticket, Wallet,
-  Users, Network, CreditCard, BarChart3,
-  ClipboardList, ShieldAlert,
-  PanelLeft, PanelLeftClose,
+  Network, CreditCard, BarChart3,
+  ClipboardList, ShieldAlert, ShieldCheck,
 } from 'lucide-react'
 import { useEffect } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { cn } from '@/shared/utils/utils'
 import { adminRoutes } from '@/shared/routes/admin'
 import { userRoutes } from '@/shared/routes/user'
+import { isStaff } from '@/shared/role_core'
+import { SidebarAccountMenu } from './SidebarAccountMenu'
 
 type NavLinkItem = {
   label: string
@@ -26,7 +27,6 @@ type NavLinkItem = {
 export function Sidebar() {
   const user = useAuthStore(s => s.user)
   const sidebarCollapsed = useAppStore(s => s.sidebarCollapsed)
-  const toggleSidebar = useAppStore(s => s.toggleSidebar)
   const mobileOpen = useAppStore(s => s.mobileOpen)
   const setMobileOpen = useAppStore(s => s.setMobileOpen)
   const location = useLocation()
@@ -63,11 +63,11 @@ export function Sidebar() {
     { label: '工单', path: userRoutes.tickets, icon: Ticket },
   ]
 
-  // Admin nav: 8 items — commerce merges 支付订单 + 退款审核
-  const adminNavs: NavLinkItem[] = user?.role === 'admin'
+  // Admin nav: 8 items — credentials separated from channels
+  const adminNavs: NavLinkItem[] = isStaff(user?.role)
     ? [
-        { label: '用户', path: adminRoutes.users, icon: Users, hint: '用户管理' },
         { label: '渠道', path: adminRoutes.channels, icon: Network, hint: '渠道管理' },
+        { label: '凭证', path: adminRoutes.credentials, icon: ShieldCheck, hint: '凭证资产 / OAuth' },
         { label: '计费', path: adminRoutes.billing, icon: CreditCard, hint: '倍率 / 卡密 / 订阅' },
         { label: '用量日志', path: adminRoutes.usageLogs, icon: BarChart3, hint: '全站用量' },
         { label: '交易', path: adminRoutes.commerce, icon: ClipboardList, hint: '支付订单 / 退款' },
@@ -122,6 +122,13 @@ export function Sidebar() {
         location.pathname.startsWith('/channels/')
       )
     }
+    if (path === adminRoutes.credentials) {
+      return (
+        location.pathname === adminRoutes.credentials ||
+        location.pathname === '/credentials' ||
+        location.pathname.startsWith('/credentials/')
+      )
+    }
     if (path === adminRoutes.commerce) {
       return (
         location.pathname === adminRoutes.commerce ||
@@ -171,18 +178,8 @@ export function Sidebar() {
         aria-hidden={!mobileOpen ? undefined : false}
       >
         {/* Brand Header */}
-        <div
-          className={cn(
-            'h-14 sm:h-16 flex items-center px-3 border-b border-border flex-shrink-0 gap-2.5 max-w-full overflow-hidden',
-            // Collapsed rail is only 72px wide — brand yields to the toggle
-            sidebarCollapsed && 'lg:justify-center lg:px-2 lg:gap-0'
-          )}
-        >
-          <img
-            src="/icon.svg"
-            alt="AI-GateWay"
-            className={cn('w-9 h-9 rounded-xl shrink-0', sidebarCollapsed && 'lg:hidden')}
-          />
+        <div className="h-14 sm:h-16 flex items-center px-3 border-b border-border flex-shrink-0 gap-2.5 max-w-full overflow-hidden">
+          <img src="/icon.svg" alt="AI-GateWay" className="w-9 h-9 rounded-xl shrink-0" />
           {/* Always show title on mobile drawer; hide only when desktop-collapsed */}
           <span
             className={cn(
@@ -192,23 +189,6 @@ export function Sidebar() {
           >
             AI-GateWay
           </span>
-          {/* Desktop-only collapse toggle; mobile opens/closes via the Header hamburger */}
-          <button
-            type="button"
-            onClick={toggleSidebar}
-            aria-label={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
-            title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
-            className={cn(
-              'ml-auto hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors lg:flex',
-              'text-gray-400 hover:bg-gray-50 hover:text-gray-600 dark:text-dark-500 dark:hover:bg-dark-800 dark:hover:text-dark-300',
-              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500',
-              sidebarCollapsed && 'lg:ml-0'
-            )}
-          >
-            {sidebarCollapsed
-              ? <PanelLeft className="h-[18px] w-[18px]" aria-hidden />
-              : <PanelLeftClose className="h-[18px] w-[18px]" aria-hidden />}
-          </button>
         </div>
 
         {/* 导航与管理在同一滚动列内；分隔线仅作分组，不把侧栏切成上下两个独立区域 */}
@@ -289,6 +269,10 @@ export function Sidebar() {
             )}
           </div>
         </nav>
+
+        <div className="p-2 border-t border-border">
+          <SidebarAccountMenu collapsed={sidebarCollapsed} onNavigate={handleLinkClick} />
+        </div>
       </aside>
 
       {/* Mobile Overlay */}

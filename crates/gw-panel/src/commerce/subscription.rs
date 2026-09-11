@@ -3,13 +3,10 @@
 //! 对应 `handler_subscription` + `handler_admin_expanded` 的
 //! `AdminSubscriptions*Handler`。
 //!
-//! # 购买是本 crate 里唯一会「先扣钱、再建行」的地方
+//! # 购买是扣款与订阅同一 SQL 事务
 //!
-//! 两步之间没有共同事务可用 —— 扣款走账本（自带事务 + Redis 缓存失效），建行走
-//! 面板的连接。所以第二步失败时必须**立刻补偿**，这就是 [`purchase`] 里那条
-//! `subscription_purchase:<pkgID>:compensate:<debitRef>` 的 Credit 的全部理由。
-//! 补偿本身也可能失败：那时用户确实被扣了钱，日志打 `error` 级并等人工核销，
-//! 但**响应仍然是 500**，绝不能让调用方以为购买成功了。
+//! `debit_tx` 与 `INSERT subscriptions` 共享调用方事务。创建失败则整段回滚，
+//! 没有补偿流水，也没有「钱扣了没订阅」。
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -18,8 +15,7 @@ use chrono::{DateTime, Days, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use gw_infra::Db;
-use gw_ledger::{Ledger, LedgerError};
+use gw_ledger::{BalanceChange, Ledger, LedgerError};
 use gw_model::{next_daily_reset_after, next_monthly_reset_after, next_weekly_reset_after};
 
 use super::{SUBSCRIPTION_STATUS_ACTIVE, raw_error};
@@ -41,11 +37,6 @@ const REACTIVATE_EXTENSION_DAYS: u64 = 30;
 
 /// 购买时套餐有效期的下限（旧实现 `days < 1` 时补成 1）。
 const MIN_PURCHASE_VALIDITY_DAYS: i64 = 1;
-
-/// 购买落库的实付必须等于这次扣的套餐价。写成 0 会让退款页算出可退金额 0。
-fn purchase_price_paid(package_price: f64) -> f64 {
-    package_price
-}
 
 /// 套餐没名字时兜底的展示名（旧实现名字为空时补成 "Plan"）。
 const FALLBACK_GROUP_NAME: &str = "Plan";
@@ -263,32 +254,18 @@ pub enum PurchaseError {
     /// 扣款本身失败（非余额原因）。同样什么都没写。
     #[error("debit failed: {0}")]
     Debit(String),
-    /// 扣款成功但建订阅失败。`compensated` 说明补偿 Credit 是否也成功了 ——
-    /// 为 `false` 时用户**确实被扣了钱而没拿到订阅**，必须人工核销。
-    #[error("subscription create failed (compensated: {compensated})")]
-    CreateFailed {
-        /// 补偿 Credit 是否成功。
-        compensated: bool,
-        /// 这次扣款的 reference，人工核销时按它配对。
-        debit_reference: String,
-    },
+    /// 建订阅失败。扣款与插入已回滚，余额不变。
+    #[error("subscription create failed")]
+    CreateFailed,
 }
 
-/// 扣款 → 建订阅 → 失败即补偿。**这是本 crate 唯一会先动钱再写业务行的地方。**
+/// 扣款与建订阅同一事务。失败回滚，不写补偿流水。
 ///
-/// `create` 是一个返回新订阅 id 的闭包，而不是写死的 INSERT：
-///
-/// * 参数收窄到 `(&Db, &Ledger)`，一个只有 Postgres 的测试就能跑完整条路径；
-/// * 更关键的是**补偿分支可测** —— 把一个必然失败的闭包传进来，就能验证
-///   "扣款被原额退回，且 reference 里嵌着原始扣款串"，而不必去人为制造一次
-///   数据库故障。
-///
-/// 补偿失败**不会**被吞：它进 `CreateFailed { compensated: false }`，调用方据此
-/// 打 error 级日志。响应无论如何都是失败 —— 绝不能让调用方以为购买成功了。
+/// `create` 在调用方事务里插入订阅行（或测试里返回假 id）。
 ///
 /// # Errors
 /// 见 [`PurchaseError`]。
-pub async fn purchase_subscription<F, Fut>(
+pub async fn purchase_subscription<F>(
     ledger: &Ledger,
     user_id: i64,
     package_id: i64,
@@ -296,25 +273,42 @@ pub async fn purchase_subscription<F, Fut>(
     create: F,
 ) -> Result<i64, PurchaseError>
 where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<i64, sqlx::Error>>,
+    F: AsyncFnOnce(&mut sqlx::PgConnection) -> Result<i64, sqlx::Error>,
 {
-    // nonce 让同一个用户重复购买同一套餐的两次扣款可区分，补偿才不会配错。
     let debit_reference = format!(
         "subscription_purchase:{package_id}:{}",
         uuid::Uuid::new_v4()
     );
 
-    ledger
-        .debit(user_id, price, &debit_reference)
+    let mut tx = ledger
+        .pool()
+        .begin()
+        .await
+        .map_err(|error| PurchaseError::Debit(error.to_string()))?;
+    let change = ledger
+        .debit_tx(&mut tx, user_id, price, &debit_reference)
         .await
         .map_err(|error| match error {
             LedgerError::InsufficientBalance => PurchaseError::InsufficientBalance,
             other => PurchaseError::Debit(other.to_string()),
         })?;
 
-    match create().await {
-        Ok(id) => Ok(id),
+    match create(&mut tx).await {
+        Ok(id) => {
+            tx.commit()
+                .await
+                .map_err(|error| PurchaseError::Debit(error.to_string()))?;
+            if let BalanceChange::Applied {
+                balance_after,
+                balance_version,
+            } = change
+            {
+                let _ = ledger
+                    .publish_balance(user_id, balance_after, balance_version)
+                    .await;
+            }
+            Ok(id)
+        }
         Err(error) => {
             tracing::warn!(
                 event = "subscription_create_failed",
@@ -323,27 +317,10 @@ where
                 debit_ref = %debit_reference,
                 error = %error,
             );
-            let compensate_reference = compensation_reference(package_id, &debit_reference);
-            let compensated = ledger
-                .credit(user_id, price, &compensate_reference)
-                .await
-                .is_ok();
-            Err(PurchaseError::CreateFailed {
-                compensated,
-                debit_reference,
-            })
+            let _ = tx.rollback().await;
+            Err(PurchaseError::CreateFailed)
         }
     }
-}
-
-/// 补偿 Credit 的 reference。
-///
-/// `subscription_purchase:<pkgID>:compensate:<debitRef>` —— 前缀让运维能用
-/// `Reference LIKE 'subscription_purchase:<pkg>:%'` 一次捞出扣款与补偿这一对，
-/// 嵌入的完整扣款串则说明"退的是哪一次"。
-#[must_use]
-pub fn compensation_reference(package_id: i64, debit_reference: &str) -> String {
-    format!("subscription_purchase:{package_id}:compensate:{debit_reference}")
 }
 
 // ── 用户侧 ───────────────────────────────────────────────────────────────────
@@ -467,7 +444,7 @@ pub async fn purchase(
         return bad_request("订阅套餐价格无效");
     }
 
-    // (3)-(5) 扣款 → 建订阅 → 失败即补偿，全在这一个调用里。
+    // (3)-(5) 扣款与建订阅同一事务。
     let now = Utc::now();
     let days = pkg.default_validity_days.max(MIN_PURCHASE_VALIDITY_DAYS);
     let group_name = if pkg.name.is_empty() {
@@ -475,31 +452,30 @@ pub async fn purchase(
     } else {
         pkg.name.clone()
     };
-    let pg = state.pg.clone();
-    let outcome =
-        purchase_subscription(&state.ledger, user.user_id, pkg.id, price, || async move {
-            insert_subscription(
-                &pg,
-                &NewSubscription {
-                    user_id: user.user_id,
-                    package_id: pkg.id,
-                    group_id: pkg.group_id,
-                    group_name: &group_name,
-                    starts_at: now,
-                    expires_at: add_days(now, days),
-                    daily_limit_usd: pkg.daily_limit_usd,
-                    weekly_limit_usd: pkg.weekly_limit_usd,
-                    monthly_limit_usd: pkg.monthly_limit_usd,
-                    funding_source: "",
-                    funding_reference: "",
-                    price_paid_usd: purchase_price_paid(price),
-                    notes: "",
-                },
-            )
-            .await
-            .map(|row| row.id)
-        })
-        .await;
+    let outcome = purchase_subscription(&state.ledger, user.user_id, pkg.id, price, async |tx| {
+        insert_subscription(
+            &mut *tx,
+            &NewSubscription {
+                user_id: user.user_id,
+                package_id: pkg.id,
+                group_id: pkg.group_id,
+                group_name: &group_name,
+                starts_at: now,
+                expires_at: add_days(now, days),
+                daily_limit_usd: pkg.daily_limit_usd,
+                weekly_limit_usd: pkg.weekly_limit_usd,
+                monthly_limit_usd: pkg.monthly_limit_usd,
+                funding_source: "",
+                funding_reference: "",
+                // 实付必须等于这次扣的套餐价；写成 0 会让退款页算出可退金额 0。
+                price_paid_usd: price,
+                notes: "",
+            },
+        )
+        .await
+        .map(|row| row.id)
+    })
+    .await;
 
     let subscription_id = match outcome {
         Ok(id) => id,
@@ -510,21 +486,7 @@ pub async fn purchase(
             tracing::warn!(event = "subscription_debit_failed", user_id = user.user_id, error = %error);
             return internal("购买订阅失败，请稍后重试");
         }
-        Err(PurchaseError::CreateFailed {
-            compensated,
-            debit_reference,
-        }) => {
-            if !compensated {
-                // 扣款还挂在账上，用户被真金白银地收了钱。运维必须人工发一笔
-                // shortfall_resolve 的 Credit —— 这条日志是唯一的线索，别降级。
-                tracing::error!(
-                    event = "subscription_compensation_failed",
-                    user_id = user.user_id,
-                    package_id = pkg.id,
-                    debit_ref = %debit_reference,
-                    compensate_ref = %compensation_reference(pkg.id, &debit_reference),
-                );
-            }
+        Err(PurchaseError::CreateFailed) => {
             return raw_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "subscription create failed",
@@ -533,15 +495,33 @@ pub async fn purchase(
     };
 
     // (6) 成功。
-    match state.ledger.get_balance(user.user_id).await {
-        Ok(balance) => ok(serde_json::json!({
+    //
+    // 事务已经提交，所以从这一行往后**任何**失败都不能再变成 5xx：客户端把 5xx
+    // 读成「没买成」并重试，而重试会再扣一次（`debit_tx` 对 `subscription_purchase:`
+    // 前缀没有去重，且每次的 reference 都带新 UUID）。
+    //
+    // 余额只是响应里的展示字段：前端在 `typeof data?.balance === "number"` 上做了
+    // 保护，紧接着还会 invalidate profile 重新拉一次。所以读不到就干脆不带这个键，
+    // 而不是把一次已完成的扣款报成失败。
+    let balance = match state.ledger.get_balance(user.user_id).await {
+        Ok(balance) => Some(balance),
+        Err(error) => {
+            tracing::warn!(
+                event = "purchase_balance_failed",
+                user_id = user.user_id,
+                error = %error,
+                "订阅已扣款并创建；余额展示字段读取失败，仍按 2xx 返回以避免客户端重试",
+            );
+            None
+        }
+    };
+
+    match balance {
+        Some(balance) => ok(serde_json::json!({
             "subscription_id": subscription_id,
             "balance": balance,
         })),
-        Err(error) => {
-            tracing::warn!(event = "purchase_balance_failed", user_id = user.user_id, error = %error);
-            internal("加载余额失败，请稍后重试")
-        }
+        None => ok(serde_json::json!({ "subscription_id": subscription_id })),
     }
 }
 
@@ -579,10 +559,28 @@ pub async fn admin_list(
         Err(error) => return db_failure("list_subscriptions", &error, "获取订阅失败，请稍后重试"),
     };
 
-    let mut items = Vec::with_capacity(rows.len());
-    for row in rows {
-        items.push(admin_payload(&state, row).await);
-    }
+    // 一次批量查出本页订阅的所有属主，避免每行一条 users 查询（N+1）。
+    // 与 `admin_payload` 相同的两个既有行为：查询失败整体留空（不 500），
+    // 用户行缺失时 email/username 为空串。
+    let user_ids: Vec<i64> = rows.iter().map(|row| row.user_id).collect();
+    let owners: HashMap<i64, (String, String)> = sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT id, COALESCE(email,''), COALESCE(username,'') FROM users WHERE id = ANY($1)",
+    )
+    .bind(&user_ids)
+    .fetch_all(&state.pg)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(id, email, username)| (id, (email, username)))
+    .collect();
+
+    let items: Vec<AdminSubscriptionPayload> = rows
+        .into_iter()
+        .map(|row| {
+            let (email, username) = owners.get(&row.user_id).cloned().unwrap_or_default();
+            payload_with_owner(row, email, username)
+        })
+        .collect();
     ok(ListPage::new(items, total, page, page_size))
 }
 
@@ -776,10 +774,13 @@ struct NewSubscription<'a> {
 ///
 /// 三个重置时刻**必须**用 `next_*_reset_after`，不能填 `now`：它们是「严格晚于
 /// 现在的下一个边界」，填成 now 会让配额在第一次结算时立刻被判定为该重置。
-async fn insert_subscription(
-    pg: &Db,
+async fn insert_subscription<'e, E>(
+    pg: E,
     new: &NewSubscription<'_>,
-) -> Result<SubscriptionRow, sqlx::Error> {
+) -> Result<SubscriptionRow, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let now = new.starts_at;
     sqlx::query_as(&format!(
         "INSERT INTO subscriptions \
@@ -862,7 +863,15 @@ async fn admin_payload(state: &PanelState, row: SubscriptionRow) -> AdminSubscri
     .await
     .unwrap_or(None);
     let (email, username) = owner.unwrap_or_default();
+    payload_with_owner(row, email, username)
+}
 
+/// 由已查好的属主信息组装载荷 —— 列表页批量查询与单行路径共用这一份字面量。
+fn payload_with_owner(
+    row: SubscriptionRow,
+    email: String,
+    username: String,
+) -> AdminSubscriptionPayload {
     AdminSubscriptionPayload {
         id: row.id,
         user_id: row.user_id,

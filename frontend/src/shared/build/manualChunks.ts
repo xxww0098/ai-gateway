@@ -1,8 +1,10 @@
 /**
- * Manual chunk splitting logic for Vite's rollup configuration.
+ * Manual chunk splitting for Vite / Rolldown.
  *
- * Maps known library paths to named chunks for optimal caching.
- * Extracted from vite.config.ts for testability.
+ * Pin only libraries that already belong on the authenticated shell.
+ * Do not pin async-only vendors (recharts, stripe, zod, lucide-react):
+ * a named group that depends on React can capture React's CJS/jsx runtime
+ * and then Vite modulepreloads that group on the landing HTML.
  */
 
 /**
@@ -12,26 +14,15 @@
  * @returns The chunk name if the module matches a known library, undefined otherwise
  */
 export function manualChunks(id: string): string | undefined {
-  if (id.includes('/node_modules/react') || id.includes('/node_modules/react-dom') || id.includes('/node_modules/react-router-dom')) {
+  if (
+    id.includes('/node_modules/react') ||
+    id.includes('/node_modules/react-dom') ||
+    id.includes('/node_modules/react-router-dom')
+  ) {
     return 'react'
-  }
-  if (id.includes('/node_modules/recharts')) {
-    return 'charts'
   }
   if (id.includes('/node_modules/@radix-ui')) {
     return 'radix'
-  }
-  if (id.includes('/node_modules/@stripe')) {
-    return 'payments'
-  }
-  if (id.includes('/node_modules/zod')) {
-    return 'validation'
-  }
-  if (id.includes('/node_modules/react-hook-form')) {
-    return 'forms'
-  }
-  if (id.includes('/node_modules/lucide-react')) {
-    return 'icons'
   }
   if (id.includes('/node_modules/@tanstack')) {
     return 'query'

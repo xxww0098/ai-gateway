@@ -54,7 +54,10 @@ unsafe impl GlobalAlloc for Counting {
         if ENABLED.load(Ordering::Relaxed) {
             REALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
             ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-            ALLOC_BYTES.fetch_add(new_size.saturating_sub(layout.size()) as u64, Ordering::Relaxed);
+            ALLOC_BYTES.fetch_add(
+                new_size.saturating_sub(layout.size()) as u64,
+                Ordering::Relaxed,
+            );
         }
         unsafe { System.realloc(ptr, layout, new_size) }
     }

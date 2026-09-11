@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { Inbox } from 'lucide-react'
 import { Link } from 'react-router-dom'
@@ -32,6 +33,8 @@ export interface EmptyStateProps {
   /** 包一层描边卡片。表格内嵌用法不需要，独立成块时才开。 */
   bordered?: boolean
   action?: EmptyStateAction
+  /** 直接给一个动作节点（如对话框触发按钮）；给了就优先于 action。 */
+  actionNode?: ReactNode
   className?: string
 }
 
@@ -56,6 +59,7 @@ export function EmptyState({
   size = 'default',
   bordered = false,
   action,
+  actionNode,
   className,
 }: EmptyStateProps) {
   const compact = size === 'compact'
@@ -88,7 +92,7 @@ export function EmptyState({
           </p>
         )}
       </div>
-      {action && <EmptyStateActionButton action={action} compact={compact} />}
+      {actionNode ?? (action && <EmptyStateActionButton action={action} compact={compact} />)}
     </div>
   )
 }

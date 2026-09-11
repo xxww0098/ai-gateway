@@ -240,7 +240,7 @@ pub async fn register(
         return bad_request("请输入邮箱和密码（密码至少 8 位）");
     }
 
-    let password = req.password.clone();
+    let password = req.password;
     let hash =
         match tokio::task::spawn_blocking(move || gw_authcore::hash_password(&password)).await {
             Ok(Ok(hash)) => hash,
@@ -248,6 +248,13 @@ pub async fn register(
         };
 
     let now = Utc::now();
+    let mut tx = match state.pg.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::warn!(event = "register_begin_failed", error = %error);
+            return internal("创建用户失败，请稍后重试");
+        }
+    };
     let created: Result<AuthUserRow, sqlx::Error> = sqlx::query_as(
         "INSERT INTO users (email, password_hash, role, username, balance, status, concurrency, created_at, updated_at) \
          VALUES ($1, $2, 'user', '', 0, $3, 0, $4, $4) \
@@ -257,7 +264,7 @@ pub async fn register(
     .bind(&hash)
     .bind(USER_STATUS_ACTIVE)
     .bind(now)
-    .fetch_one(&state.pg)
+    .fetch_one(&mut *tx)
     .await;
 
     let mut row = match created {
@@ -285,6 +292,7 @@ pub async fn register(
                 Some(serde_json::json!({ "reason": reason })),
             )
             .await;
+            let _ = tx.rollback().await;
             return if duplicate {
                 conflict(message)
             } else {
@@ -293,34 +301,65 @@ pub async fn register(
         }
     };
 
-    // 旧实现的 createUserWithInitialCredit：账本在位时先建行、再 Credit。**注意
-    // Credit 失败时用户行已经建出来了** —— 旧实现也一样（错误一路冒到
-    // "创建用户失败"），照抄，不要在这里补一个删除，那会引入一条旧实现没有的路径。
-    if let Err(error) = state
+    match state
         .ledger
-        .credit(row.id, INITIAL_REGISTER_CREDIT, "initial_register_credit")
+        .credit_tx(
+            &mut tx,
+            row.id,
+            INITIAL_REGISTER_CREDIT,
+            "initial_register_credit",
+        )
         .await
     {
-        tracing::warn!(event = "initial_credit_failed", user_id = row.id, error = %error);
-        super::oplog::record(
-            &state,
-            &meta,
-            None,
-            "auth.register",
-            &format!("user:{email}"),
-            i64::from(StatusCode::INTERNAL_SERVER_ERROR.as_u16()),
-            Some(serde_json::json!({ "reason": "create_failed" })),
-        )
-        .await;
-        return internal("创建用户失败，请稍后重试");
+        Ok(change) => {
+            if let Err(error) = tx.commit().await {
+                tracing::warn!(event = "register_commit_failed", user_id = row.id, error = %error);
+                super::oplog::record(
+                    &state,
+                    &meta,
+                    None,
+                    "auth.register",
+                    &format!("user:{email}"),
+                    i64::from(StatusCode::INTERNAL_SERVER_ERROR.as_u16()),
+                    Some(serde_json::json!({ "reason": "create_failed" })),
+                )
+                .await;
+                return internal("创建用户失败，请稍后重试");
+            }
+            if let gw_ledger::BalanceChange::Applied {
+                balance_after,
+                balance_version,
+            } = change
+            {
+                let _ = state
+                    .ledger
+                    .publish_balance(row.id, balance_after, balance_version)
+                    .await;
+            }
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            tracing::warn!(event = "initial_credit_failed", user_id = row.id, error = %error);
+            super::oplog::record(
+                &state,
+                &meta,
+                None,
+                "auth.register",
+                &format!("user:{email}"),
+                i64::from(StatusCode::INTERNAL_SERVER_ERROR.as_u16()),
+                Some(serde_json::json!({ "reason": "create_failed" })),
+            )
+            .await;
+            return internal("创建用户失败，请稍后重试");
+        }
     }
     row.balance = INITIAL_REGISTER_CREDIT;
 
-    // 一次性管理员引导：只有当这就是配置里那个邮箱、且系统里还没有任何管理员时
-    // 才生效。就地改写 role，让本次响应和随后的路由立刻反映管理员身份。
-    if super::bootstrap::maybe_bootstrap_admin(&state, row.id, &row.email).await {
-        row.role = "admin".to_owned();
-    }
+    // 一次性主人引导：命中配置邮箱且还没有 super_admin 时提权。
+    row.role = match super::bootstrap::maybe_bootstrap_admin(&state, row.id, &row.email).await {
+        true => gw_role::Role::SuperAdmin.as_str().to_owned(),
+        false => row.role,
+    };
 
     // 新账号还没有 user_token_versions 行，版本恒为 0。
     let token = match generate_jwt_with_version(
@@ -415,7 +454,7 @@ pub async fn login(
         }
     };
 
-    let candidate = req.password.clone();
+    let candidate = req.password;
     let verified = tokio::task::spawn_blocking(move || {
         gw_authcore::verify_password(&candidate, &password_hash).unwrap_or(false)
     })

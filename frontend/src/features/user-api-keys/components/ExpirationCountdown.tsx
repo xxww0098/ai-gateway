@@ -39,7 +39,7 @@ export function ExpirationCountdown({ expiresAt }: Props) {
 
   if (diffDays < 7) {
     return (
-      <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-600 dark:text-amber-400">
+      <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-700 dark:text-amber-400">
         <Clock className="h-3.5 w-3.5" />
         {diffDays} 天后到期
       </span>

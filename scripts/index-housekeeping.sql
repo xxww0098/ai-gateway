@@ -13,17 +13,21 @@ BEGIN;
 
 -- usage_logs：idx_usage_logs_user_created (user_id, created_at DESC) 已覆盖
 DROP INDEX IF EXISTS idx_usage_logs_user_id;
-
--- event_key 补一个**部分**唯一索引：不变量是「一个 BillingOperationId 最多
--- 一条成功行」（billing_operations 的终态条件更新已经钉在扣费侧）。failed 行
--- 是审计行，可以合法地与成功行共用同一 event_key —— 所以谓词必须排除
--- failed；全列 UNIQUE 会把「先失败审计、后重试成功」这条正当路径拒在库层。
+-- request_id 换成**部分**唯一索引：不变量是「一个 request_id 最多一条
+-- 成功行」（settlement_intents 已把它当主键钉在扣费侧）。failed=true 的
+-- 审计行可以合法地与后来的成功行共用一个 request_id —— gw-proxy 的
+-- A0c 验收测试钉的就是这条 —— 所以谓词必须排除 failed 行，全列 UNIQUE 会
+-- 把「先失败审计、后重试成功」这条正当路径拒在库层。
 -- 若历史数据里存在重复的成功行，本语句会失败 —— 先人工核对再重跑。
-CREATE UNIQUE INDEX idx_usage_logs_event_key_settled
-    ON usage_logs (event_key) WHERE failed = false;
+DROP INDEX IF EXISTS idx_usage_logs_request_id;
+CREATE UNIQUE INDEX idx_usage_logs_request_id ON usage_logs (request_id)
+    WHERE failed = false;
 
 -- balance_logs：idx_balance_logs_user_created (user_id, created_at DESC) 已覆盖
 DROP INDEX IF EXISTS idx_balance_logs_user_id;
+-- GIN 全列索引：唯一按 metadata 键查询的是 shortfall 预检，已由
+-- idx_balance_logs_shortfall_open 部分索引服务；流水表上 GIN 是纯写税。
+DROP INDEX IF EXISTS idx_balance_logs_metadata;
 
 -- operation_logs：复合索引左前缀已覆盖单列等值查询
 DROP INDEX IF EXISTS idx_operation_logs_actor_id;  -- ← actor_created (actor_id, created_at DESC)
@@ -33,10 +37,7 @@ DROP INDEX IF EXISTS idx_operation_logs_action;    -- ← action_created (action
 DROP INDEX IF EXISTS idx_subscriptions_user_id;
 
 -- api_keys：last_used_at 只做展示（touch 已按 TTL debounce），
--- 列表按 created_at / id 排序，没有查询按它过滤或排序。
+-- 列表按 created_at 排序，没有查询按它过滤或排序。
 DROP INDEX IF EXISTS idx_api_keys_last_used_at;
-
--- 注意：balance_logs 的 metadata GIN 索引**保留** —— 它是 shortfall 欠款
--- 预检查询目前唯一可用的索引；这条线上没有等效的部分索引。
 
 COMMIT;

@@ -17,8 +17,6 @@ use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
-use gw_ledger::IdempotencyScope;
-
 use crate::ports::{AuthCrypto, Id, IdempotencyStore};
 
 /// Default lifetime of a cached response.
@@ -152,25 +150,17 @@ impl IdempotencyManager {
     /// opt-in). Scoping by user is what prevents cross-tenant replay (blocker
     /// B6); method+path scoping additionally stops one client reusing a key
     /// across endpoints.
-    pub fn scoped_key(
-        &self,
-        user_id: Id,
-        method: &str,
-        path: &str,
-        client_key: &str,
-    ) -> IdempotencyScope {
+    pub fn scoped_key(&self, user_id: Id, method: &str, path: &str, client_key: &str) -> String {
         let client_key = client_key.trim();
         if client_key.is_empty() {
-            return IdempotencyScope::default();
+            return String::new();
         }
-        IdempotencyScope::new(
-            self.crypto
-                .sha256_hex(&format!("{user_id}\0{method}\0{path}\0{client_key}")),
-        )
+        self.crypto
+            .sha256_hex(&format!("{user_id}\0{method}\0{path}\0{client_key}"))
     }
 
     /// Looks up a cached entry.
-    pub async fn check(&self, key: &IdempotencyScope) -> anyhow::Result<Option<CachedResponse>> {
+    pub async fn check(&self, key: &str) -> anyhow::Result<Option<CachedResponse>> {
         let Some(raw) = self.store.get(&redis_key(key)).await? else {
             return Ok(None);
         };
@@ -180,7 +170,7 @@ impl IdempotencyManager {
     /// Reserves the key for an in-flight request (SETNX + `processing`
     /// sentinel). `Ok(true)` means the caller now owns it and must later
     /// [`Self::store`] or [`Self::release`].
-    pub async fn claim(&self, key: &IdempotencyScope) -> anyhow::Result<bool> {
+    pub async fn claim(&self, key: &str) -> anyhow::Result<bool> {
         let sentinel = serde_json::to_vec(&CachedResponse {
             processing: true,
             ..CachedResponse::default()
@@ -191,22 +181,18 @@ impl IdempotencyManager {
     }
 
     /// Overwrites the claim with the completed response.
-    pub async fn store(
-        &self,
-        key: &IdempotencyScope,
-        response: &CachedResponse,
-    ) -> anyhow::Result<()> {
+    pub async fn store(&self, key: &str, response: &CachedResponse) -> anyhow::Result<()> {
         let data = serde_json::to_vec(response)?;
         self.store.set(&redis_key(key), data, self.ttl).await
     }
 
     /// Drops the claim so a retry can proceed immediately.
-    pub async fn release(&self, key: &IdempotencyScope) -> anyhow::Result<()> {
+    pub async fn release(&self, key: &str) -> anyhow::Result<()> {
         self.store.delete(&redis_key(key)).await
     }
 }
 
-fn redis_key(key: &IdempotencyScope) -> String {
+fn redis_key(key: &str) -> String {
     format!("{KEY_PREFIX}{key}")
 }
 

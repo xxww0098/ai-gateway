@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback } from "react"
+import { Link } from "react-router-dom"
 import { errorMessage, fetchApi } from "@/shared/api/client"
 import { Card, CardContent } from "@/shared/components/ui/card"
 import { Badge } from "@/shared/components/ui/badge"
 import { Button } from "@/shared/components/ui/button"
 import { toast } from "sonner"
-import { ArrowLeftRight, Clock, CalendarDays, AlertCircle, CheckCircle2, XCircle } from "lucide-react"
+import { ArrowLeftRight, ArrowLeft, Clock, CalendarDays, AlertCircle, CheckCircle2, XCircle } from "lucide-react"
 import { userRoutes } from "@/shared/routes/user"
 import { EmptyState } from "@/shared/components/EmptyState"
 
@@ -49,14 +50,14 @@ export default function Refunds() {
     switch (status) {
       case "pending":
         return (
-          <Badge variant="outline" className="text-amber-600 border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800">
+          <Badge variant="outline" className="text-amber-700 dark:text-amber-400 border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800">
             <Clock className="w-3 h-3 mr-1" />
             审核中
           </Badge>
         )
       case "approved":
         return (
-          <Badge className="bg-emerald-500 hover:bg-emerald-600 text-white border-transparent">
+          <Badge className="bg-emerald-700 hover:bg-emerald-800 text-white border-transparent">
             <CheckCircle2 className="w-3 h-3 mr-1" />
             已通过
           </Badge>
@@ -89,22 +90,30 @@ export default function Refunds() {
   }
 
   return (
-    <div className="space-y-8 animate-in fade-in duration-500 max-w-4xl mx-auto" style={{ willChange: "transform, opacity" }}>
-      <div className="space-y-2">
-        <h3 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
-          <ArrowLeftRight className="w-6 h-6 text-primary" />
-          退款记录
-        </h3>
-        <p className="text-gray-500">
-          查看您的退订申请记录和审核状态。审核通过后会取消对应订阅权益，并按规则调整账户余额。
-        </p>
+    <div className="mx-auto max-w-4xl space-y-8">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-foreground">
+            退款记录
+          </h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            订阅退款的审核进度与退回金额明细
+          </p>
+        </div>
+        <Link
+          to={userRoutes.subscriptions}
+          className="btn btn-secondary h-9 px-3.5 text-xs font-semibold rounded-xl border-border shadow-2xs gap-1.5 self-start sm:self-auto"
+        >
+          <ArrowLeft className="w-3.5 h-3.5 text-muted-foreground" />
+          <span>返回订阅</span>
+        </Link>
       </div>
 
       {records.length === 0 ? (
         <EmptyState
           bordered
           icon={ArrowLeftRight}
-          title="暂无退款申请记录"
+          title="还没有退款申请"
           description="提交订阅退款申请后，审核进度与退回金额将在此处展示。"
           action={{ label: '前往我的订阅', to: userRoutes.subscriptions }}
         />
@@ -166,7 +175,7 @@ export default function Refunds() {
                       ${r.amount.toFixed(2)}
                     </div>
                     {r.status === "pending" && (
-                      <div className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+                      <div className="flex items-center gap-1 text-xs text-amber-700 dark:text-amber-400">
                         <AlertCircle className="w-3.5 h-3.5" />
                         等待审核
                       </div>

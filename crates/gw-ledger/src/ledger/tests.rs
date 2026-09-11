@@ -10,8 +10,11 @@ use std::time::Duration;
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 
-use super::reply::{is_cache_miss, is_insufficient_balance, parse_insufficient_available};
-use super::{Ledger, audit_metadata, hold_keys_ttl};
+use super::balance::{DEDUP_CREDIT_PREFIXES, dedup_prefix};
+use super::{
+    Ledger, audit_metadata, hold_keys_ttl, is_cache_miss, is_insufficient_balance,
+    parse_insufficient_available,
+};
 use crate::scripts::{CACHE_MISS, INSUFFICIENT_BALANCE};
 use crate::{DEFAULT_BALANCE_TTL, DEFAULT_HOLD_TTL, LedgerError};
 
@@ -100,14 +103,28 @@ async fn holding_without_redis_is_refused() {
 #[tokio::test]
 async fn releasing_without_redis_succeeds() {
     redisless().release(1, "req").await.expect("release");
-    redisless().clear_hold(1, "req").await.expect("clear_hold");
+    redisless()
+        .clear_hold(1, "req", None)
+        .await
+        .expect("clear_hold");
+}
+
+/// With no Redis there are no reservations, so a scan is empty rather than an
+/// error — an ops scan must not fail a deployment that runs without holds.
+#[tokio::test]
+async fn scanning_without_redis_finds_nothing() {
+    let stale = redisless()
+        .scan_stale_holds(Duration::from_secs(600))
+        .await
+        .expect("scan");
+    assert!(stale.is_empty());
 }
 
 /// Amount guards reject before any state moves. Every rejected call below must
 /// leave the ledger untouched, which is why they are checked first.
 #[tokio::test]
-async fn non_positive_amounts_are_rejected() {
-    for amount in [0.0, -1.0] {
+async fn non_positive_or_non_finite_amounts_are_rejected_before_io() {
+    for amount in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         let err = redisless().credit(1, amount, "ref").await.unwrap_err();
         assert!(matches!(err, LedgerError::InvalidArgument(_)), "{err:?}");
 
@@ -205,6 +222,19 @@ fn hold_keys_outlive_the_lua_cutoff() {
     }
 }
 
+/// B0 characterization: Redis hold keys expire (360s) before the proxy's
+/// 30-minute orphan scan. Passing documents the window; slice 03 closes it.
+#[test]
+fn default_hold_keys_expire_before_the_proxy_stale_scan() {
+    const PROXY_DEFAULT_STALE_AFTER: Duration = Duration::from_secs(30 * 60);
+    assert!(
+        hold_keys_ttl(DEFAULT_HOLD_TTL) < PROXY_DEFAULT_STALE_AFTER,
+        "hold keys live {:?}, scan cutoff {:?}",
+        hold_keys_ttl(DEFAULT_HOLD_TTL),
+        PROXY_DEFAULT_STALE_AFTER
+    );
+}
+
 /// The Lua refusal carries the available balance after a colon so a 402
 /// body does not need a second GET. The parser must read that payload
 /// from either shape redis-rs may use for a custom `error_reply`.
@@ -234,4 +264,66 @@ async fn hold_collapses_a_floor_refusal_to_the_sentinel_error() {
         .await
         .unwrap_err();
     assert!(matches!(err, LedgerError::RedisNotConfigured), "{err:?}");
+}
+// ------------------------------------------------- reference-level dedup
+
+/// The namespaces that collapse a repeated credit are exactly the ones with a
+/// partial unique index behind them, and the match is on the literal prefix —
+/// not on a LIKE pattern where `_` would be a single-character wildcard.
+#[test]
+fn only_the_indexed_namespaces_are_deduplicated() {
+    for reference in [
+        "payment_order:1",
+        "service_credit:ozon-order:PO-1",
+        // The namespace with an empty remainder is still the namespace: the
+        // index's LIKE matches it too, so the pre-check must not disagree.
+        "payment_order:",
+        "service_credit:",
+    ] {
+        assert!(dedup_prefix(reference).is_some(), "{reference}");
+    }
+
+    for reference in [
+        "",
+        "payment_order",
+        "service_credit",
+        // `_` is a literal here, so these deliberately do NOT match.
+        "paymentXorder:1",
+        "serviceXcredit:1",
+        // Indexed elsewhere, but with DB-level-only semantics: the ledger
+        // writes them as-is and lets the index refuse a true duplicate.
+        "redeem:CODE",
+        "initial_register_credit",
+        "shortfall_resolve:req:1",
+        "usage_bucket_ref_001",
+    ] {
+        assert!(dedup_prefix(reference).is_none(), "{reference}");
+    }
+}
+
+/// Every prefix the pre-check interpolates must appear verbatim in a
+/// migration, or the planner cannot prove the query implies the partial index
+/// and the "duplicate" is only ever caught after money moved. Reading the
+/// migrations rather than restating the predicate is what makes this catch a
+/// renamed/removed index instead of a typo in the test.
+#[test]
+fn every_dedup_predicate_has_a_partial_unique_index_in_migrations() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+    let mut haystack = String::new();
+    for entry in std::fs::read_dir(&dir).expect("migrations/ is readable") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().is_some_and(|ext| ext == "sql") {
+            haystack.push_str(&std::fs::read_to_string(&path).expect("migration is readable"));
+            haystack.push('\n');
+        }
+    }
+
+    for dedup in DEDUP_CREDIT_PREFIXES {
+        let predicate = format!("reference LIKE {}", dedup.like);
+        assert!(
+            haystack.contains(&predicate),
+            "{} 的预查谓词 `{predicate}` 在 migrations/ 里没有对应的部分唯一索引",
+            dedup.prefix
+        );
+    }
 }

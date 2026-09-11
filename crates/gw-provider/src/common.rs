@@ -6,13 +6,18 @@
 //! Header forwarding lives in [`crate::types`] (`copy_outbound_headers` /
 //! `is_skipped_proxy_header`), next to the trait it serves.
 
-use crate::types::{ProviderError, ProviderRequest};
+use crate::streambuf::StreamUsageProbe;
+use crate::types::{ProviderError, ProviderRequest, StreamChunk, StreamResponse};
+use crate::usage::UsageTokens;
 use bytes::Bytes;
+use futures::Stream;
 use gw_relay::endpoint::include_usage::Spliced;
 use gw_relay::endpoint::{IncludeUsagePolicy, RequestSpec, splice_include_usage};
 use gw_relay::{Surface, UpstreamDialect};
 use serde_json::Value;
+use std::pin::Pin;
 use std::sync::OnceLock;
+use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 /// Shared provider identifiers.
@@ -25,9 +30,10 @@ pub const PROVIDER_GEMINI: &str = "gemini";
 pub const PROVIDER_CODEX: &str = "codex";
 /// See [`PROVIDER_OPENAI`].
 pub const PROVIDER_VERTEX: &str = "vertex";
-/// xAI Grok OAuth executor. Tokens are also usable via the OpenAI-compatible
-/// executor when the record carries `base_url=https://api.x.ai/v1`.
-pub const PROVIDER_XAI: &str = "xai";
+/// xAI Grok OAuth executor. Stored as `grok` (not `xai`).
+pub const PROVIDER_XAI: &str = "grok";
+/// See [`PROVIDER_XAI`].
+pub const PROVIDER_GROK: &str = "grok";
 /// Kiro / AWS Builder ID. The 15-cell relay matrix has no Kiro cell, so this
 /// executor is registered for refresh and for an operator who routes to it
 /// explicitly; `/v1` candidates never include `"kiro"` today.
@@ -79,32 +85,15 @@ pub fn request_surface(req: &ProviderRequest) -> Surface {
         .unwrap_or(Surface::OpenAiCompletions)
 }
 
-/// The three timeouts `gw-relay` applies, from one provider timeout.
-///
-/// `request` is the whole-request cap the executors used to hand `reqwest`;
-/// `stream_idle` is the *between-frames* watchdog, which is the only bound a
-/// stream may have — a whole-request cap would truncate a healthy long answer.
-/// `connect` keeps the relay's own default.
-#[must_use]
-pub fn relay_timeouts(request: Duration) -> gw_relay::RelayTimeouts {
-    gw_relay::RelayTimeouts {
-        request,
-        stream_idle: DEFAULT_STREAM_IDLE_TIMEOUT,
-        ..gw_relay::RelayTimeouts::default()
-    }
-}
-
 /// Provider-specific upstream settings.
 ///
 /// Deliberately local rather than a `gw_config` re-export: the executors need
-/// exactly these three fields.
-///
+/// exactly these two fields.
 /// `Debug` 是手写的：`api_key` 是活密钥，见 [`Redacted`]。
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct ProviderConfig {
     pub base_url: String,
     pub api_key: String,
-    pub enabled: bool,
 }
 
 impl std::fmt::Debug for ProviderConfig {
@@ -112,7 +101,6 @@ impl std::fmt::Debug for ProviderConfig {
         f.debug_struct("ProviderConfig")
             .field("base_url", &self.base_url)
             .field("api_key", &Redacted(&self.api_key))
-            .field("enabled", &self.enabled)
             .finish()
     }
 }
@@ -128,10 +116,6 @@ impl std::fmt::Debug for ProviderConfig {
 /// 而稳定的哈希指纹同样能把两条日志串起来，还更像是安全的。
 /// `<empty>` 与 `<redacted:N bytes>` 的区别要留着 —— 「压根没配凭证」与
 /// 「配了但这里不给看」的排查方向相反。
-///
-/// 与 `gw_relay::Credential` 的脱敏是同一条规矩的两处落点（那边收的是**出站**
-/// 凭证，这边收的是 executor 手里的**长期**凭证）；`gw-panel` 的 `mask_secret`
-/// 是第三件事 —— 它是给管理员认自己那把 key 的 UI 预览，本 crate 不引它。
 pub(crate) struct Redacted<'a>(pub(crate) &'a str);
 
 impl std::fmt::Debug for Redacted<'_> {
@@ -166,27 +150,17 @@ fn build_or_default(builder: reqwest::ClientBuilder) -> reqwest::Client {
 ///
 /// A whole-request timeout also bounds *reading the response body*, so any
 /// non-zero value silently truncates long-but-healthy streams (an extended o1 /
-/// Claude answer). Stall protection is `gw-relay`'s frame-idle watchdog.
+/// Claude answer). Stall protection comes from [`with_stream_idle_timeout`]
+/// instead.
 ///
-/// Callers that want a bounded non-streaming request can either use
-/// [`new_http_client`] or scope the cap per request with
-/// `RequestBuilder::timeout` — the latter keeps everything on this one pool
+/// Callers that want a bounded non-streaming request scope the cap per request
+/// with `RequestBuilder::timeout` — that keeps everything on this one pool
 /// (`reqwest` has no API for sharing a pool between two `Client`s).
 pub fn shared_client() -> reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT
         .get_or_init(|| build_or_default(client_builder()))
         .clone()
-}
-
-/// An executor HTTP client whose `timeout` caps the whole request, including
-/// reading the response body. For non-streaming calls only.
-///
-/// This cannot reuse [`shared_client`]'s pool — `reqwest` binds the pool to the
-/// `Client` — so prefer `shared_client().post(..).timeout(..)` when the timeout
-/// is the only reason you would build a second client.
-pub fn new_http_client(timeout: Duration) -> reqwest::Client {
-    build_or_default(client_builder().timeout(timeout))
 }
 
 /// Turns a configured timeout in seconds into a [`Duration`], falling back to
@@ -198,26 +172,6 @@ pub fn resolve_timeout(timeout_seconds: i64) -> Duration {
     } else {
         DEFAULT_TIMEOUT
     }
-}
-
-/// Estimates token count from a payload byte size.
-#[must_use]
-pub fn approximate_tokens_from_bytes(size: usize) -> i64 {
-    if size == 0 {
-        return 0;
-    }
-    size.div_ceil(4) as i64
-}
-
-/// Clips a failure payload so a persisted error body stays bounded. 4 KiB is
-/// more than enough for provider error envelopes.
-#[must_use]
-pub fn truncate_failure_body(payload: &[u8]) -> String {
-    const MAX: usize = 4 * 1024;
-    let end = payload.len().min(MAX);
-    // Never split a UTF-8 code point; `from_utf8_lossy` also tolerates the
-    // non-UTF-8 bodies some upstreams return on infrastructure errors.
-    String::from_utf8_lossy(&payload[..end]).into_owned()
 }
 
 /// Resolves the upstream-facing model name for a request.
@@ -330,8 +284,7 @@ pub fn ensure_include_usage(payload: &Bytes, surface: Surface) -> Option<Spliced
 ///
 /// 这里只需要区分本 crate 的 OpenAI 兼容两支；Anthropic 入口不走这条路
 /// （`claude.rs` 从不调 [`ensure_include_usage`]），映射到它自己的方言即可。
-#[must_use]
-pub fn upstream_dialect(surface: Surface) -> UpstreamDialect {
+fn upstream_dialect(surface: Surface) -> UpstreamDialect {
     match surface {
         Surface::OpenAiCompletions => UpstreamDialect::OpenAiChat,
         Surface::OpenAiResponses => UpstreamDialect::OpenAiResponses,
@@ -339,84 +292,36 @@ pub fn upstream_dialect(surface: Surface) -> UpstreamDialect {
     }
 }
 
-// --- exact query forwarding -------------------------------------------------
-
-/// Returns the exact inbound query when production supplied one, otherwise
-/// serializes the legacy pair representation used by unit fixtures.
-#[must_use]
-pub fn request_query(req: &ProviderRequest) -> std::borrow::Cow<'_, str> {
-    if let Some(raw) = req.raw_query.as_deref() {
-        return std::borrow::Cow::Borrowed(raw);
-    }
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    for (key, value) in &req.query {
-        serializer.append_pair(key, value);
-    }
-    std::borrow::Cow::Owned(serializer.finish())
-}
-
-/// Appends a raw query without decoding and re-encoding existing percent
-/// escapes. Existing provider-owned parameters stay first.
-pub fn append_raw_query(url: &mut url::Url, raw: &str) {
-    let raw = raw.strip_prefix('?').unwrap_or(raw);
-    if raw.is_empty() {
-        return;
-    }
-    let merged = match url.query() {
-        Some(existing) if !existing.is_empty() => format!("{existing}&{raw}"),
-        _ => raw.to_owned(),
+/// 把请求体挂到 reqwest 请求上，**零全量拷贝**。
+///
+/// 两条路都不复制 body：
+///
+/// - 没有插入（`spliced` 为 `None`）：`reqwest::Body::from(Bytes)` 是接管，不是复制。
+/// - 有插入：两段 [`Bytes`] 作为一个两帧的流交出去，并**显式写死
+///   `content-length`**。hyper 对用户自己设过的 `content-length` 是尊重的
+///   （`proto/h1/role.rs` 的 `Client::set_length`：`existing_con_len` 优先），
+///   所以框架仍然是 `Content-Length`，**不会退化成 `Transfer-Encoding: chunked`** ——
+///   透传优先，不该因为要计费就改掉发给上游的报文框架。
+///
+/// `content-length` 由网关重算是既定事实：入站的那一个在
+/// [`crate::types::is_skipped_proxy_header`] 的黑名单里，本来就不会被转发
+/// （`docs/relay-passthrough-audit.md` §4.1 条 6）。
+pub fn attach_body(
+    builder: reqwest::RequestBuilder,
+    payload: &Bytes,
+    spliced: Option<Spliced>,
+) -> reqwest::RequestBuilder {
+    let Some(spliced) = spliced else {
+        return builder.body(payload.clone());
     };
-    url.set_query(Some(&merged));
-}
-
-/// Replaces every occurrence of a provider-owned query key while preserving all
-/// other raw segments byte-for-byte. Only the key is percent-decoded for the
-/// comparison; values and unrelated segments are never touched.
-#[must_use]
-pub fn override_raw_query(raw: &str, owned_key: &str, owned_value: &str) -> String {
-    fn hex(byte: u8) -> Option<u8> {
-        match byte {
-            b'0'..=b'9' => Some(byte - b'0'),
-            b'a'..=b'f' => Some(byte - b'a' + 10),
-            b'A'..=b'F' => Some(byte - b'A' + 10),
-            _ => None,
-        }
-    }
-
-    fn decoded_key(segment: &str) -> Option<Vec<u8>> {
-        let key = segment.split_once('=').map_or(segment, |(key, _)| key);
-        let bytes = key.as_bytes();
-        let mut out = Vec::with_capacity(bytes.len());
-        let mut at = 0;
-        while at < bytes.len() {
-            match bytes[at] {
-                b'+' => {
-                    out.push(b' ');
-                    at += 1;
-                }
-                b'%' if at + 2 < bytes.len() => {
-                    out.push(hex(bytes[at + 1])? * 16 + hex(bytes[at + 2])?);
-                    at += 3;
-                }
-                byte => {
-                    out.push(byte);
-                    at += 1;
-                }
-            }
-        }
-        Some(out)
-    }
-
-    let mut kept: Vec<&str> = raw
-        .strip_prefix('?')
-        .unwrap_or(raw)
-        .split('&')
-        .filter(|segment| !segment.is_empty())
-        .filter(|segment| decoded_key(segment).as_deref() != Some(owned_key.as_bytes()))
-        .collect();
-    let owned = format!("{owned_key}={owned_value}");
-    kept.push(&owned);
-    kept.join("&")
+    let length = spliced.len();
+    let frames = futures_util::stream::iter([
+        Ok::<Bytes, std::io::Error>(spliced.prefix),
+        Ok(spliced.rest),
+    ]);
+    builder
+        .header(http::header::CONTENT_LENGTH, length)
+        .body(reqwest::Body::wrap_stream(frames))
 }
 
 // --- endpoint construction ---------------------------------------------------
@@ -436,16 +341,7 @@ pub fn chat_completions_endpoint(
     base_url: &str,
     query: &[(String, String)],
 ) -> Result<String, ProviderError> {
-    openai_compatible_endpoint(base_url, OPENAI_CHAT_LEAF, None, query)
-}
-
-/// Production form that preserves the inbound query byte representation.
-pub fn chat_completions_endpoint_for(
-    base_url: &str,
-    req: &ProviderRequest,
-) -> Result<String, ProviderError> {
-    let raw = request_query(req);
-    openai_compatible_endpoint(base_url, OPENAI_CHAT_LEAF, Some(raw.as_ref()), &[])
+    openai_compatible_endpoint(base_url, OPENAI_CHAT_LEAF, query)
 }
 
 /// Builds the `responses` endpoint for an OpenAI-compatible base URL.
@@ -465,16 +361,7 @@ pub fn responses_endpoint(
     base_url: &str,
     query: &[(String, String)],
 ) -> Result<String, ProviderError> {
-    openai_compatible_endpoint(base_url, OPENAI_RESPONSES_LEAF, None, query)
-}
-
-/// Production form that preserves the inbound query byte representation.
-pub fn responses_endpoint_for(
-    base_url: &str,
-    req: &ProviderRequest,
-) -> Result<String, ProviderError> {
-    let raw = request_query(req);
-    openai_compatible_endpoint(base_url, OPENAI_RESPONSES_LEAF, Some(raw.as_ref()), &[])
+    openai_compatible_endpoint(base_url, OPENAI_RESPONSES_LEAF, query)
 }
 
 /// Shared body of the two endpoint builders.
@@ -488,7 +375,6 @@ pub fn responses_endpoint_for(
 fn openai_compatible_endpoint(
     base_url: &str,
     leaf: &str,
-    raw_query: Option<&str>,
     query: &[(String, String)],
 ) -> Result<String, ProviderError> {
     let base = base_url.trim().trim_end_matches('/');
@@ -516,9 +402,7 @@ fn openai_compatible_endpoint(
     };
     let mut parsed = url::Url::parse(&endpoint)
         .map_err(|err| ProviderError::Other(anyhow::anyhow!("invalid base_url: {err}")))?;
-    if let Some(raw) = raw_query {
-        append_raw_query(&mut parsed, raw);
-    } else if !query.is_empty() {
+    if !query.is_empty() {
         let mut pairs = parsed.query_pairs_mut();
         for (key, value) in query {
             pairs.append_pair(key, value);
@@ -534,6 +418,280 @@ fn openai_compatible_endpoint(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("upstream stream idle timeout")]
 pub struct StreamIdleElapsed;
+
+/// Wraps a stream so that a gap longer than `idle` between items terminates it
+/// with [`StreamIdleElapsed`].
+///
+/// A stream *is* the sequence of reads, so the reset is implicit — every
+/// yielded item restarts the window, and a zero-length item cannot occur
+/// (empty reads are not progress).
+///
+/// A zero `idle` disables the watchdog and passes the inner stream through
+/// untouched.
+///
+/// # Why this is a `Stream` and not `unfold` + `timeout`
+///
+/// The previous implementation was `unfold` around `tokio::time::timeout(idle,
+/// inner.next())`. That builds a new `Sleep` future on **every poll**, including
+/// the case where the next chunk is already ready. On a burst SSE stream that
+/// is one timer per chunk for a 300 s window that never fires.
+///
+/// This type polls the inner stream first and only arms a reusable [`Sleep`]
+/// when that poll returns `Pending`. Ready chunks therefore do not touch the
+/// timer at all.
+pub fn with_stream_idle_timeout<S>(
+    inner: S,
+    idle: Duration,
+) -> impl Stream<Item = Result<S::Item, StreamIdleElapsed>> + Send
+where
+    S: Stream + Send + 'static,
+    S::Item: Send,
+{
+    IdleTimeout::new(inner, idle)
+}
+
+/// See [`with_stream_idle_timeout`].
+struct IdleTimeout<S> {
+    inner: Pin<Box<S>>,
+    /// Reused across gaps so a long stream pays one timer allocation, not one
+    /// per chunk. `None` until the first `Pending`.
+    sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+    idle: Duration,
+    expired: bool,
+    /// `true` while `sleep` is counting the current gap. Cleared when an item
+    /// arrives so the next `Pending` restarts the window from now.
+    armed: bool,
+}
+
+impl<S> IdleTimeout<S>
+where
+    S: Stream,
+{
+    fn new(inner: S, idle: Duration) -> Self {
+        Self {
+            inner: Box::pin(inner),
+            sleep: None,
+            idle,
+            expired: false,
+            armed: false,
+        }
+    }
+
+    fn poll_idle(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        let deadline = tokio::time::Instant::now() + self.idle;
+        if let Some(sleep) = self.sleep.as_mut() {
+            if !self.armed {
+                sleep.as_mut().reset(deadline);
+                self.armed = true;
+            }
+            return sleep.as_mut().poll(cx);
+        }
+        let mut sleep = Box::pin(tokio::time::sleep_until(deadline));
+        let poll = sleep.as_mut().poll(cx);
+        self.sleep = Some(sleep);
+        self.armed = true;
+        poll
+    }
+}
+
+impl<S> Stream for IdleTimeout<S>
+where
+    S: Stream,
+{
+    type Item = Result<S::Item, StreamIdleElapsed>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.expired {
+            return Poll::Ready(None);
+        }
+        if this.idle.is_zero() {
+            return this.inner.as_mut().poll_next(cx).map(|item| item.map(Ok));
+        }
+        match this.inner.as_mut().poll_next(cx) {
+            Poll::Ready(Some(item)) => {
+                this.armed = false;
+                Poll::Ready(Some(Ok(item)))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => match this.poll_idle(cx) {
+                Poll::Ready(()) => {
+                    this.expired = true;
+                    this.armed = false;
+                    Poll::Ready(Some(Err(StreamIdleElapsed)))
+                }
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+// --- streamed usage accumulation ---------------------------------------------
+
+/// Assembles a [`StreamResponse`] from an accepted upstream response.
+///
+/// The single reason this is a function rather than three lines inlined five
+/// times: the header clone **must** happen before the body is consumed, and
+/// `bytes_stream()` takes the response by value. Doing it here makes that
+/// ordering unrepeatable-by-accident, and gives the five executors one tested
+/// seam. `build` receives the response and the status it reported, so error
+/// chunks can carry the status the relay actually ran under.
+///
+/// Callers must have rejected a failing status already — see
+/// [`crate::types::Provider::execute_stream`].
+pub(crate) fn stream_response<F>(response: reqwest::Response, build: F) -> StreamResponse
+where
+    F: FnOnce(reqwest::Response, u16) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>>,
+{
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    StreamResponse {
+        status,
+        headers,
+        chunks: build(response, status),
+    }
+}
+
+enum UsagePhase {
+    Streaming,
+    Trailing,
+    Done,
+}
+
+/// The per-stream constants [`usage_stream`] threads through every chunk.
+struct UsageStreamMeta {
+    model: String,
+    provider: &'static str,
+    /// Status of the response being relayed, stamped onto any error chunk.
+    upstream_status: u16,
+}
+
+/// One stream: idle watchdog + line probe + [`StreamChunk`] mapping.
+///
+/// Replaces two stacked `unfold` state machines. State stays in place across
+/// polls — the probe's `pending` line buffer is not moved on every chunk —
+/// and the idle timer is the [`IdleTimeout`] above, so a ready chunk does not
+/// allocate a `Sleep`.
+struct UsageRelay<S> {
+    inner: IdleTimeout<S>,
+    probe: StreamUsageProbe,
+    meta: UsageStreamMeta,
+    phase: UsagePhase,
+}
+
+impl<S> Stream for UsageRelay<S>
+where
+    S: Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
+{
+    type Item = StreamChunk;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            match this.phase {
+                UsagePhase::Done => return Poll::Ready(None),
+                UsagePhase::Trailing => {
+                    this.phase = UsagePhase::Done;
+                    return Poll::Ready(
+                        this.probe
+                            .finish()
+                            .map(|tokens| tokens.to_record(&this.meta.model, this.meta.provider))
+                            .map(StreamChunk::Usage),
+                    );
+                }
+                UsagePhase::Streaming => match ready!(Pin::new(&mut this.inner).poll_next(cx)) {
+                    Some(Ok(Ok(chunk))) => {
+                        this.probe.observe(&chunk);
+                        return Poll::Ready(Some(StreamChunk::Payload(chunk)));
+                    }
+                    // Transport error mid-stream: surface it, then still try
+                    // to bill whatever usage the truncated body carried.
+                    Some(Ok(Err(err))) => {
+                        this.phase = UsagePhase::Trailing;
+                        return Poll::Ready(Some(StreamChunk::Error {
+                            status: Some(this.meta.upstream_status),
+                            message: err.to_string(),
+                        }));
+                    }
+                    Some(Err(elapsed)) => {
+                        this.phase = UsagePhase::Trailing;
+                        return Poll::Ready(Some(StreamChunk::Error {
+                            status: Some(this.meta.upstream_status),
+                            message: elapsed.to_string(),
+                        }));
+                    }
+                    None => {
+                        this.phase = UsagePhase::Trailing;
+                    }
+                },
+            }
+        }
+    }
+}
+
+/// Turns a raw upstream byte stream into the [`StreamChunk`] sequence the
+/// [`crate::types::Provider`] trait promises: every payload is forwarded
+/// verbatim, and a terminal [`StreamChunk::Usage`] is emitted iff `parse` found
+/// a usage envelope in the accumulated body.
+///
+/// Two behavioural notes:
+///
+/// - The *absence* of a `StreamChunk::Usage` carries the "nothing parsed"
+///   signal, so `strict_usage_metadata_mode` still has its "absent, not zero"
+///   input.
+/// - Memory stays at `O(one line)` regardless of body length, and no stream
+///   byte is copied — see [`StreamUsageProbe`] (perf hotspot #2).
+///
+/// `parse` is handed **one line at a time**, not the whole body. The four
+/// provider scanners behave identically on a single line, so none of them
+/// changed when the head/tail window was replaced.
+pub(crate) fn usage_stream<S>(
+    body: S,
+    idle: Duration,
+    model: String,
+    provider: &'static str,
+    parse: fn(&[u8]) -> Option<UsageTokens>,
+    upstream_status: u16,
+) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>>
+where
+    S: Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
+{
+    Box::pin(UsageRelay {
+        inner: IdleTimeout::new(body, idle),
+        probe: StreamUsageProbe::new(parse),
+        meta: UsageStreamMeta {
+            model,
+            provider,
+            upstream_status,
+        },
+        phase: UsagePhase::Streaming,
+    })
+}
+
+/// [`stream_response`] + [`usage_stream`]，七个 executor 唯一的流式收尾组合：
+/// 接受一个已确认 2xx 的响应，挂上默认空闲看门狗与逐行 usage 探针。
+/// 各家只差 `(model, provider, parse)` 三个参数，所以组合收拢在这一处。
+pub(crate) fn relay_usage_stream(
+    response: reqwest::Response,
+    model: String,
+    provider: &'static str,
+    parse: fn(&[u8]) -> Option<UsageTokens>,
+) -> StreamResponse {
+    stream_response(response, move |response, status| {
+        usage_stream(
+            response.bytes_stream(),
+            DEFAULT_STREAM_IDLE_TIMEOUT,
+            model,
+            provider,
+            parse,
+            status,
+        )
+    })
+}
 
 #[cfg(test)]
 #[path = "common_tests.rs"]

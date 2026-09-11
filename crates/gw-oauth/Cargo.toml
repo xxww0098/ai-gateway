@@ -1,0 +1,31 @@
+[package]
+name = "gw-oauth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Vendor OAuth families: login, refresh, request rewrite, isolated prompt cache, quota"
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+chrono = { workspace = true, features = ["clock", "std", "serde"] }
+reqwest = { workspace = true, features = ["json", "rustls-tls", "http2", "charset"] }
+http.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tracing = { workspace = true, features = ["std"] }
+uuid = { workspace = true, features = ["v4", "std"] }
+base64.workspace = true
+sha2 = { workspace = true, features = ["std"] }
+rand = { workspace = true, features = ["std", "std_rng"] }
+hex.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

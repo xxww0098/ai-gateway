@@ -33,14 +33,12 @@
 //!
 //! | module | role |
 //! | --- | --- |
-//! | [`kernel`] | request state machine + single [`RelayCtx`] |
-//! | [`body`] | 入站 body 的三道闸：计费 peek / 整体改写 / 传输 |
+//! | [`kernel`] | the single hot-path middleware [`kernel::layer`] |
 //! | [`access`] | tenant authentication |
 //! | [`hold`] | pre-flight reservation + quota gate |
 //! | [`usage`] | usage parsing + settlement |
 //! | [`channel`] | account selection, health, policy cache |
 //! | [`idempotency`] | idempotent replay of cached responses |
-//! | [`budget_token`] | process-local batch budget |
 //! | [`reconcile`] | orphaned-hold recovery |
 //! | [`settlectx`] | per-request billing state |
 //! | [`ports`] | the collaborator traits |
@@ -66,8 +64,6 @@
 
 pub mod access;
 pub mod adapters;
-pub mod body;
-pub mod budget_token;
 pub mod channel;
 pub mod error;
 pub mod hold;
@@ -90,7 +86,6 @@ use tokio_util::task::TaskTracker;
 
 pub use access::AccessProvider;
 pub use hold::HoldMiddleware;
-pub use kernel::{Phase, RelayCtx};
 pub use ports::{DiscardMetrics, MetricsSink};
 pub use routes::Dispatcher;
 pub use settlectx::{RequestBilling, SettleCtx};
@@ -181,8 +176,8 @@ impl ProxyState {
 /// `POST /v1beta/models/{model}`）是**硬删**，不是 410 过渡 —— 判定表见
 /// `docs/relay-surface-plan.md` §2，已知代价见 crate 级 doc。
 ///
-/// 热路径只挂 **一层** [`kernel::layer`]。鉴权→预扣的顺序写在状态机里
-/// （[`kernel::Phase`]），不再靠两个 `.layer()` 的挂载顺序维持 B1。
+/// 热路径只挂 **一层** [`kernel::layer`]。鉴权→预扣的顺序写在它的函数体里，
+/// 不再靠两个 `.layer()` 的挂载顺序维持 B1。
 /// `access::layer` / `hold::layer` 仍在，给只想测其中一层的用例用。
 ///
 /// Request counting is NOT layered here: `gw_server::metrics::track` wraps the

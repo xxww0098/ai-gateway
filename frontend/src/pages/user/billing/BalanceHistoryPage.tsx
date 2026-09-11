@@ -1,12 +1,24 @@
-import { useState, useEffect, useCallback } from 'react'
-import { fetchApi } from '@/shared/api/client'
-import { EmptyState, EmptyStateRow } from '@/shared/components/EmptyState'
-import { userRoutes } from '@/shared/routes/user'
-import { toast } from 'sonner'
+import { useState } from "react"
+import { useQuery } from "@tanstack/react-query"
+import { apiClient } from "@/shared/api/client"
+import { queryKeys } from "@/shared/api/query-keys"
+import { errorMessage } from "@/shared/api/errors"
+import { EmptyState, EmptyStateRow } from "@/shared/components/EmptyState"
+import { userRoutes } from "@/shared/routes/user"
+import { Button } from "@/shared/components/ui/button"
+import { toast } from "sonner"
 import {
-  Wallet, ArrowUpRight, RefreshCw,
-  ChevronLeft, ChevronRight, Gift, Settings2, Coins, FileText
-} from 'lucide-react'
+  Wallet,
+  ArrowUpRight,
+  RefreshCw,
+  ChevronLeft,
+  ChevronRight,
+  Gift,
+  Settings2,
+  Coins,
+  FileText,
+  Clock,
+} from "lucide-react"
 
 interface BalanceEntry {
   id: number
@@ -21,128 +33,162 @@ interface BalanceEntry {
   created_at: string
 }
 
-const KIND_MAP: Record<string, { label: string; color: string; icon: React.ElementType }> = {
-  deposit:    { label: '管理员充值', color: 'text-emerald-500', icon: ArrowUpRight },
-  redeem:     { label: '兑换码充值', color: 'text-emerald-500', icon: Gift },
-  initial:    { label: '初始余额',   color: 'text-blue-500',    icon: Coins },
-  usage:      { label: 'API 调用',   color: 'text-orange-500',  icon: Coins },
-  adjustment: { label: '管理员调账', color: 'text-purple-500',  icon: Settings2 },
+const KIND_MAP: Record<
+  string,
+  { label: string; color: string; bg: string; icon: React.ElementType }
+> = {
+  deposit: {
+    label: "充值入账",
+    color: "text-emerald-600 dark:text-emerald-400",
+    bg: "bg-emerald-500/10",
+    icon: ArrowUpRight,
+  },
+  redeem: {
+    label: "卡密兑换",
+    color: "text-teal-600 dark:text-teal-400",
+    bg: "bg-teal-500/10",
+    icon: Gift,
+  },
+  initial: {
+    label: "初始余额",
+    color: "text-blue-600 dark:text-blue-400",
+    bg: "bg-blue-500/10",
+    icon: Coins,
+  },
+  usage: {
+    label: "API 扣费",
+    color: "text-orange-600 dark:text-orange-400",
+    bg: "bg-orange-500/10",
+    icon: Coins,
+  },
+  adjustment: {
+    label: "管理员调账",
+    color: "text-purple-600 dark:text-purple-400",
+    bg: "bg-purple-500/10",
+    icon: Settings2,
+  },
 }
 
 function getKindInfo(kind: string) {
-  return KIND_MAP[kind] || { label: kind, color: 'text-gray-500', icon: FileText }
+  return (
+    KIND_MAP[kind] || {
+      label: kind,
+      color: "text-muted-foreground",
+      bg: "bg-muted",
+      icon: FileText,
+    }
+  )
 }
 
 function fmtAmount(n: number): string {
-  const prefix = n >= 0 ? '+' : ''
+  const prefix = n >= 0 ? "+" : ""
   return `${prefix}$${n.toFixed(4)}`
 }
 
 function fmtBalance(n: number | undefined | null): string {
-  if (n === undefined || n === null) return '-'
+  if (n === undefined || n === null) return "-"
   return `$${n.toFixed(4)}`
 }
 
 function fmtDateTime(iso: string): string {
   const d = new Date(iso)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  const pad = (n: number) => String(n).padStart(2, "0")
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
-type BalanceHistoryProps = {
-  /** When true, omit page-level chrome (used inside Finance tabs). */
-  embedded?: boolean
+type HistoryPage = {
+  items: BalanceEntry[]
+  total: number
+  page: number
 }
 
-export default function BalanceHistory({ embedded = false }: BalanceHistoryProps) {
-  const [entries, setEntries] = useState<BalanceEntry[]>([])
-  const [loading, setLoading] = useState(true)
+export default function BalanceHistory() {
   const [page, setPage] = useState(1)
   const [pageSize] = useState(20)
-  const [total, setTotal] = useState(0)
-  const [filterKind, setFilterKind] = useState('')
+  const [filterKind, setFilterKind] = useState("")
 
-  const loadData = useCallback(async (p = page) => {
-    setLoading(true)
-    try {
+  const historyQuery = useQuery({
+    queryKey: queryKeys.billing.history({
+      page,
+      pageSize,
+      kind: filterKind || undefined,
+    }),
+    queryFn: async () => {
       const params = new URLSearchParams()
-      params.set('page', String(p))
-      params.set('page_size', String(pageSize))
-      if (filterKind) params.set('kind', filterKind)
-
-      const res = await fetchApi(`/user/balance-history?${params}`)
-      if (res?.data) {
-        setEntries(res.data.items || [])
-        setTotal(res.data.total || 0)
-        setPage(res.data.page || p)
+      params.set("page", String(page))
+      params.set("page_size", String(pageSize))
+      if (filterKind) params.set("kind", filterKind)
+      try {
+        return await apiClient.get<HistoryPage>(`/user/balance-history?${params}`)
+      } catch (err) {
+        toast.error(errorMessage(err, "加载余额记录失败"))
+        throw err
       }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '加载余额记录失败')
-    } finally {
-      setLoading(false)
-    }
-  }, [page, pageSize, filterKind])
+    },
+    retry: 0,
+  })
 
-  useEffect(() => { loadData(1) }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  const entries = historyQuery.data?.items ?? []
+  const total = historyQuery.data?.total ?? 0
+  const loading = historyQuery.isLoading || historyQuery.isFetching
 
   const handleFilter = (kind: string) => {
     setFilterKind(kind)
     setPage(1)
-    setTimeout(() => loadData(1), 0)
   }
 
   const totalPages = Math.ceil(total / pageSize)
-  const handlePage = (p: number) => { setPage(p); loadData(p) }
+  const handlePage = (p: number) => {
+    setPage(p)
+  }
 
   return (
-    <div
-      className={`space-y-6 ${embedded ? '' : 'animate-in fade-in slide-in-from-bottom-4 duration-500'}`}
-      style={embedded ? undefined : { willChange: 'transform, opacity' }}
-    >
-      {!embedded && (
-        <div>
-          <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">余额明细</h2>
-          <p className="text-gray-500 dark:text-dark-300 mt-1">查看账户资金变动记录，包括充值入账、API 调用扣费与退款调整。</p>
+    <div className="space-y-4">
+      {/* Filter toolbar */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-1.5">
+          {[
+            { key: "", label: "全部变动" },
+            { key: "deposit", label: "在线充值" },
+            { key: "redeem", label: "卡密兑换" },
+            { key: "usage", label: "API 扣费" },
+            { key: "adjustment", label: "管理调账" },
+          ].map((f) => (
+            <button
+              key={f.key}
+              type="button"
+              onClick={() => handleFilter(f.key)}
+              className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+                filterKind === f.key
+                  ? "bg-primary text-primary-foreground shadow-xs"
+                  : "bg-card border border-border/80 text-muted-foreground hover:text-foreground hover:bg-muted/80"
+              }`}
+            >
+              {f.label}
+            </button>
+          ))}
         </div>
-      )}
 
-      {/* Filter bar */}
-      <div className="flex flex-wrap items-center gap-2">
-        {[
-          { key: '', label: '全部' },
-          { key: 'deposit', label: '充值' },
-          { key: 'redeem', label: '兑换' },
-          { key: 'usage', label: 'API 扣费' },
-          { key: 'adjustment', label: '调账' },
-        ].map(f => (
-          <button
-            key={f.key}
-            onClick={() => handleFilter(f.key)}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-              filterKind === f.key
-                ? 'bg-primary-500 text-white shadow-sm'
-                : 'bg-gray-100 dark:bg-dark-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-dark-700'
-            }`}
-          >
-            {f.label}
-          </button>
-        ))}
-        <button
-          onClick={() => loadData(page)}
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            void historyQuery.refetch()
+          }}
           disabled={loading}
-          className="ml-auto btn btn-secondary h-8 px-3 text-xs"
+          className="h-8 px-3 text-xs rounded-xl gap-1.5 border-border"
         >
-          <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-          刷新
-        </button>
+          <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+          刷新流水
+        </Button>
       </div>
 
-      {/* Mobile cards */}
+      {/* Mobile Card View */}
       <div className="md:hidden space-y-3">
         {loading ? (
-          <div className="rounded-xl border border-border bg-card flex h-32 items-center justify-center gap-2 text-muted-foreground text-sm">
+          <div className="rounded-2xl border border-border/80 bg-card flex h-36 items-center justify-center gap-2 text-muted-foreground text-sm">
             <RefreshCw className="w-4 h-4 animate-spin text-primary" />
-            加载中...
+            加载流水记录中...
           </div>
         ) : entries.length === 0 ? (
           <EmptyState
@@ -151,51 +197,57 @@ export default function BalanceHistory({ embedded = false }: BalanceHistoryProps
             tone="first-use"
             icon={Wallet}
             title="暂无余额变动记录"
-            description="充值入账、卡密兑换、API 调用扣费与退款等资金明细均将在此实时记录。"
-            action={{ label: '前往充值', to: userRoutes.financeTopup }}
+            description="充值入账、卡密兑换、API 调用扣费与退款等资金明细均将在此实时呈现。"
+            action={{ label: "前往充值", to: userRoutes.financeTopup }}
           />
         ) : (
           entries.map((entry) => {
-            const kind = entry.kind ?? entry.type ?? 'unknown'
+            const kind = entry.kind ?? entry.type ?? "unknown"
             const info = getKindInfo(kind)
             const Icon = info.icon
             const isPositive = entry.amount >= 0
             return (
               <div
                 key={entry.id}
-                className="rounded-xl border border-border bg-white dark:bg-dark-900 p-3 shadow-sm space-y-2"
+                className="rounded-2xl border border-border/80 bg-card p-4 shadow-xs space-y-2.5"
               >
                 <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0">
+                  <div className="flex items-center gap-2.5 min-w-0">
                     <div
-                      className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
-                        isPositive
-                          ? 'bg-emerald-50 dark:bg-emerald-900/20'
-                          : 'bg-orange-50 dark:bg-orange-900/20'
-                      }`}
+                      className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${info.bg}`}
                     >
                       <Icon className={`w-4 h-4 ${info.color}`} />
                     </div>
-                    <span className="text-sm font-medium truncate">{info.label}</span>
+                    <span className="text-sm font-bold text-foreground truncate">
+                      {info.label}
+                    </span>
                   </div>
                   <span
                     className={`text-sm font-bold tabular-nums shrink-0 ${
                       isPositive
-                        ? 'text-emerald-600 dark:text-emerald-400'
-                        : 'text-orange-600 dark:text-orange-400'
+                        ? "text-emerald-600 dark:text-emerald-400"
+                        : "text-foreground"
                     }`}
                   >
                     {fmtAmount(entry.amount)}
                   </span>
                 </div>
-                <div className="flex justify-between text-[11px] text-muted-foreground tabular-nums">
-                  <span>{fmtDateTime(entry.created_at)}</span>
+
+                <div className="flex items-center justify-between text-xs text-muted-foreground tabular-nums pt-1 border-t border-border/50">
+                  <span className="flex items-center gap-1">
+                    <Clock className="w-3 h-3" />
+                    {fmtDateTime(entry.created_at)}
+                  </span>
                   <span>
-                    {fmtBalance(entry.balance_before)} → {fmtBalance(entry.balance_after)}
+                    {fmtBalance(entry.balance_before)} →{" "}
+                    <strong className="text-foreground font-semibold">
+                      {fmtBalance(entry.balance_after)}
+                    </strong>
                   </span>
                 </div>
+
                 {(entry.note || entry.reference) && (
-                  <p className="text-xs text-muted-foreground line-clamp-2">
+                  <p className="text-xs text-muted-foreground line-clamp-2 bg-muted/30 p-2 rounded-lg">
                     {entry.note || entry.reference}
                   </p>
                 )}
@@ -203,54 +255,57 @@ export default function BalanceHistory({ embedded = false }: BalanceHistoryProps
             )
           })
         )}
+
         {total > 0 && (
-          <div className="flex items-center justify-between text-xs text-muted-foreground pt-1">
-            <span className="tabular-nums">
-              共 {total} · {page}/{totalPages}
+          <div className="flex items-center justify-between text-xs text-muted-foreground pt-2">
+            <span className="tabular-nums font-medium">
+              共 {total} 条记录 · {page}/{totalPages} 页
             </span>
             <div className="flex gap-1.5">
-              <button
-                type="button"
+              <Button
+                variant="outline"
+                size="sm"
                 disabled={page <= 1}
                 onClick={() => handlePage(page - 1)}
-                className="h-9 w-9 rounded-lg border border-border flex items-center justify-center disabled:opacity-30"
+                className="h-8 w-8 p-0 rounded-xl"
               >
                 <ChevronLeft className="w-4 h-4" />
-              </button>
-              <button
-                type="button"
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
                 disabled={page >= totalPages}
                 onClick={() => handlePage(page + 1)}
-                className="h-9 w-9 rounded-lg border border-border flex items-center justify-center disabled:opacity-30"
+                className="h-8 w-8 p-0 rounded-xl"
               >
                 <ChevronRight className="w-4 h-4" />
-              </button>
+              </Button>
             </div>
           </div>
         )}
       </div>
 
-      {/* Desktop table */}
-      <div className="rounded-xl border border-border bg-card overflow-hidden hidden md:block">
+      {/* Desktop Data Table */}
+      <div className="rounded-2xl border border-border/80 bg-card overflow-hidden shadow-xs hidden md:block">
         <div className="overflow-x-auto">
-          <table className="table">
-            <thead>
+          <table className="w-full text-left text-sm">
+            <thead className="border-b border-border bg-muted/40 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
               <tr>
-                <th className="w-[160px]">时间</th>
-                <th className="w-[130px]">类型</th>
-                <th className="w-[120px]">变动金额</th>
-                <th className="w-[120px]">变动前余额</th>
-                <th className="w-[120px]">变动后余额</th>
-                <th>备注</th>
+                <th className="py-3.5 px-4 w-[170px]">发生时间</th>
+                <th className="py-3.5 px-4 w-[140px]">变动类型</th>
+                <th className="py-3.5 px-4 w-[130px]">变动金额</th>
+                <th className="py-3.5 px-4 w-[130px]">变动前</th>
+                <th className="py-3.5 px-4 w-[130px]">变动后</th>
+                <th className="py-3.5 px-4">备注说明 / 关联单号</th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="divide-y divide-border/60">
               {loading ? (
                 <tr>
-                  <td colSpan={6} className="h-40 text-center">
-                    <div className="flex items-center justify-center gap-2 text-gray-400">
-                      <RefreshCw className="w-4 h-4 animate-spin text-primary-500" />
-                      加载中...
+                  <td colSpan={6} className="h-44 text-center">
+                    <div className="flex items-center justify-center gap-2 text-muted-foreground text-sm">
+                      <RefreshCw className="w-4 h-4 animate-spin text-primary" />
+                      正在加载流水记录...
                     </div>
                   </td>
                 </tr>
@@ -260,67 +315,60 @@ export default function BalanceHistory({ embedded = false }: BalanceHistoryProps
                   tone="first-use"
                   icon={Wallet}
                   title="暂无余额变动记录"
-                  description="充值入账、卡密兑换、API 调用扣费与退款等资金明细均将在此实时记录。"
-                  action={{ label: '前往充值', to: userRoutes.financeTopup }}
+                  description="充值入账、卡密兑换、API 调用扣费与退款等资金明细均将在此实时呈现。"
+                  action={{ label: "前往充值", to: userRoutes.financeTopup }}
                 />
               ) : (
                 entries.map((entry) => {
-                  const kind = entry.kind ?? entry.type ?? 'unknown'
+                  const kind = entry.kind ?? entry.type ?? "unknown"
                   const info = getKindInfo(kind)
                   const Icon = info.icon
                   const isPositive = entry.amount >= 0
                   return (
-                    <tr key={entry.id}>
-                      <td>
-                        <span className="text-sm text-gray-500 dark:text-gray-400 tabular-nums">
+                    <tr
+                      key={entry.id}
+                      className="hover:bg-muted/30 transition-colors"
+                    >
+                      <td className="py-3 px-4">
+                        <span className="text-xs text-muted-foreground tabular-nums">
                           {fmtDateTime(entry.created_at)}
                         </span>
                       </td>
-                      <td>
-                        <div className="flex items-center gap-2">
-                          <div
-                            className={`w-7 h-7 rounded-lg flex items-center justify-center ${
-                              isPositive
-                                ? 'bg-emerald-50 dark:bg-emerald-900/20'
-                                : 'bg-orange-50 dark:bg-orange-900/20'
-                            }`}
-                          >
-                            <Icon className={`w-3.5 h-3.5 ${info.color}`} />
-                          </div>
-                          <span className="text-sm font-medium text-gray-900 dark:text-white">
-                            {info.label}
-                          </span>
+                      <td className="py-3 px-4">
+                        <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-muted/50 border border-border/50">
+                          <Icon className={`w-3.5 h-3.5 ${info.color}`} />
+                          <span className="text-foreground">{info.label}</span>
                         </div>
                       </td>
-                      <td>
+                      <td className="py-3 px-4">
                         <span
-                          className={`text-sm font-semibold tabular-nums ${
+                          className={`text-sm font-bold tabular-nums ${
                             isPositive
-                              ? 'text-emerald-600 dark:text-emerald-400'
-                              : 'text-orange-600 dark:text-orange-400'
+                              ? "text-emerald-600 dark:text-emerald-400"
+                              : "text-foreground"
                           }`}
                         >
                           {fmtAmount(entry.amount)}
                         </span>
                       </td>
-                      <td>
-                        <span className="text-sm text-gray-500 dark:text-gray-400 tabular-nums">
+                      <td className="py-3 px-4">
+                        <span className="text-xs text-muted-foreground tabular-nums">
                           {fmtBalance(entry.balance_before)}
                         </span>
                       </td>
-                      <td>
-                        <span className="text-sm font-medium text-gray-900 dark:text-white tabular-nums">
+                      <td className="py-3 px-4">
+                        <span className="text-xs font-semibold text-foreground tabular-nums">
                           {fmtBalance(entry.balance_after)}
                         </span>
                       </td>
-                      <td>
+                      <td className="py-3 px-4">
                         <span
-                          className="text-sm text-gray-500 dark:text-gray-400 truncate block max-w-[300px]"
-                          title={entry.note || entry.reference || ''}
+                          className="text-xs text-muted-foreground truncate block max-w-[340px]"
+                          title={entry.note || entry.reference || ""}
                         >
-                          {entry.note || entry.reference || '-'}
+                          {entry.note || entry.reference || "-"}
                           {entry.operator_email && (
-                            <span className="text-xs text-gray-400 dark:text-dark-500 ml-1">
+                            <span className="text-[11px] text-muted-foreground/80 ml-1">
                               ({entry.operator_email})
                             </span>
                           )}
@@ -335,30 +383,34 @@ export default function BalanceHistory({ embedded = false }: BalanceHistoryProps
         </div>
 
         {total > 0 && (
-          <div className="px-5 py-3 border-t border-border flex items-center justify-between bg-gray-50/50 dark:bg-dark-800/30">
-            <div className="text-xs text-gray-500 dark:text-dark-400 tabular-nums">
-              共 {total} 条记录 · 第 {page}/{totalPages} 页
+          <div className="px-5 py-3.5 border-t border-border flex items-center justify-between bg-muted/20">
+            <div className="text-xs text-muted-foreground tabular-nums">
+              共 <strong className="text-foreground">{total}</strong> 条变动记录 · 第 {page} / {totalPages} 页
             </div>
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
                 disabled={page <= 1}
                 onClick={() => handlePage(page - 1)}
-                className="h-9 w-9 rounded-lg border border-border bg-white dark:bg-dark-900 flex items-center justify-center text-gray-500 hover:bg-gray-50 dark:hover:bg-dark-800 disabled:opacity-30 transition-colors"
+                className="h-8 px-2.5 rounded-xl border-border text-xs gap-1"
               >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
-              <span className="px-3 text-xs text-gray-600 dark:text-gray-400 tabular-nums">
+                <ChevronLeft className="w-3.5 h-3.5" />
+                上一页
+              </Button>
+              <span className="px-2 text-xs text-muted-foreground tabular-nums font-medium">
                 {page} / {totalPages}
               </span>
-              <button
-                type="button"
+              <Button
+                variant="outline"
+                size="sm"
                 disabled={page >= totalPages}
                 onClick={() => handlePage(page + 1)}
-                className="h-9 w-9 rounded-lg border border-border bg-white dark:bg-dark-900 flex items-center justify-center text-gray-500 hover:bg-gray-50 dark:hover:bg-dark-800 disabled:opacity-30 transition-colors"
+                className="h-8 px-2.5 rounded-xl border-border text-xs gap-1"
               >
-                <ChevronRight className="w-4 h-4" />
-              </button>
+                下一页
+                <ChevronRight className="w-3.5 h-3.5" />
+              </Button>
             </div>
           </div>
         )}

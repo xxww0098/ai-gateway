@@ -3,7 +3,7 @@ import { createElement, act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { AccountMenu } from './AccountMenu'
+import { SidebarAccountMenu } from './SidebarAccountMenu'
 import { useAuthStore } from '@/features/auth/auth_store'
 import { userRoutes } from '@/shared/routes/user'
 
@@ -45,7 +45,7 @@ function renderMenu(): { container: HTMLDivElement; root: Root } {
               element: createElement(
                 'div',
                 null,
-                createElement(AccountMenu),
+                createElement(SidebarAccountMenu, { collapsed: false, onNavigate: () => {} }),
                 createElement(PathProbe),
               ),
             }),
@@ -83,19 +83,11 @@ function menuItems(): HTMLElement[] {
   return Array.from(document.querySelectorAll<HTMLElement>('[role="menuitem"]'))
 }
 
-function selectItem(item: HTMLElement | undefined) {
-  act(() => {
-    item?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }))
-    item?.click()
-  })
-}
-
-describe('AccountMenu', () => {
+describe('SidebarAccountMenu', () => {
   const mounted: Array<{ container: HTMLDivElement; root: Root }> = []
 
   beforeEach(() => {
     serverLogout.mockClear()
-    document.documentElement.classList.remove('dark')
     useAuthStore.setState({ token: 'tok', user: { ...fixtureUser } })
   })
 
@@ -103,8 +95,6 @@ describe('AccountMenu', () => {
     for (const item of mounted.splice(0)) {
       cleanup(item.container, item.root)
     }
-    document.documentElement.classList.remove('dark')
-    localStorage.removeItem('theme')
   })
 
   function mount() {
@@ -113,15 +103,21 @@ describe('AccountMenu', () => {
     return result.container
   }
 
-  it('shows the signed-in identity on the avatar trigger and keeps actions out of the closed menu', () => {
+  it('shows the signed-in identity on the trigger and keeps actions out of the closed footer', () => {
     const container = mount()
-    // The header trigger is an avatar circle — identity rides on title/aria, not text
-    expect(triggerOf(container).title).toBe(fixtureUser.email)
+    expect(triggerOf(container).textContent).toContain(fixtureUser.email)
+    expect(triggerOf(container).textContent).toContain('用户')
     expect(document.querySelector('[role="menu"]')).toBeNull()
     expect(menuItems()).toHaveLength(0)
   })
 
-  it('offers only theme and sign-out — nav destinations stay in the main nav', () => {
+  it('renders 超级管理员 for super_admin role', () => {
+    useAuthStore.setState({ token: 'tok', user: { ...fixtureUser, role: 'super_admin' as const } })
+    const container = mount()
+    expect(triggerOf(container).textContent).toContain('超级管理员')
+  })
+
+  it('opens a popup whose destinations include finance, tickets, keys, and docs', () => {
     const container = mount()
     openMenu(triggerOf(container))
 
@@ -130,22 +126,22 @@ describe('AccountMenu', () => {
     expect(menu?.textContent).toContain(fixtureUser.email)
 
     const labels = menuItems().map((el) => el.textContent || '')
-    // Duplicated entries were removed: these live in the sidebar nav / public home
-    expect(labels.some((t) => t.includes('财务'))).toBe(false)
-    expect(labels.some((t) => t.includes('工单'))).toBe(false)
-    expect(labels.some((t) => t.includes('密钥'))).toBe(false)
-    expect(labels.some((t) => t.includes('接入'))).toBe(false)
-    expect(labels.some((t) => t.includes('模式'))).toBe(true)
-    expect(labels.some((t) => t.includes('退出'))).toBe(true)
+    expect(labels.some((t) => t.includes('财务'))).toBe(true)
+    expect(labels.some((t) => t.includes('工单'))).toBe(true)
+    expect(labels.some((t) => t.includes('密钥'))).toBe(true)
+    expect(labels.some((t) => t.includes('接入'))).toBe(true)
   })
 
-  it('toggles the theme from the popup', () => {
+  it('navigates to the finance route from the popup', () => {
     const container = mount()
     openMenu(triggerOf(container))
-    const themeItem = menuItems().find((el) => (el.textContent || '').includes('模式'))
-    expect(themeItem?.textContent).toContain('暗色模式')
-    selectItem(themeItem)
-    expect(document.documentElement.classList.contains('dark')).toBe(true)
+    const finance = menuItems().find((el) => (el.textContent || '').includes('财务'))
+    expect(finance).toBeTruthy()
+    act(() => {
+      finance?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }))
+      finance?.click()
+    })
+    expect(container.querySelector('[data-testid="path"]')?.textContent).toBe(userRoutes.finance)
   })
 
   it('signs out through the popup and lands on login', async () => {

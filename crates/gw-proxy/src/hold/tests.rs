@@ -5,15 +5,12 @@
 //! assertions pair "the client saw a 402/429/503" with "the ledger was never
 //! touched".
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use chrono::{Datelike, TimeZone, Timelike, Utc};
-use parking_lot::Mutex;
 
 use super::*;
-use crate::body::InboundBody;
 use crate::ports::{HoldAdmit, SubscriptionQuota};
 use crate::testsupport::{
     FakeLedger, Harness, LedgerCall, TEST_USER_ID, anonymous_request, chat_body, send,
@@ -73,7 +70,6 @@ fn billing_peek(body: &[u8]) -> BillingPeek {
 /// A real cache-backed calculator so trim/case variants can miss the table
 /// when they fail to share a key. The default rate is far from the row so a
 /// miss cannot accidentally equal a hit.
-#[allow(dead_code)]
 fn priced_calculator(model_id: &str, input: f64, output: f64) -> crate::adapters::SharedCalculator {
     let row = gw_model::ModelPrice {
         id: 1,
@@ -172,15 +168,14 @@ fn the_token_approximation_is_monotone_and_never_undercounts_by_more_than_a_toke
 #[test]
 fn the_upper_bound_dominates_every_estimate_it_is_built_from() {
     let calc = crate::testsupport::FakeCalculator::default();
-    let quote = calc.quote("gpt-4o", 1.0);
     for max_tokens in [0, 1, 512, 100_000] {
         for stream in [false, true] {
             for hold in [0.0, 0.01, 5.0] {
-                let bound = preflight_upper_bound(&quote, max_tokens, stream, hold);
+                let bound = preflight_upper_bound(&calc, "gpt-4o", max_tokens, stream, 1.0, hold);
                 assert!(bound >= hold);
-                assert!(bound >= quote.estimate_with_max_tokens(max_tokens, stream));
+                assert!(bound >= calc.estimate_with_max_tokens("gpt-4o", max_tokens, stream, 1.0));
                 assert!(
-                    bound >= quote.estimate(true),
+                    bound >= calc.estimate("gpt-4o", true, 1.0),
                     "the streaming estimate is the guard against an absent or absurd cap",
                 );
             }
@@ -202,49 +197,23 @@ fn quota_with(daily: Option<f64>, used: f64) -> SubscriptionQuota {
 #[test]
 fn a_quota_only_rejects_once_the_estimate_would_cross_it() {
     let quota = quota_with(Some(10.0), 9.0);
-    assert_eq!(evaluate_quota(&quota, 0.0, 0.5), None);
+    assert_eq!(evaluate_quota(&quota, 0.5), None);
     assert_eq!(
-        evaluate_quota(&quota, 0.0, 1.0),
+        evaluate_quota(&quota, 1.0),
         None,
         "landing exactly on the limit is allowed"
     );
-    assert!(evaluate_quota(&quota, 0.0, 1.5).is_some());
-}
-
-/// **在途预留和已结算的用量一样占额度。**
-///
-/// 收敛前这个比较只看已结算的那一列，于是一千个在途请求对限额完全隐形，
-/// 限额只在它们陆续落账之后才追上来 —— 那时超的已经超了。
-#[test]
-fn outstanding_reservations_consume_the_limit_just_like_settled_usage() {
-    let quota = quota_with(Some(10.0), 5.0);
-    assert_eq!(evaluate_quota(&quota, 0.0, 4.0), None, "无在途时放行");
-    assert!(
-        evaluate_quota(&quota, 4.0, 4.0).is_some(),
-        "已用 5 + 在途 4 + 这一笔 4 = 13 > 10，必须拒",
-    );
-    // 「已用 x + 在途 y」和「已用 x+y + 无在途」必须是同一个判定：
-    // 在途负债不是一个折价的负债。
-    for (used, reserved) in [(5.0, 4.0), (7.0, 2.0), (9.0, 0.0)] {
-        assert_eq!(
-            evaluate_quota(&quota_with(Some(10.0), used), reserved, 1.0).is_some(),
-            evaluate_quota(&quota_with(Some(10.0), used + reserved), 0.0, 1.0).is_some(),
-            "used={used} reserved={reserved}",
-        );
-    }
+    assert!(evaluate_quota(&quota, 1.5).is_some());
 }
 
 #[test]
 fn an_unset_limit_never_rejects() {
-    assert_eq!(
-        evaluate_quota(&quota_with(None, 1_000.0), 1_000.0, 500.0),
-        None
-    );
+    assert_eq!(evaluate_quota(&quota_with(None, 1_000.0), 500.0), None);
 }
 
 #[test]
 fn each_period_reports_its_own_reason() {
-    let daily = evaluate_quota(&quota_with(Some(1.0), 1.0), 0.0, 1.0).expect("daily rejects");
+    let daily = evaluate_quota(&quota_with(Some(1.0), 1.0), 1.0).expect("daily rejects");
     assert!(daily.contains("daily"));
 
     let weekly = evaluate_quota(
@@ -253,7 +222,6 @@ fn each_period_reports_its_own_reason() {
             weekly_usage_usd: 1.0,
             ..SubscriptionQuota::default()
         },
-        0.0,
         1.0,
     )
     .expect("weekly rejects");
@@ -265,7 +233,6 @@ fn each_period_reports_its_own_reason() {
             monthly_usage_usd: 1.0,
             ..SubscriptionQuota::default()
         },
-        0.0,
         1.0,
     )
     .expect("monthly rejects");
@@ -392,27 +359,27 @@ fn both_idempotency_header_spellings_are_accepted() {
 }
 
 #[test]
-fn an_inbound_trace_id_is_honoured_and_otherwise_generated() {
-    let mut headers = HeaderMap::new();
-    headers.insert(TRACE_HEADER, HeaderValue::from_static("trace-123"));
-    assert_eq!(client_trace_from(&headers).as_str(), "trace-123");
-
-    let generated = client_trace_from(&HeaderMap::new());
-    assert!(!generated.is_empty());
+fn hold_keys_are_unique_per_call_and_never_empty() {
+    let first = new_request_id();
+    let second = new_request_id();
+    assert!(!first.is_empty());
     assert_ne!(
-        generated,
-        client_trace_from(&HeaderMap::new()),
-        "a generated trace id must be unique per request",
+        first, second,
+        "generated hold keys must be unique per request",
     );
 }
 
 #[test]
-fn the_breaker_key_is_derived_from_the_model_family() {
+fn the_breaker_key_is_the_executor_dispatch_records() {
     assert_eq!(infer_provider("gpt-4o"), Some("openai"));
     assert_eq!(infer_provider("o3-mini"), Some("openai"));
-    assert_eq!(infer_provider("claude-sonnet-5"), Some("anthropic"));
-    assert_eq!(infer_provider("gemini-2.5-pro"), Some("google"));
-    assert_eq!(infer_provider("gpt-5-codex"), Some("openai"));
+    assert_eq!(infer_provider("claude-sonnet-5"), Some("claude"));
+    assert_eq!(infer_provider("gemini-2.5-pro"), Some("gemini"));
+    assert_eq!(
+        infer_provider("gpt-5-codex"),
+        Some("codex"),
+        "codex in the name outranks a gpt- prefix, matching L4",
+    );
     assert_eq!(infer_provider("codex-mini"), Some("codex"));
     assert_eq!(infer_provider("mystery-model"), None);
 }
@@ -421,8 +388,7 @@ fn the_breaker_key_is_derived_from_the_model_family() {
 fn compute_reservation_pairs_hold_with_a_dominating_floor() {
     let calc = crate::testsupport::FakeCalculator::default();
     let peek = billing_peek(chat_body("gpt-4o").to_string().as_bytes());
-    let quote = calc.quote(&peek.price_key, 1.0);
-    let (hold, floor) = compute_reservation(&peek, &quote);
+    let (hold, floor) = compute_reservation(&peek, 1.0, &calc);
     assert!(hold > 0.0);
     assert!(
         floor >= hold,
@@ -430,7 +396,14 @@ fn compute_reservation_pairs_hold_with_a_dominating_floor() {
     );
     assert_eq!(
         floor,
-        preflight_upper_bound(&quote, peek.max_tokens, peek.stream, hold),
+        preflight_upper_bound(
+            &calc,
+            &peek.price_key,
+            peek.max_tokens,
+            peek.stream,
+            1.0,
+            hold,
+        ),
     );
 }
 
@@ -440,166 +413,28 @@ fn compute_reservation_pairs_hold_with_a_dominating_floor() {
 #[test]
 fn compute_reservation_is_invariant_to_model_trim_and_case() {
     let calc = priced_calculator("Mix-Id", 3.0, 7.0);
-    let reservation_for = |model: &str| {
-        let body = format!(r#"{{"model":"{model}","max_tokens":128}}"#);
-        let peek = billing_peek(body.as_bytes());
-        let quote = calc.quote(&peek.price_key, 1.5);
-        compute_reservation(&peek, &quote)
-    };
-    let first = reservation_for("Mix-Id");
-    for variant in ["mix-id", "MIX-ID", "  mix-id  "] {
+    let variants = ["Mix-Id", "mix-id", "MIX-ID", "  mix-id  "];
+    let pairs: Vec<(f64, f64)> = variants
+        .iter()
+        .map(|model| {
+            let body = format!(r#"{{"model":"{model}","max_tokens":128}}"#);
+            compute_reservation(&billing_peek(body.as_bytes()), 1.5, &calc)
+        })
+        .collect();
+    let first = pairs[0];
+    for pair in &pairs[1..] {
         assert_eq!(
-            reservation_for(variant),
-            first,
+            *pair, first,
             "trim/case variants must share one (hold, floor)",
         );
     }
-    assert_ne!(
-        reservation_for("other-id"),
-        first,
-        "a different model must not collide",
+    let miss = compute_reservation(
+        &billing_peek(br#"{"model":"other-id","max_tokens":128}"#),
+        1.5,
+        &calc,
     );
+    assert_ne!(miss, first, "a different model must not collide");
 }
 
-// ------------------------------------------------------------ admit_operation
 
-/// Builds an operation reserving `amount` against `liability`.
-fn new_operation(
-    user_id: crate::ports::Id,
-    amount: f64,
-    liability: f64,
-) -> gw_ledger::NewOperation {
-    gw_ledger::NewOperation {
-        operation_id: gw_ledger::BillingOperationId::mint(),
-        user_id,
-        reserved_amount: amount,
-        admitted_liability: liability,
-        request_fingerprint: "fingerprint".to_owned(),
-        client_trace_id: "trace-the-client-saw".to_owned(),
-    }
-}
-
-#[tokio::test]
-async fn a_floor_refusal_leaves_neither_a_reservation_nor_an_operation() {
-    let ledger = FakeLedger::with_balance(1.0);
-    let operation = new_operation(1, 0.5, 2.0);
-    let admit = ledger
-        .admit_operation(&operation, Some(Duration::from_secs(60)))
-        .await
-        .expect("lookup");
-    assert!(matches!(admit, HoldAdmit::Insufficient { .. }));
-    assert!(ledger.calls().is_empty());
-    assert!(ledger.held_amount(&operation.operation_id).is_none());
-    assert!(
-        ledger.operation_state(&operation.operation_id).is_none(),
-        "a refused hold must not leave a reconcilable row behind",
-    );
-}
-
-#[tokio::test]
-async fn a_floor_refusal_quotes_the_available_balance() {
-    let ledger = FakeLedger::with_balance(3.75);
-    let admit = ledger
-        .admit_operation(&new_operation(1, 1.0, 5.0), Some(Duration::from_secs(60)))
-        .await
-        .expect("lookup");
-    assert_eq!(admit, HoldAdmit::Insufficient { available: 3.75 },);
-}
-
-#[tokio::test]
-async fn a_budget_token_reservation_still_writes_the_durable_operation() {
-    // `None` TTL = the reservation came from the process-local budget token.
-    // The row must exist anyway: it is the operation's identity, and without it
-    // a crash would leave money unaccounted for with nothing to reconcile.
-    let ledger = FakeLedger::with_balance(100.0);
-    let operation = new_operation(1, 1.0, 1.0);
-    ledger
-        .admit_operation(&operation, None)
-        .await
-        .expect("admit");
-    assert_eq!(
-        ledger.operation_state(&operation.operation_id),
-        Some(gw_ledger::operation::OperationState::Held),
-    );
-    assert!(
-        ledger.held_amount(&operation.operation_id).is_none(),
-        "no Redis reservation is taken when the budget token paid",
-    );
-}
-
-#[tokio::test]
-async fn an_insufficient_balance_402_quotes_the_peeked_available() {
-    let harness = Harness::build();
-    let peek = billing_peek(chat_body("gpt-4o").to_string().as_bytes());
-    let (_hold, floor) = compute_reservation(&peek, &harness.calc.quote(&peek.price_key, 1.0));
-    let quoted_available = floor - 0.01;
-    assert!(
-        quoted_available > 0.0,
-        "fixture needs a positive balance below the floor",
-    );
-    *harness.ledger.balance.lock() = quoted_available;
-
-    let (status, body) = send(
-        harness.stub_router(StatusCode::OK),
-        signed_request("/v1/chat/completions", chat_body("gpt-4o")),
-    )
-    .await;
-    assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
-    assert_eq!(body["error"].as_str(), Some("insufficient_balance"));
-    assert!(
-        harness.ledger.calls().is_empty(),
-        "floor refusal must not create a hold",
-    );
-    assert_eq!(
-        body["current_balance"].as_f64(),
-        Some(quoted_available),
-        "the 402 must quote the balance seen at gate time",
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_requests_cannot_pass_the_floor_twice_on_one_balance() {
-    let harness = Harness::build();
-    let peek = billing_peek(chat_body("gpt-4o").to_string().as_bytes());
-    let (_hold, floor) = compute_reservation(&peek, &harness.calc.quote(&peek.price_key, 1.0));
-    *harness.ledger.balance.lock() = floor;
-
-    let router = harness.stub_router(StatusCode::OK);
-    let mut tasks = Vec::new();
-    for _ in 0..2 {
-        let router = router.clone();
-        tasks.push(tokio::spawn(async move {
-            send(
-                router,
-                signed_request("/v1/chat/completions", chat_body("gpt-4o")),
-            )
-            .await
-        }));
-    }
-
-    let mut ok = 0;
-    let mut denied = 0;
-    for task in tasks {
-        let (status, _) = task.await.expect("request finishes");
-        match status {
-            StatusCode::OK => ok += 1,
-            StatusCode::PAYMENT_REQUIRED => denied += 1,
-            other => panic!("unexpected status {other}"),
-        }
-    }
-    assert_eq!(ok, 1, "exactly one request may pass the atomic floor");
-    assert_eq!(denied, 1);
-    assert_eq!(
-        harness
-            .ledger
-            .calls()
-            .iter()
-            .filter(|c| matches!(c, LedgerCall::Hold { .. }))
-            .count(),
-        1,
-        "only the winner may create a reservation",
-    );
-}
-
-mod middleware;
-mod reservation;
+mod flow;

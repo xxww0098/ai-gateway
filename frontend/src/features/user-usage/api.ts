@@ -1,6 +1,6 @@
 // API functions for user usage
 import { apiClient } from "@/shared/api/client"
-import type { UsageLog, UsageStats, ApiKey } from "./types"
+import type { UsageLog, UsageStats, ApiKey, UsageTrendPoint, UsageModelStat } from "./types"
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -36,4 +36,12 @@ export function fetchUsageLogs(params: UsageLogsParams) {
 
 export function fetchUserApiKeys() {
   return apiClient.get<ApiKey[] | { items: ApiKey[] }>('/user/api-keys')
+}
+
+export function fetchUsageTrend(days: number) {
+  return apiClient.get<UsageTrendPoint[]>(`/user/usage/trend?days=${days}`)
+}
+
+export function fetchUsageModels(days: number) {
+  return apiClient.get<UsageModelStat[]>(`/user/usage/models?days=${days}`)
 }

@@ -59,6 +59,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET (see make gen-secrets)}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?set CREDENTIAL_ENCRYPTION_KEY (see make gen-secrets)}
       BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
     # The image CMD points at /app/config.yaml; mount one, or rely entirely on
     # the env overrides above plus the shipped /app/config.example.yaml.
     command: ["--config", "/app/config.example.yaml"]

@@ -3,8 +3,8 @@
  * Legacy paths redirect here via App.tsx — do not link to old paths in new code.
  */
 export const adminRoutes = {
-  users: '/admin/users',
   channels: '/admin/channels',
+  credentials: '/admin/credentials',
   billing: '/admin/billing',
   usageLogs: '/admin/usage-logs',
   /** Unified host: payment orders + refunds */
@@ -38,10 +38,12 @@ export function adminSettingsTab(
   return `${adminRoutes.settings}?tab=${tab}`
 }
 
-export function adminChannelsTab(
-  tab: 'providers' | 'oauth' | 'credentials' | 'ampcode'
-): string {
-  return `${adminRoutes.channels}?tab=${tab}`
+export function adminChannelsTab(tab?: 'providers' | 'ampcode'): string {
+  return tab ? `${adminRoutes.channels}?tab=${tab}` : adminRoutes.channels
+}
+
+export function adminCredentialsTab(tab?: 'sessions' | 'oauth'): string {
+  return tab ? `${adminRoutes.credentials}?tab=${tab}` : adminRoutes.credentials
 }
 
 /** True when pathname is an admin panel route (canonical or still-supported legacy). */
@@ -49,9 +51,10 @@ export function isAdminPanelPath(pathname: string): boolean {
   if (pathname === '/admin' || pathname.startsWith('/admin/')) return true
   // Legacy mounts kept only for client-side redirects
   return (
-    pathname === '/users' ||
     pathname === '/channels' ||
     pathname.startsWith('/channels/') ||
+    pathname === '/credentials' ||
+    pathname.startsWith('/credentials/') ||
     pathname === '/billing' ||
     pathname.startsWith('/billing/') ||
     pathname === '/usage-logs' ||

@@ -23,6 +23,10 @@ pub mod ops;
 // domain depending on a sibling domain is the edge that makes crates unsplittable.
 // Shared vocabulary belongs at the root, not inside whichever domain wrote it first.
 pub mod paging;
+// 服务面（`/api/service`）—— ozon-pod 集成用的内网接口，形状由
+// `docs/service-api.md` 冻结。它与面板/代理共用 `PanelState`，但既不是面板的
+// 一个域、也不走面板的鉴权：入口 token、错误码与响应形状都是另一套。
+pub mod service;
 pub mod support;
 pub mod upstream;
 
@@ -40,7 +44,6 @@ use serde::Serialize;
 #[derive(Clone)]
 pub struct PanelState {
     pub pg: gw_infra::Db,
-    pub redis: gw_infra::Redis,
     pub cfg: Arc<gw_config::Config>,
 
     /// MUST be the same instance the `Calculator` reads from. 这里显式要求：
@@ -155,14 +158,15 @@ pub struct AuthUser {
 }
 
 impl AuthUser {
+    /// Staff gate: `admin` and `super_admin` both reach `/admin/*`.
     pub fn is_admin(&self) -> bool {
-        self.role == "admin"
+        gw_role::Role::from_stored(&self.role).is_staff()
     }
 }
 
 /// An authenticated caller that additionally passed the admin check.
 ///
-/// 对应 `requireAdmin`：`users.role = 'admin'`
+/// 对应 `requireAdmin`：`users.role` 为 staff（`admin` 或 `super_admin`）
 /// AND `status = 'active'`, else HTTP 403 with code
 /// [`codes::UNAUTHORIZED`] and message `需要管理员权限`.
 #[derive(Debug, Clone)]
@@ -253,13 +257,23 @@ pub fn router(state: PanelState) -> Router {
         .merge(upstream::router())
         .merge(ops::router());
 
-    Router::new()
+    let root = Router::new()
         .nest("/api/panel", panel)
         // Stripe webhook 注册在 panel 组**之外**、没有 auth 中间件 ——
         // `/api/payment/stripe/webhook` 靠它的 HMAC 签名认证。它带自己的绝对
         // 路径，所以必须在 **ROOT** 合并，绝不放进上面的 `nest`：嵌套会把
         // 它服务在 `/api/panel/api/payment/...`，Stripe 的回调就会静默中断。
         .merge(commerce::public_router())
-        .merge(identity::public_router())
-        .with_state(state)
+        .merge(identity::public_router());
+
+    // 服务面是**条件挂载**：`service.token` 为空时 `/api/service/**` 整组不存在，
+    // 请求得到 404，而不是"不带凭证也能进"。契约 §2 把这条写成硬规则，所以判断
+    // 放在这里、只放一次 —— 每个 handler 再各自判一次迟早会漏。
+    let root = if state.cfg.service.enabled() {
+        root.nest("/api/service", service::router())
+    } else {
+        root
+    };
+
+    root.with_state(state)
 }

@@ -30,7 +30,6 @@ use tokio::net::TcpStream;
 /// 全进程单调的幂等 key 序号，预热与正式测量共用它，见 `worker` 里的注释。
 static KEY_SEQ: AtomicU64 = AtomicU64::new(0);
 
-
 // ---------------------------------------------------------------- 参数
 
 struct Args {
@@ -248,11 +247,9 @@ async fn one_request(
             line.clear();
             reader.read_until(b'\n', line).await?;
             let size_hex = String::from_utf8_lossy(line);
-            let size = usize::from_str_radix(
-                size_hex.trim().split(';').next().unwrap_or("0").trim(),
-                16,
-            )
-            .unwrap_or(0);
+            let size =
+                usize::from_str_radix(size_hex.trim().split(';').next().unwrap_or("0").trim(), 16)
+                    .unwrap_or(0);
             if size == 0 {
                 // 结尾 CRLF（可能还有 trailer，本压测的上游不发）。
                 line.clear();
@@ -346,8 +343,9 @@ async fn worker(
             .as_bytes(),
         );
         if args.idempotency {
-            request
-                .extend_from_slice(format!("Idempotency-Key: perf-{pid}-{id}-{seq}\r\n").as_bytes());
+            request.extend_from_slice(
+                format!("Idempotency-Key: perf-{pid}-{id}-{seq}\r\n").as_bytes(),
+            );
         }
         request.extend_from_slice(b"\r\n");
         request.extend_from_slice(&body);
@@ -436,9 +434,7 @@ fn main() -> anyhow::Result<()> {
         let counter = Arc::new(AtomicU64::new(0));
         let stalls = Arc::new(AtomicU64::new(0));
         let deadline = args.duration.map(|d| Instant::now() + d);
-        let quota = args
-            .requests
-            .map(|n| n.div_ceil(args.concurrency));
+        let quota = args.requests.map(|n| n.div_ceil(args.concurrency));
 
         let started = Instant::now();
         let mut handles = Vec::new();

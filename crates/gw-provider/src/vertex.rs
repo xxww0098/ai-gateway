@@ -7,10 +7,13 @@
 //!    ([`VertexProvider::refresh`]). Signing per request would be wasteful, so
 //!    minted tokens are cached until shortly before they expire.
 //! 2. **The usage frame is unreliable.** `usageMetadata` is cumulative and may
-//!    be split across TCP reads, so parsing *per chunk* cannot see a frame that
-//!    straddles two of them. That is `gw-relay`'s side-band probe's problem
-//!    now: it parses *per line* and carries the straddling half-line across
-//!    frames. What is left here is the parser for one frame.
+//!    be split across TCP reads. This used to need a Vertex-only accumulator
+//!    (per-chunk latch + a finish-time re-parse of the retained window, merged
+//!    column-wise) because parsing *per chunk* simply cannot see a frame that
+//!    straddles two reads. [`crate::streambuf::StreamUsageProbe`] now parses
+//!    *per line* and carries the straddling half-line across frames, so the
+//!    shared [`crate::common::relay_usage_stream`] covers this case natively
+//!    and the bespoke accumulator is gone — see `tests`.
 //!
 //! OWNER: worker `provider-claude`.
 
@@ -20,22 +23,23 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use gw_authcore::{AuthRecord, AuthStatus};
-use http::HeaderMap;
+use http::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use url::Url;
 
 use crate::claude::shared::{
-    self, append_query, default_content_negotiation, path_escape, trim_base_url,
+    self, append_query, default_content_negotiation, path_escape, trim_base_url, upstream_error,
 };
 use crate::common::{
-    PROVIDER_VERTEX, ProviderConfig, Redacted, nested_string, relay_timeouts, requested_model,
-    resolve_timeout, string_from_map,
+    PROVIDER_VERTEX, ProviderConfig, Redacted, nested_string, relay_usage_stream, requested_model,
+    resolve_timeout, shared_client, string_from_map,
 };
-use crate::route::{RoutePlan, RoutePlanner};
-use crate::types::{ProviderError, ProviderRequest};
+use crate::types::{
+    Provider, ProviderError, ProviderRequest, ProviderResponse, StreamResponse,
+    copy_outbound_headers,
+};
 use crate::usage::{UsageTokens, parse_vertex_usage};
-use gw_relay::{Credential, UpstreamDialect};
 
 const VERTEX_DEFAULT_LOCATION: &str = "us-central1";
 const VERTEX_DEFAULT_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
@@ -64,10 +68,12 @@ const VERTEX_TOKEN_FALLBACK_EXPIRATION: chrono::TimeDelta = chrono::TimeDelta::h
 const VERTEX_ASSERTION_LIFETIME_SECS: i64 = 3600;
 
 /// Vertex AI executor.
+
 pub struct VertexProvider {
     base_url: String,
     service_account_json: String,
     timeout: Duration,
+    client: reqwest::Client,
     /// Access tokens minted so far, keyed by [`AuthRecord::id`].
     ///
     /// The [`Provider`] trait takes `&AuthRecord`, so the "sign once, reuse
@@ -85,8 +91,7 @@ impl std::fmt::Debug for VertexProvider {
                 &Redacted(&self.service_account_json),
             )
             .field("timeout", &self.timeout)
-            .field("token_cache", &self.token_cache)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -137,15 +142,6 @@ struct VertexTokenResponse {
     expires_in: i64,
 }
 
-impl std::fmt::Debug for VertexTokenResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VertexTokenResponse")
-            .field("access_token", &Redacted(&self.access_token))
-            .field("expires_in", &self.expires_in)
-            .finish()
-    }
-}
-
 /// Claims of the JWT assertion exchanged for an access token.
 #[derive(Debug, Serialize)]
 struct VertexAssertionClaims<'a> {
@@ -180,20 +176,9 @@ impl VertexProvider {
             base_url,
             service_account_json: cfg.api_key.trim().to_owned(),
             timeout: resolve_timeout(timeout_seconds),
+            client: shared_client(),
             token_cache: Mutex::new(HashMap::new()),
         })
-    }
-
-    /// The configured upstream base URL; empty means "derive from location".
-    #[must_use]
-    pub fn base_url(&self) -> &str {
-        &self.base_url
-    }
-
-    /// The configured service-account JSON, used to seed persisted records.
-    #[must_use]
-    pub fn service_account_json(&self) -> &str {
-        &self.service_account_json
     }
 
     /// Resolves the access token and endpoint for one request.
@@ -464,25 +449,27 @@ impl VertexProvider {
         sa: &VertexServiceAccount,
     ) -> Result<VertexTokenResponse, ProviderError> {
         let assertion = Self::signed_assertion(sa, Utc::now())?;
-        // The assertion travels in the request body, so the transport error is
-        // re-worded rather than propagated: a formatted `reqwest` error can
-        // quote the request it failed on.
-        let payload = crate::oauth::post_form(
-            sa.token_uri.trim(),
-            self.timeout,
-            "vertex",
-            &[
+        let response = self
+            .client
+            .post(sa.token_uri.trim())
+            .timeout(self.timeout)
+            .header(http::header::ACCEPT, "application/json")
+            .form(&[
                 ("grant_type", VERTEX_JWT_GRANT_TYPE),
                 ("assertion", assertion.as_str()),
-            ],
-        )
-        .await
-        .map_err(|err| match err {
-            ProviderError::Upstream { status, .. } => ProviderError::Credential(format!(
+            ])
+            .send()
+            .await
+            .map_err(|_| {
+                ProviderError::Credential("vertex token refresh request failed".to_owned())
+            })?;
+        let status = response.status().as_u16();
+        let payload = response.bytes().await?;
+        if status >= 400 {
+            return Err(ProviderError::Credential(format!(
                 "vertex token refresh failed with upstream status {status}"
-            )),
-            _ => ProviderError::Credential("vertex token refresh request failed".to_owned()),
-        })?;
+            )));
+        }
         let token: VertexTokenResponse = serde_json::from_slice(&payload).map_err(|err| {
             ProviderError::Other(anyhow::anyhow!("parsing vertex token response: {err}"))
         })?;
@@ -496,7 +483,6 @@ impl VertexProvider {
 
     /// Builds the publisher-model endpoint.
     fn generate_content_endpoint(
-        raw_query: Option<&str>,
         query: &[(String, String)],
         endpoint: &VertexEndpoint,
         model: &str,
@@ -522,20 +508,18 @@ impl VertexProvider {
         let mut parsed = Url::parse(&url).map_err(|err| {
             ProviderError::Other(anyhow::anyhow!("invalid vertex base_url: {err}"))
         })?;
-        append_query(&mut parsed, raw_query, query);
+        append_query(&mut parsed, query);
         Ok(parsed)
     }
 
-    /// Plans an outbound GenerateContent request.
-    ///
-    /// The access token is minted, not stored, so the caller resolves it
-    /// first — see [`VertexProvider::resolve_access_token`].
-    fn plan_request(
+    /// Assembles an outbound GenerateContent request.
+    fn build_request(
         &self,
         req: &ProviderRequest,
+        stream: bool,
         access_token: &str,
         endpoint: &VertexEndpoint,
-    ) -> Result<RoutePlan, ProviderError> {
+    ) -> Result<reqwest::RequestBuilder, ProviderError> {
         if access_token.is_empty() {
             return Err(ProviderError::Credential(
                 "vertex access token is required".to_owned(),
@@ -547,26 +531,29 @@ impl VertexProvider {
                 "vertex model is required"
             )));
         }
-        let url = Self::generate_content_endpoint(
-            req.raw_query.as_deref(),
-            &req.query,
-            endpoint,
-            &model,
-            req.stream,
-        )?;
+        let url = Self::generate_content_endpoint(&req.query, endpoint, &model, stream)?;
 
         let mut headers = HeaderMap::new();
-        default_content_negotiation(&mut headers, req.stream);
+        copy_outbound_headers(&mut headers, &req.headers);
+        default_content_negotiation(&mut headers, stream);
+        headers.insert(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {access_token}")).map_err(|_| {
+                ProviderError::Credential(
+                    "vertex access token is not a valid header value".to_owned(),
+                )
+            })?,
+        );
 
-        Ok(RoutePlan {
-            provider: PROVIDER_VERTEX,
-            endpoint: url,
-            credential: Credential::Bearer(access_token.to_owned()),
-            headers,
-            body: None,
-            timeouts: relay_timeouts(self.timeout),
-            dialect: UpstreamDialect::GoogleGenerateContent,
-        })
+        let mut builder = self
+            .client
+            .post(url)
+            .headers(headers)
+            .body(req.payload.clone());
+        if !stream {
+            builder = builder.timeout(self.timeout);
+        }
+        Ok(builder)
     }
 }
 
@@ -595,12 +582,14 @@ fn token_still_valid(metadata: &Value, now: DateTime<Utc>) -> bool {
 /// it — never by an unrelated top-level one, which may belong to a different
 /// token.
 fn nested_token_still_valid(metadata: &Value, now: DateTime<Utc>) -> bool {
-    let Some(token_data) = metadata.get(META_TOKEN_DATA).and_then(map_from_value) else {
-        return false;
-    };
-    let token_data = Value::Object(token_data);
-    metadata_expiry_valid(&token_data, META_EXPIRES_AT, now)
-        || metadata_expiry_valid(&token_data, META_EXPIRED, now)
+    // `nested_string` 原生容忍嵌套对象与内嵌 JSON 字符串两种形态，
+    // 不必为读两个到期戳克隆整个 `token_data`。
+    [META_EXPIRES_AT, META_EXPIRED].into_iter().any(|key| {
+        nested_string(metadata, META_TOKEN_DATA, key)
+            .as_deref()
+            .and_then(shared::parse_rfc3339)
+            .is_some_and(|expires_at| expires_at > now + VERTEX_REFRESH_SKEW)
+    })
 }
 
 /// A missing or unparseable stamp reads as expired, so a malformed record
@@ -673,26 +662,90 @@ pub fn extract_latest_vertex_usage(chunk: &[u8]) -> Option<UsageTokens> {
 }
 
 #[async_trait::async_trait]
-impl RoutePlanner for VertexProvider {
+impl Provider for VertexProvider {
     fn name(&self) -> &'static str {
         PROVIDER_VERTEX
     }
 
-    /// Resolving the credential may mint a token (sign an assertion, exchange
-    /// it), which is why this planner is the one that actually awaits.
-    async fn plan(
+    async fn execute(
         &self,
         auth: &AuthRecord,
-        req: &ProviderRequest,
-    ) -> Result<RoutePlan, ProviderError> {
+        req: ProviderRequest,
+    ) -> Result<ProviderResponse, ProviderError> {
         let (access_token, endpoint) = self.credentials_for_request(Some(auth)).await?;
-        self.plan_request(req, &access_token, &endpoint)
+        let model = vertex_requested_model(&req);
+        let response = self
+            .build_request(&req, false, &access_token, &endpoint)?
+            .send()
+            .await?;
+
+        let status = response.status().as_u16();
+        let headers = response.headers().clone();
+        let body = response.bytes().await?;
+        if status >= 400 {
+            return Err(upstream_error(status, &body));
+        }
+        Ok(ProviderResponse {
+            status,
+            headers,
+            usage: parse_vertex_usage(&body).map(|t| t.to_record(model, PROVIDER_VERTEX)),
+            body,
+        })
+    }
+
+    async fn execute_stream(
+        &self,
+        auth: &AuthRecord,
+        req: ProviderRequest,
+    ) -> Result<StreamResponse, ProviderError> {
+        let (access_token, endpoint) = self.credentials_for_request(Some(auth)).await?;
+        let model = vertex_requested_model(&req);
+        let response = self
+            .build_request(&req, true, &access_token, &endpoint)?
+            .send()
+            .await?;
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let body = response.bytes().await.unwrap_or_default();
+            return Err(upstream_error(status, &body));
+        }
+        // 曾经这里是一个 Vertex 专用的 `vertex_usage_stream`：per-chunk latch
+        // 加收尾时对整个窗口再解析一遍再取列最大值，60 行代码只为了兜住
+        // 「终局帧被读边界切成两半」。增量行解析把跨帧半行天然接上了，
+        // 共享的 usage 中继就够了 —— 见 `streambuf.rs` 模块文档。
+        Ok(relay_usage_stream(
+            response,
+            model,
+            PROVIDER_VERTEX,
+            extract_latest_vertex_usage,
+        ))
     }
 
     async fn refresh(&self, auth: &AuthRecord) -> Result<AuthRecord, ProviderError> {
         let refreshed = self.refresh_auth(auth).await?;
         self.store_executor_token(&refreshed);
         Ok(refreshed)
+    }
+
+    /// **报错，不编数字** —— 理由与 [`crate::gemini::GeminiProvider::count_tokens`]
+    /// 逐字相同：Vertex 上游确实有 `:countTokens`，但 `count_tokens` 的唯一入口
+    /// `POST /v1/messages/count_tokens` 是 **Anthropic 方言**，body 原样送过去
+    /// Google 会因未知字段回 400。
+    ///
+    /// 这里原来返回 `payload.len() / 4` 的伪造值
+    /// （`docs/relay-surface-plan.md` §2.1 缺陷 ①），且那个数还在按 LLM 价格计费。
+    /// 接上 `gw_relay::translate::google` 转义器之前，明确报错比假数字诚实。
+    async fn count_tokens(
+        &self,
+        _auth: &AuthRecord,
+        _req: ProviderRequest,
+    ) -> Result<i64, ProviderError> {
+        Err(ProviderError::Other(anyhow::anyhow!(
+            "{PROVIDER_VERTEX} token counting is unavailable: the only entry point is the \
+             Anthropic-dialect POST /v1/messages/count_tokens, and reaching Vertex's \
+             :countTokens needs the anthropic->google translator wired into that path"
+        )))
     }
 }
 

@@ -9,8 +9,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
 /// Top-up hint returned in structured 402 bodies: the panel page where the
-/// tenant actually recharges (same origin as `/v1`). `/api/panel/billing/topup`
-/// is a 404 — no such endpoint exists.
+/// tenant actually recharges (same origin as `/v1`).
 pub const TOP_UP_URL: &str = "/finance?tab=topup";
 
 /// Authentication failure shapes produced by [`crate::access`].
@@ -98,6 +97,11 @@ pub enum HoldRejection {
     /// `409 {"error":"idempotency_replay_unavailable", ...}`.
     #[error("request already processed; cached response was too large to replay")]
     IdempotencyReplayUnavailable,
+
+    /// The idempotency store could not check or claim the key. Fail closed so
+    /// a Redis blip cannot disable dedup and double-bill.
+    #[error("idempotency store unavailable")]
+    IdempotencyStoreUnavailable,
 }
 
 impl HoldRejection {
@@ -106,7 +110,9 @@ impl HoldRejection {
         match self {
             Self::MissingAccessContext | Self::InvalidUserId => StatusCode::UNAUTHORIZED,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
-            Self::CircuitOpen => StatusCode::SERVICE_UNAVAILABLE,
+            Self::CircuitOpen | Self::IdempotencyStoreUnavailable => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::OutstandingDebt
             | Self::InsufficientBalance { .. }
             | Self::QuotaExceeded(_)
@@ -127,6 +133,7 @@ impl HoldRejection {
             Self::QuotaExceeded(_) | Self::PaymentRequired => "Payment Required",
             Self::IdempotencyConflict => "idempotency_conflict",
             Self::IdempotencyReplayUnavailable => "idempotency_replay_unavailable",
+            Self::IdempotencyStoreUnavailable => "idempotency_unavailable",
         }
     }
 }
@@ -160,18 +167,12 @@ pub enum DispatchError {
     /// No upstream account is registered / enabled for the resolved provider.
     #[error("no upstream credential available for provider {0}")]
     NoUpstream(String),
+    /// Every candidate account is already at its in-flight cap.
+    #[error("upstream account concurrency limit reached")]
+    ChannelBusy,
     /// The model name did not resolve to any known provider.
     #[error("unsupported model: {0}")]
     UnknownModel(String),
-    /// 客户端写了 `<渠道>/<模型>`，而网关看不见（或大到不该整体重序列化）
-    /// 这份 body，没法把顶层 `model` 改成上游认识的名字。
-    ///
-    /// **明确 400，不原样转发**：带着网关前缀的 `model` 送到上游只会换回一个
-    /// 「模型不存在」，客户端从那个错误里读不出「前缀是给网关看的」。
-    #[error(
-        "cannot rewrite the channel-prefixed model {0}: request body is not readable as a whole"
-    )]
-    BodyNotRewritable(String),
     /// Upstream answered with a non-2xx status; relayed verbatim.
     #[error("upstream error {status}")]
     Upstream { status: StatusCode, body: String },
@@ -185,7 +186,8 @@ impl DispatchError {
     pub fn status(&self) -> StatusCode {
         match self {
             Self::NoUpstream(_) => StatusCode::SERVICE_UNAVAILABLE,
-            Self::UnknownModel(_) | Self::BodyNotRewritable(_) => StatusCode::BAD_REQUEST,
+            Self::ChannelBusy => StatusCode::TOO_MANY_REQUESTS,
+            Self::UnknownModel(_) => StatusCode::BAD_REQUEST,
             Self::Upstream { status, .. } => *status,
             Self::Internal(_) => StatusCode::BAD_GATEWAY,
         }

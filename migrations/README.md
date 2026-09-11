@@ -9,14 +9,23 @@
 | `0002_columns.sql` | 每张表每个非主键列的 `ADD COLUMN IF NOT EXISTS` | 既有库补列行为 |
 | `0003_indexes.sql` | 自动索引 + 7 个手写索引 | 既有库索引全集 |
 | `0004_model_capabilities.sql` | `model_catalog_entries.capabilities` | GET /v1/models 能力字段 |
-| `0005_hot_path_indexes.sql` | 订阅 / 模型目录热路径复合索引 | hold 与 GET /v1/models |
-| `0006_billing_operations.sql` | `billing_operations` 计费操作状态机 | 钱的键是服务端 `BillingOperationId` |
-| `0007_quota_reservations.sql` | `quota_reservations` 订阅在途预留 | 配额比较在锁内 |
-| `0008_users_concurrency_default.sql` | `users.concurrency` 默认 0（沿用限流器配置） | 新租户不再被锁死在单并发 |
+| `0005_rebrand_runtime_auth_ids.sql` | 运行时凭据 id / `channel_policies.auth_id` | 一次性改成 `ai-gateway-*` |
+| `0006_hot_path_indexes.sql` | 订阅 / 模型目录热路径复合索引 | hold 与 GET /v1/models |
+| `0007_account_concurrency_and_usage.sql` | `channel_policies.max_concurrent` + usage_logs(auth_id, created_at) | 账号并发与消耗统计 |
+| `0008_shortfall_write_off_unique.sql` | `balance_logs(reference)` 上的分区唯一索引 | 欠款零额注销只能发生一次 |
+| `0010_control_plane_credit_unique.sql` | 仅 payment_order 信用流水的部分唯一索引 | 支付重试不重复入账 |
+| `0011_settlement_intents.sql` | 请求结算意图表 | 同一 request_id 最多成功扣一次 |
+| `0012_users_balance_version.sql` | `users.balance_version` | Redis 余额条件发布 |
+| `0013_control_plane_sibling_credits.sql` | redeem / 注册金分区唯一索引 | 兑换与注册入账一次 |
+| `0014_billing_hot_path_indexes.sql` | 计费热路径部分索引 | 欠款闸门查询不再逐行解析 jsonb |
+| `0015_service_credit_unique.sql` | service_credit 流水的分区唯一索引 | 服务面重试不重复入账 |
+| `0016_users_concurrency_default.sql` | `users.concurrency` 默认 0（沿用限流器配置） | 新租户不再被锁死在单并发 |
 
 索引删除不进迁移目录（规矩禁 DROP/TRUNCATE）；冗余索引清理与
-`usage_logs.event_key` 成功行唯一化在 [scripts/index-housekeeping.sql](../scripts/index-housekeeping.sql)，
+`usage_logs.request_id` 唯一化在 [scripts/index-housekeeping.sql](../scripts/index-housekeeping.sql)，
 运维对已部署的库手动执行一次。
+
+支付索引对重复历史 credit 失败关闭；上线前必须停写、对账并避免新旧支付实现混跑。预检查 SQL 与回退约束见 [支付确认说明](../docs/payment-settlement.md)。后续迁移使用大于已部署最大版本的新编号，不补插较小的“预留编号”。
 
 ## 两条不可违反的规矩
 

@@ -28,7 +28,7 @@ export function ModelListDialog({ key_ }: Props) {
   return (
     <DialogPrimitive.Root open={open} onOpenChange={setOpen}>
       <DialogPrimitive.Trigger asChild>
-        <button className="btn btn-secondary btn-sm px-3 py-1.5 text-xs h-auto shadow-none text-primary-600 dark:text-primary-400 border-primary-200 dark:border-primary-800 bg-primary-50 dark:bg-primary-900/10 hover:bg-primary-100 dark:hover:bg-primary-900/30">
+        <button className="btn btn-secondary btn-sm px-3 py-1.5 text-xs h-auto shadow-none text-primary-700 dark:text-primary-400 border-primary-200 dark:border-primary-800 bg-primary-50 dark:bg-primary-900/10 hover:bg-primary-100 dark:hover:bg-primary-900/30">
           <Layers className="h-3.5 w-3.5" />
           可用模型
         </button>
@@ -59,7 +59,7 @@ export function ModelListDialog({ key_ }: Props) {
                   </tr>
                 ) : models.length === 0 ? (
                   <tr>
-                    <td colSpan={3} className="h-32 text-center text-gray-500">当前分组下暂无可用模型。</td>
+                    <td colSpan={3} className="h-32 text-center text-muted-foreground">当前分组下还没有可用模型。</td>
                   </tr>
                 ) : (
                   models.map((m, idx) => (

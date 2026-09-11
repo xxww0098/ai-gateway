@@ -105,3 +105,190 @@ fn an_empty_config_stays_empty() {
     normalize_input(&mut payload);
     assert!(payload.is_empty());
 }
+
+#[test]
+fn force_model_mappings_snake_case_is_folded_into_the_hyphenated_key() {
+    let mut payload_true = map(json!({"force_model_mappings": true}));
+    normalize_input(&mut payload_true);
+    assert_eq!(
+        payload_true.get("force-model-mappings"),
+        Some(&Value::Bool(true))
+    );
+    assert!(!payload_true.contains_key("force_model_mappings"));
+
+    let mut payload_false = map(json!({"force_model_mappings": false}));
+    normalize_input(&mut payload_false);
+    assert_eq!(
+        payload_false.get("force-model-mappings"),
+        Some(&Value::Bool(false))
+    );
+    assert!(!payload_false.contains_key("force_model_mappings"));
+}
+
+#[test]
+fn force_model_mappings_hyphenated_input_wins_when_both_are_sent() {
+    let mut payload = map(json!({
+        "force-model-mappings": true,
+        "force_model_mappings": false,
+    }));
+    normalize_input(&mut payload);
+    assert_eq!(
+        payload.get("force-model-mappings"),
+        Some(&Value::Bool(true))
+    );
+    assert!(!payload.contains_key("force_model_mappings"));
+}
+
+#[test]
+fn force_model_mappings_response_carries_both_spellings_with_boolean_type() {
+    let res_true = normalize_response(&map(json!({"force-model-mappings": true})));
+    assert_eq!(
+        res_true.get("force-model-mappings"),
+        Some(&Value::Bool(true))
+    );
+    assert_eq!(
+        res_true.get("force_model_mappings"),
+        Some(&Value::Bool(true))
+    );
+
+    let res_false = normalize_response(&map(json!({"force-model-mappings": false})));
+    assert_eq!(
+        res_false.get("force-model-mappings"),
+        Some(&Value::Bool(false))
+    );
+    assert_eq!(
+        res_false.get("force_model_mappings"),
+        Some(&Value::Bool(false))
+    );
+
+    // Legacy row stored under snake_case
+    let res_legacy = normalize_response(&map(json!({"force_model_mappings": true})));
+    assert_eq!(
+        res_legacy.get("force-model-mappings"),
+        Some(&Value::Bool(true))
+    );
+    assert_eq!(
+        res_legacy.get("force_model_mappings"),
+        Some(&Value::Bool(true))
+    );
+}
+
+#[test]
+fn parse_bool_value_handles_various_formats() {
+    // Bare booleans
+    assert_eq!(parse_bool_value(&json!(true)), Some(true));
+    assert_eq!(parse_bool_value(&json!(false)), Some(false));
+
+    // Bare strings
+    assert_eq!(parse_bool_value(&json!("true")), Some(true));
+    assert_eq!(parse_bool_value(&json!("false")), Some(false));
+    assert_eq!(parse_bool_value(&json!("1")), Some(true));
+    assert_eq!(parse_bool_value(&json!("0")), Some(false));
+    assert_eq!(parse_bool_value(&json!("TRUE")), Some(true));
+    assert_eq!(parse_bool_value(&json!("FALSE")), Some(false));
+
+    // Bare numbers
+    assert_eq!(parse_bool_value(&json!(1)), Some(true));
+    assert_eq!(parse_bool_value(&json!(0)), Some(false));
+    assert_eq!(parse_bool_value(&json!(2)), None);
+
+    // Objects with "value"
+    assert_eq!(parse_bool_value(&json!({"value": true})), Some(true));
+    assert_eq!(parse_bool_value(&json!({"value": false})), Some(false));
+    assert_eq!(parse_bool_value(&json!({"value": "true"})), Some(true));
+    assert_eq!(parse_bool_value(&json!({"value": "false"})), Some(false));
+
+    // Objects with "force-model-mappings" / "force_model_mappings"
+    assert_eq!(
+        parse_bool_value(&json!({"force-model-mappings": true})),
+        Some(true)
+    );
+    assert_eq!(
+        parse_bool_value(&json!({"force-model-mappings": false})),
+        Some(false)
+    );
+    assert_eq!(
+        parse_bool_value(&json!({"force-model-mappings": "true"})),
+        Some(true)
+    );
+    assert_eq!(
+        parse_bool_value(&json!({"force_model_mappings": true})),
+        Some(true)
+    );
+    assert_eq!(
+        parse_bool_value(&json!({"force_model_mappings": false})),
+        Some(false)
+    );
+
+    // Wrapped in "ampcode"
+    assert_eq!(
+        parse_bool_value(&json!({"ampcode": {"force-model-mappings": true}})),
+        Some(true)
+    );
+    assert_eq!(
+        parse_bool_value(&json!({"ampcode": {"value": false}})),
+        Some(false)
+    );
+
+    // Invalid / unparseable formats
+    assert_eq!(parse_bool_value(&json!({"value": "invalid"})), None);
+    assert_eq!(parse_bool_value(&json!({})), None);
+    assert_eq!(parse_bool_value(&json!([])), None);
+    assert_eq!(parse_bool_value(&json!(null)), None);
+    assert_eq!(parse_bool_value(&json!("unknown")), None);
+}
+
+#[test]
+fn get_force_model_mappings_value_returns_defaults_and_parsed_values() {
+    assert!(!get_force_model_mappings_value(&Map::new()));
+
+    let config_true = map(json!({"force-model-mappings": true}));
+    assert!(get_force_model_mappings_value(&config_true));
+
+    let config_false = map(json!({"force-model-mappings": false}));
+    assert!(!get_force_model_mappings_value(&config_false));
+
+    let config_snake = map(json!({"force_model_mappings": true}));
+    assert!(get_force_model_mappings_value(&config_snake));
+
+    let config_str = map(json!({"force-model-mappings": "true"}));
+    assert!(get_force_model_mappings_value(&config_str));
+
+    let config_invalid = map(json!({"force-model-mappings": "invalid"}));
+    assert!(!get_force_model_mappings_value(&config_invalid));
+}
+
+#[test]
+fn boolean_types_are_preserved_when_saving_and_normalizing() {
+    let mut config = Map::new();
+    let parsed = parse_bool_value(&json!({"value": "true"})).expect("parsed bool");
+    assert!(parsed);
+
+    // Saving as Value::Bool(parsed)
+    config.remove("force_model_mappings");
+    config.insert("force-model-mappings".to_owned(), Value::Bool(parsed));
+
+    let normalized = normalize_response(&config);
+    assert_eq!(
+        normalized.get("force-model-mappings"),
+        Some(&Value::Bool(true))
+    );
+    assert_eq!(
+        normalized.get("force_model_mappings"),
+        Some(&Value::Bool(true))
+    );
+
+    // Now test with false
+    let parsed_false = parse_bool_value(&json!({"value": false})).expect("parsed bool");
+    assert!(!parsed_false);
+    config.insert("force-model-mappings".to_owned(), Value::Bool(parsed_false));
+    let normalized_false = normalize_response(&config);
+    assert_eq!(
+        normalized_false.get("force-model-mappings"),
+        Some(&Value::Bool(false))
+    );
+    assert_eq!(
+        normalized_false.get("force_model_mappings"),
+        Some(&Value::Bool(false))
+    );
+}

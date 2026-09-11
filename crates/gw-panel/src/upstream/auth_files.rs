@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::record::{
-    is_deleted, serialize_auth_file, serialize_models, serialize_quota, stable_name,
+    is_deleted, looks_masked, serialize_auth_file, serialize_models, serialize_quota, stable_name,
 };
 use crate::{AdminUser, PanelState, err, ok};
 
@@ -55,7 +55,7 @@ pub struct AuthFileQuery {
 /// 对应 `sdkMgmtSortedAuths` —— grouped by provider, then by the same stable name
 /// the mutating endpoints address rows by, so what an operator sees and what
 /// they can `PUT` are in the same order.
-async fn sorted_records(state: &PanelState) -> anyhow::Result<Vec<AuthRecord>> {
+pub(super) async fn sorted_records(state: &PanelState) -> anyhow::Result<Vec<AuthRecord>> {
     let mut records = state.auth_store.list().await?;
     records.sort_by(|left, right| {
         left.provider
@@ -162,6 +162,7 @@ pub async fn list(
                 .iter()
                 .map(|(index, record)| serialize_auth_file(record, *index))
                 .collect();
+            let files = attach_account_stats(&state, &records, files).await;
             ok(json!({"files": files, "total": files.len()}))
         }
         Err(error) => list_failure(&error),
@@ -183,6 +184,7 @@ pub async fn quota(
                 .iter()
                 .map(|(index, record)| serialize_quota(record, *index))
                 .collect();
+            let items = attach_account_stats(&state, &records, items).await;
             ok(json!({"quota": items, "items": items, "total": items.len()}))
         }
         Err(error) => list_failure(&error),
@@ -283,99 +285,6 @@ pub async fn create(
     ok(json!({"message": "created", "created": created, "count": created.len()}))
 }
 
-/// `POST /auth-files/import-local` — read CLI OAuth files already on this host.
-///
-/// Scans well-known paths under `AGW_LOCAL_OAUTH_HOME` / `$HOME` (Codex,
-/// Claude Code, Grok, Kiro). Client-supplied filesystem paths are ignored so
-/// an admin request cannot read arbitrary files. A credential whose access or
-/// refresh token is already stored is skipped rather than duplicated.
-pub async fn import_local(State(state): State<PanelState>, _admin: AdminUser) -> Response {
-    let Some(home) = gw_provider::local_oauth::process_home() else {
-        return err(
-            StatusCode::BAD_REQUEST,
-            ERR_BAD_REQUEST,
-            "cannot resolve a home directory to scan for CLI OAuth files",
-        );
-    };
-    let found = gw_provider::local_oauth::discover(&home);
-    let mut existing = match sorted_records(&state).await {
-        Ok(records) => records,
-        Err(error) => return list_failure(&error),
-    };
-    let now = Utc::now();
-    let mut imported: Vec<Value> = Vec::new();
-    let mut skipped: Vec<Value> = Vec::new();
-    for cred in found {
-        let source = cred.source.display().to_string();
-        if already_imported(&existing, &cred) {
-            skipped.push(json!({
-                "provider": cred.provider,
-                "source": source,
-                "reason": "already imported",
-            }));
-            continue;
-        }
-        let filename = format!("{}-local.json", cred.provider);
-        let body = cred.to_upload_json().to_string();
-        let mut record = match record_from_upload(&filename, body.as_bytes(), now) {
-            Ok(record) => record,
-            Err(message) => {
-                skipped.push(json!({
-                    "provider": cred.provider,
-                    "source": source,
-                    "reason": message,
-                }));
-                continue;
-            }
-        };
-        if let Some(name) = cred.source.file_name().and_then(|name| name.to_str()) {
-            record.label = name.to_owned();
-        }
-        if let Err(error) = state.auth_store.save(&record).await {
-            tracing::error!(%error, "failed to persist imported credential");
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ERR_LIST_FAILED,
-                "failed to register imported auth file",
-            );
-        }
-        existing.push(record.clone());
-        imported.push(serialize_auth_file(&record, imported.len()));
-    }
-    ok(json!({
-        "imported": imported,
-        "skipped": skipped,
-        "count": imported.len(),
-    }))
-}
-
-/// True when this host already stores the same CLI credential.
-#[must_use]
-pub fn already_imported(
-    existing: &[AuthRecord],
-    cred: &gw_provider::local_oauth::LocalOauthCred,
-) -> bool {
-    existing.iter().any(|record| {
-        if !record.provider.eq_ignore_ascii_case(cred.provider) {
-            return false;
-        }
-        let refresh_hit = !cred.refresh_token.is_empty()
-            && metadata_token(record, "refresh_token") == Some(cred.refresh_token.as_str());
-        let access_hit = !cred.access_token.is_empty()
-            && metadata_token(record, "access_token") == Some(cred.access_token.as_str());
-        refresh_hit || access_hit
-    })
-}
-
-fn metadata_token<'a>(record: &'a AuthRecord, key: &str) -> Option<&'a str> {
-    record
-        .metadata
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
 /// Parses one uploaded credential file. 对应 `sdkMgmtAuthFromUpload`。
 ///
 /// # Errors
@@ -391,11 +300,10 @@ pub fn record_from_upload(
     if body.len() > MAX_UPLOAD_BYTES {
         return Err("failed to read auth file");
     }
-    let mut payload: Map<String, Value> = serde_json::from_slice::<Value>(body)
+    let payload: Map<String, Value> = serde_json::from_slice::<Value>(body)
         .ok()
         .and_then(|value| value.as_object().cloned())
         .ok_or("invalid auth JSON")?;
-    gw_provider::local_oauth::lift_cli_shape(&mut payload);
 
     let provider = provider_from_auth_json(&payload)?;
     let mut record = AuthRecord::new(uuid::Uuid::new_v4().to_string(), provider, now);
@@ -512,9 +420,6 @@ pub fn provider_from_auth_json(payload: &Map<String, Value>) -> Result<String, &
     if !provider.is_empty() {
         return Ok(provider);
     }
-    if let Some(inferred) = gw_provider::local_oauth::infer_provider(payload) {
-        return Ok(inferred.to_owned());
-    }
     if payload.contains_key("service_account") {
         return Ok("vertex".to_owned());
     }
@@ -591,6 +496,9 @@ pub async fn update(
     };
 
     let action = super::providers::payload_string(payload, &["action"]).to_lowercase();
+    if action == "update" {
+        return update_fields(&state, payload).await;
+    }
     let disabled = match action.as_str() {
         "disable" => true,
         "enable" => false,
@@ -598,7 +506,7 @@ pub async fn update(
             return err(
                 StatusCode::BAD_REQUEST,
                 ERR_BAD_REQUEST,
-                "action must be disable or enable",
+                "action must be disable, enable, or update",
             );
         }
     };
@@ -754,4 +662,148 @@ pub fn payload_string_slice(payload: &Map<String, Value>, keys: &[&str]) -> Vec<
         }
     }
     out
+}
+
+/// Stamps each row with its `usage_logs` totals and `channel_policies` cap.
+///
+/// Failures degrade to the serialiser's static zeroes — the credential list
+/// must stay readable when the aggregation query is slow or down.
+async fn attach_account_stats(
+    state: &PanelState,
+    records: &[(usize, AuthRecord)],
+    mut items: Vec<Value>,
+) -> Vec<Value> {
+    let ids: Vec<String> = records.iter().map(|(_, r)| r.id.clone()).collect();
+    let usage = match super::usage_stats::load(&state.pg, &ids).await {
+        Ok(usage) => usage,
+        Err(error) => {
+            tracing::warn!(%error, "account usage aggregation failed; serving zeros");
+            std::collections::HashMap::new()
+        }
+    };
+    let caps = match super::usage_stats::load_max_concurrent(&state.pg, &ids).await {
+        Ok(caps) => caps,
+        Err(error) => {
+            tracing::warn!(%error, "account concurrency caps failed to load; serving 0");
+            std::collections::HashMap::new()
+        }
+    };
+    for (item, (_, record)) in items.iter_mut().zip(records.iter()) {
+        let object = item.as_object_mut().expect("serialised rows are objects");
+        if let Some(usage) = usage.get(&record.id) {
+            object.insert(
+                "usage".to_owned(),
+                serde_json::to_value(usage).unwrap_or(Value::Null),
+            );
+            object.insert("success".to_owned(), json!(usage.requests_today));
+            object.insert("failed".to_owned(), json!(usage.failed_today));
+        }
+        if let Some(&cap) = caps.get(&record.id) {
+            object.insert("max_concurrent".to_owned(), json!(cap));
+        }
+    }
+    items
+}
+
+/// `PUT /auth-files` with `action: "update"` — the console's edit dialog.
+///
+/// Edits label/prefix/proxy_url/base_url/project_id/location (attributes) and
+/// the secrets (metadata), plus `max_concurrent` (channel policy). Masked
+/// previews are ignored so a round-trip never overwrites a live secret.
+async fn update_fields(state: &PanelState, payload: &Map<String, Value>) -> Response {
+    let target = super::providers::payload_string(payload, &["id", "auth_id", "name"]);
+    if target.trim().is_empty() {
+        return err(StatusCode::BAD_REQUEST, ERR_BAD_REQUEST, "id is required");
+    }
+    let Some(fields) = payload.get("fields").and_then(Value::as_object) else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            ERR_BAD_REQUEST,
+            "fields are required",
+        );
+    };
+
+    let records = match sorted_records(state).await {
+        Ok(records) => records,
+        Err(error) => return list_failure(&error),
+    };
+    let Some(found) = find_by_name(&records, &target) else {
+        return err(StatusCode::NOT_FOUND, 4040, "auth file not found");
+    };
+    if found.is_runtime_only() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            ERR_BAD_REQUEST,
+            "runtime credential cannot be edited",
+        );
+    }
+
+    let mut record = found.clone();
+    for (key, value) in fields {
+        match key.as_str() {
+            "label" | "prefix" | "proxy_url" | "base_url" | "project_id" | "location" => {
+                if let Some(text) = value.as_str() {
+                    if key == "proxy_url" {
+                        record.proxy_url = text.trim().to_owned();
+                    } else if key == "prefix" {
+                        record.prefix = text.trim().to_owned();
+                    }
+                    record.set_attribute(key.as_str(), text.trim());
+                }
+            }
+            "api_key" | "access_token" | "refresh_token" | "id_token" => {
+                if let Some(text) = value.as_str() {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() && !looks_masked(trimmed) {
+                        record
+                            .metadata
+                            .as_object_mut()
+                            .expect("metadata is an object")
+                            .insert(key.clone(), json!(trimmed));
+                    }
+                }
+            }
+            "service_account" => {
+                if let Some(text) = value.as_str()
+                    && !text.trim().is_empty()
+                    && !looks_masked(text.trim())
+                    && serde_json::from_str::<Value>(text).is_ok()
+                {
+                    record
+                        .metadata
+                        .as_object_mut()
+                        .expect("metadata is an object")
+                        .insert("service_account".to_owned(), json!(text.trim()));
+                }
+            }
+            "max_concurrent" => {
+                if let Some(number) = value.as_i64()
+                    && let Err(error) =
+                        super::usage_stats::upsert_max_concurrent(&state.pg, &record.id, number)
+                            .await
+                {
+                    tracing::warn!(%error, "failed to save max_concurrent");
+                    return err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        5000,
+                        "failed to save concurrency cap",
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    record.updated_at = Utc::now();
+    match state.auth_store.save(&record).await {
+        Ok(()) => ok(json!({ "message": "updated", "updated": [record.id] })),
+        Err(error) => {
+            tracing::warn!(%error, "failed to save auth record");
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                5000,
+                "failed to save credential",
+            )
+        }
+    }
 }

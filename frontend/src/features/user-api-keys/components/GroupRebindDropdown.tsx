@@ -44,11 +44,12 @@ export function GroupRebindDropdown({
     }
 
     updatePosition()
+    const scrollOpts: AddEventListenerOptions = { capture: true, passive: true }
     window.addEventListener("resize", updatePosition)
-    window.addEventListener("scroll", updatePosition, true)
+    window.addEventListener("scroll", updatePosition, scrollOpts)
     return () => {
       window.removeEventListener("resize", updatePosition)
-      window.removeEventListener("scroll", updatePosition, true)
+      window.removeEventListener("scroll", updatePosition, scrollOpts)
     }
   }, [open])
 
@@ -118,7 +119,7 @@ export function GroupRebindDropdown({
                   >
                     <span>{g.name}</span>
                     {g.id === currentGroupId && (
-                      <span className="text-[10px] text-primary-500">当前</span>
+                      <span className="text-[10px] text-primary-700">当前</span>
                     )}
                   </button>
                 ))}

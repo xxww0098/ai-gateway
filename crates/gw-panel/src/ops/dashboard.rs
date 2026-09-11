@@ -10,16 +10,15 @@
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
-use chrono::{DateTime, Local, TimeZone, Utc};
+use chrono::{DateTime, Local, Utc};
 use serde_json::json;
 
+use crate::billing::usage::local_midnight;
+use crate::codes::INTERNAL as ERR_INTERNAL;
 use crate::{AdminUser, PanelState, err, ok};
 
 #[cfg(test)]
 mod tests;
-
-/// 对应 `apiErrorInternal`。
-const ERR_INTERNAL: i32 = 5000;
 
 /// `users.status` / `api_keys.status` counted as active. 对应 `userStatusActive`
 /// 与 key 计数中的字面量 `"active"`。
@@ -89,23 +88,6 @@ pub fn day_bounds(now: DateTime<Local>) -> (DateTime<Utc>, DateTime<Utc>) {
     let today = local_midnight(now.date_naive());
     let week = local_midnight(now.date_naive() - chrono::Duration::days(WEEK_DAYS_BACK));
     (today, week)
-}
-
-/// Local midnight of `day`, tolerating a DST transition that deletes it.
-fn local_midnight(day: chrono::NaiveDate) -> DateTime<Utc> {
-    let naive = day.and_hms_opt(0, 0, 0).unwrap_or_default();
-    match Local.from_local_datetime(&naive) {
-        chrono::LocalResult::Single(at) => at.with_timezone(&Utc),
-        chrono::LocalResult::Ambiguous(earliest, _) => earliest.with_timezone(&Utc),
-        chrono::LocalResult::None => (1..=23)
-            .find_map(|hour| {
-                Local
-                    .from_local_datetime(&day.and_hms_opt(hour, 0, 0)?)
-                    .earliest()
-            })
-            .map(|at| at.with_timezone(&Utc))
-            .unwrap_or_else(Utc::now),
-    }
 }
 
 async fn count(state: &PanelState, sql: &str) -> Result<i64, sqlx::Error> {

@@ -93,11 +93,6 @@ impl AccessProvider {
         Self { directory, crypto }
     }
 
-    /// Registry key the access manager routes on.
-    pub fn identifier(&self) -> &'static str {
-        "agw-tenant"
-    }
-
     /// Parses the `Authorization` header and resolves it to billing metadata.
     pub async fn authenticate(
         &self,
@@ -155,7 +150,7 @@ impl AccessProvider {
         // 状态 / 订阅 / 倍率互不依赖，并行拿。拒绝时仍然不回订阅内容，
         // 所以和「先查 status 再查订阅」一样不会变成用户状态神谕。
         let group_id = row.group_id;
-        let (active, subscription, multiplier) = tokio::join!(
+        let (active, subscription, multiplier, concurrency) = tokio::join!(
             self.user_is_active(row.user_id),
             self.active_subscription(row.user_id),
             async {
@@ -169,6 +164,14 @@ impl AccessProvider {
                         .filter(|m| *m > 0.0),
                     None => None,
                 }
+            },
+            async {
+                self.directory
+                    .user_concurrency(row.user_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0)
             },
         );
         if !active {
@@ -194,6 +197,7 @@ impl AccessProvider {
             group_id,
             rate_mult,
             subscription,
+            concurrency,
         })
     }
 
@@ -211,11 +215,40 @@ impl AccessProvider {
         // re-confirms the user. Checking BEFORE loading the subscription keeps
         // quota values from leaking for a suspended user — the rejection must
         // be indistinguishable from any other invalid credential.
-        let (active, subscription) = tokio::join!(
+        let (active, subscription, concurrency, version) = tokio::join!(
             self.user_is_active(claims.user_id),
             self.active_subscription(claims.user_id),
+            async {
+                self.directory
+                    .user_concurrency(claims.user_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0)
+            },
+            self.directory.token_version(claims.user_id),
         );
         if !active {
+            return Err(AuthError::InvalidCredential);
+        }
+        // Same posture as the panel: a lookup error is not "version 0",
+        // and a revoked token is not distinguishable from any other 401.
+        let current = version.map_err(|err| {
+            tracing::warn!(
+                event = "token_version_lookup_failed",
+                user_id = claims.user_id,
+                %err,
+            );
+            AuthError::InvalidCredential
+        })?;
+        if claims.is_revoked(current) {
+            tracing::info!(
+                event = "token_revoked",
+                user_id = claims.user_id,
+                token_version = claims.token_version,
+                current_version = current,
+                "proxy_auth_rejected_revoked_jwt"
+            );
             return Err(AuthError::InvalidCredential);
         }
 
@@ -225,6 +258,7 @@ impl AccessProvider {
             group_id: None,
             rate_mult: 1.0,
             subscription,
+            concurrency,
         })
     }
 

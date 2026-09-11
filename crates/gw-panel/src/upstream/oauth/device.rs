@@ -58,23 +58,10 @@ pub enum DevicePollOutcome {
     Failed { error: String, description: String },
 }
 
-impl DevicePollOutcome {
-    #[must_use]
-    pub fn is_pending(&self) -> bool {
-        matches!(self, Self::Pending { .. } | Self::SlowDown { .. })
-    }
-}
-
 /// Classifies a token-endpoint status + body. Pure: no I/O.
 ///
 /// `authorization_pending` keeps waiting; `slow_down` raises the interval by
 /// five seconds (RFC 8628); `expired_token` / `access_denied` fail the session.
-#[must_use]
-pub fn classify_device_token_body(status: u16, raw: &str, interval: i64) -> DevicePollOutcome {
-    interpret_token_http(status, raw, interval)
-}
-
-/// Same as [`classify_device_token_body`]; named for the mock-HTTP tests.
 #[must_use]
 pub fn interpret_token_http(status: u16, raw: &str, interval: i64) -> DevicePollOutcome {
     let interval = if interval > 0 {
@@ -275,37 +262,6 @@ pub async fn poll_xai_token(config: &SessionConfig) -> anyhow::Result<DevicePoll
         decorate_xai_tokens(tokens);
     }
     Ok(outcome)
-}
-
-/// Refreshes an xAI access token. Used by the xAI executor.
-pub async fn refresh_xai_token(
-    token_endpoint: &str,
-    client_id: &str,
-    refresh_token: &str,
-) -> anyhow::Result<TokenResponse> {
-    anyhow::ensure!(
-        validate_xai_endpoint(token_endpoint),
-        "xAI token_endpoint is not on x.ai"
-    );
-    let (status, body) = post_form_raw(
-        token_endpoint,
-        &[
-            ("grant_type", "refresh_token".to_owned()),
-            ("client_id", client_id.to_owned()),
-            ("refresh_token", refresh_token.to_owned()),
-        ],
-    )
-    .await?;
-    match interpret_token_http(status, &body, DEFAULT_INTERVAL) {
-        DevicePollOutcome::Completed(mut tokens) => {
-            decorate_xai_tokens(&mut tokens);
-            Ok(tokens)
-        }
-        DevicePollOutcome::Failed { error, description } => {
-            anyhow::bail!("xAI refresh failed: {error} {description}")
-        }
-        _ => anyhow::bail!("xAI refresh returned a pending response"),
-    }
 }
 
 fn decorate_xai_tokens(tokens: &mut TokenResponse) {
@@ -540,36 +496,6 @@ pub async fn exchange_kiro_code(
     }
 }
 
-/// Refreshes a Kiro access token. Used by the Kiro executor.
-pub async fn refresh_kiro_token(
-    token_endpoint: &str,
-    client_id: &str,
-    client_secret: &str,
-    refresh_token: &str,
-) -> anyhow::Result<TokenResponse> {
-    anyhow::ensure!(
-        token_endpoint.starts_with("https://"),
-        "Kiro token_endpoint must be https"
-    );
-    let (status, body) = post_json_raw(
-        token_endpoint,
-        &json!({
-            "clientId": client_id,
-            "clientSecret": client_secret,
-            "grantType": "refresh_token",
-            "refreshToken": refresh_token,
-        }),
-    )
-    .await?;
-    match interpret_token_http(status, &body, DEFAULT_INTERVAL) {
-        DevicePollOutcome::Completed(tokens) => Ok(tokens),
-        DevicePollOutcome::Failed { error, description } => {
-            anyhow::bail!("Kiro refresh failed: {error} {description}")
-        }
-        _ => anyhow::bail!("Kiro refresh returned a pending response"),
-    }
-}
-
 fn decorate_kiro_tokens(tokens: &mut TokenResponse, config: &SessionConfig) {
     if tokens.email.is_empty() || tokens.account_id.is_empty() {
         let (email, account_id) = claims_from_jwt(&tokens.id_token);
@@ -707,26 +633,12 @@ pub fn parse_kiro_import(raw: &Value) -> anyhow::Result<TokenResponse> {
             tokens.extra.insert(dst.to_owned(), json!(value));
         }
     }
-    if tokens.auth_method_hint().is_empty() {
+    if !tokens.extra.contains_key("auth_method") {
         tokens
             .extra
             .insert("auth_method".to_owned(), json!("import"));
     }
     Ok(tokens)
-}
-
-trait AuthMethodHint {
-    fn auth_method_hint(&self) -> String;
-}
-
-impl AuthMethodHint for TokenResponse {
-    fn auth_method_hint(&self) -> String {
-        self.extra
-            .get("auth_method")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned()
-    }
 }
 
 // ---------------------------------------------------------------- session helpers
@@ -875,7 +787,7 @@ pub async fn poll_provider_token(
     config: &SessionConfig,
 ) -> anyhow::Result<DevicePollOutcome> {
     match provider {
-        Provider::Xai => poll_xai_token(config).await,
+        Provider::Grok => poll_xai_token(config).await,
         Provider::Kiro => poll_kiro_token(config).await,
         _ => anyhow::bail!("{} does not use the device-code flow", provider.as_str()),
     }

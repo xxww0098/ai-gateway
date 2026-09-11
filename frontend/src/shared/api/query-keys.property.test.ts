@@ -50,18 +50,45 @@ describe('Property 6: Query Key Factory Determinism', () => {
     )
   })
 
-  it('users.list() is deterministic for any page/pageSize params', () => {
+  it('users.list() is deterministic for any list params', () => {
+    const listParams = fc.record({
+      page: fc.nat({ max: 10000 }),
+      pageSize: fc.option(fc.nat({ max: 100 }).map(n => n + 1), { nil: undefined }),
+      search: fc.option(fc.string({ maxLength: 24 }), { nil: undefined }),
+      role: fc.option(fc.string({ maxLength: 16 }), { nil: undefined }),
+      status: fc.option(fc.string({ maxLength: 16 }), { nil: undefined }),
+    })
+
     fc.assert(
-      fc.property(
-        fc.nat({ max: 10000 }),
-        fc.nat({ max: 100 }).map(n => n + 1),
-        (page, pageSize) => {
-          const params = { page, pageSize }
-          const result1 = queryKeys.users.list(params)
-          const result2 = queryKeys.users.list(params)
-          expect(result1).toEqual(result2)
+      fc.property(listParams, (params) => {
+        expect(queryKeys.users.list(params)).toEqual(queryKeys.users.list(params))
+      })
+    )
+  })
+
+  it('users.list() changes when any list filter changes', () => {
+    const listParams = fc.record({
+      page: fc.nat({ max: 10000 }),
+      pageSize: fc.option(fc.nat({ max: 100 }).map(n => n + 1), { nil: undefined }),
+      search: fc.option(fc.string({ maxLength: 24 }), { nil: undefined }),
+      role: fc.option(fc.string({ maxLength: 16 }), { nil: undefined }),
+      status: fc.option(fc.string({ maxLength: 16 }), { nil: undefined }),
+    })
+
+    fc.assert(
+      fc.property(listParams, listParams, (left, right) => {
+        const same =
+          left.page === right.page &&
+          left.pageSize === right.pageSize &&
+          left.search === right.search &&
+          left.role === right.role &&
+          left.status === right.status
+        if (same) {
+          expect(queryKeys.users.list(left)).toEqual(queryKeys.users.list(right))
+        } else {
+          expect(queryKeys.users.list(left)).not.toEqual(queryKeys.users.list(right))
         }
-      )
+      })
     )
   })
 
@@ -255,6 +282,33 @@ describe('Property 6: Query Key Factory Determinism', () => {
           const result1 = queryKeys.dashboard.trend(days, role)
           const result2 = queryKeys.dashboard.trend(days, role)
           expect(result1).toEqual(result2)
+        }
+      )
+    )
+  })
+
+  it('notifications factories always return the same structure', () => {
+    fc.assert(
+      fc.property(
+        fc.constant(undefined),
+        () => {
+          expect(queryKeys.notifications.all()).toEqual(queryKeys.notifications.all())
+          expect(queryKeys.notifications.unread()).toEqual(queryKeys.notifications.unread())
+          expect(queryKeys.notifications.list()).toEqual(queryKeys.notifications.list())
+        }
+      )
+    )
+  })
+
+  it('billing.history() is deterministic for any page/pageSize/kind params', () => {
+    fc.assert(
+      fc.property(
+        fc.nat({ max: 10000 }),
+        fc.nat({ max: 100 }).map(n => n + 1),
+        fc.option(fc.string({ maxLength: 16 }), { nil: undefined }),
+        (page, pageSize, kind) => {
+          const params = { page, pageSize, kind }
+          expect(queryKeys.billing.history(params)).toEqual(queryKeys.billing.history(params))
         }
       )
     )

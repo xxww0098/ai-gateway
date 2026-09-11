@@ -1,54 +1,24 @@
 use super::*;
 
-// 连库的那几条（购买守恒、补偿、欠款拦截、余额不足零写入）在 tests/panel/，
-// 需要真 Postgres。这里覆盖：reference 的构造契约、两个视图的 omitempty 差异、
-// 以及那两处刻意保留的既有实现的绑定行为。
+// 连库的那几条（购买守恒、回滚、余额不足零写入）在 tests/panel/。
+// 这里覆盖：扣款 reference 的构造契约、两个视图的 omitempty 差异。
 
-// ── 扣款 / 补偿 reference ────────────────────────────────────────────────────
-
-/// 复刻 handler 里那两行拼串，好让下面的性质测试有对象可测。
 fn debit_ref(package_id: i64, nonce: &str) -> String {
     format!("subscription_purchase:{package_id}:{nonce}")
-}
-fn compensate_ref(package_id: i64, debit: &str) -> String {
-    format!("subscription_purchase:{package_id}:compensate:{debit}")
-}
-
-#[test]
-fn compensation_reference_embeds_the_whole_debit_reference() {
-    // 这是运维配对「哪一次扣款被退了」的唯一线索：补偿串里必须能原样找回扣款串。
-    let debit = debit_ref(7, "e3a1");
-    let comp = compensate_ref(7, &debit);
-    assert!(comp.contains(&debit), "补偿串丢了扣款串：{comp}");
-    assert_ne!(comp, debit, "两者必须可区分");
-}
-
-#[test]
-fn both_references_share_the_prefix_operators_scan_for() {
-    // 运维用 `Reference LIKE 'subscription_purchase:<pkg>:%'` 一次捞出这一对。
-    let package_id = 12;
-    let prefix = format!("subscription_purchase:{package_id}:");
-    let debit = debit_ref(package_id, "n1");
-    assert!(debit.starts_with(&prefix));
-    assert!(compensate_ref(package_id, &debit).starts_with(&prefix));
 }
 
 #[test]
 fn debit_references_are_unique_per_attempt() {
-    // nonce 存在的理由：同一个用户重复买同一个套餐，两次扣款必须是两条可区分的
-    // 流水，否则补偿会配对到错误的那一次。
     let a = debit_ref(3, &uuid::Uuid::new_v4().to_string());
     let b = debit_ref(3, &uuid::Uuid::new_v4().to_string());
     assert_ne!(a, b);
 }
 
 #[test]
-fn compensation_prefix_is_distinguishable_from_a_plain_purchase() {
-    // 补偿串里多了一段 `:compensate:`，扫描时可以只留扣款那一半。
-    let debit = debit_ref(1, "n");
-    let comp = compensate_ref(1, &debit);
-    assert!(!debit.contains(":compensate:"));
-    assert!(comp.contains(":compensate:"));
+fn debit_references_share_the_operator_scan_prefix() {
+    let package_id = 12;
+    let prefix = format!("subscription_purchase:{package_id}:");
+    assert!(debit_ref(package_id, "n1").starts_with(&prefix));
 }
 
 // ── 响应形状 ─────────────────────────────────────────────────────────────────
@@ -174,15 +144,6 @@ fn user_subscription_item_omits_absent_limits() {
     let obj = json.as_object().expect("object");
     assert!(!obj.contains_key("daily_limit_usd"));
     assert!(obj.contains_key("monthly_limit_usd"));
-}
-
-#[test]
-fn a_purchase_records_the_debited_package_price_not_zero() {
-    // 退款页用这一列算剩余天数金额；写成 0 会让整笔订单一分钱都退不了。
-    let debited = 12.5;
-    let recorded = purchase_price_paid(debited);
-    assert_eq!(recorded, debited);
-    assert_ne!(recorded, 0.0);
 }
 
 #[test]

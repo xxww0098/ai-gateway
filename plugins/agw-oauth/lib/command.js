@@ -10,12 +10,11 @@ export function usageText() {
     return [
         'Usage:',
         '  /agw status',
-        '  /agw import',
         '  /agw login',
         '  /agw logout',
         '',
-        'Prefer /agw import when ~/.codex/auth.json or ~/.claude/.credentials.json already exist.',
-        'Open the verification URL only when those files are missing.',
+        'Open the verification URL, sign into AI-GateWay, and approve.',
+        'No model config file is required after login.',
     ].join('\n');
 }
 export async function startLogin(origin, persist, signal) {

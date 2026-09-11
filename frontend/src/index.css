@@ -20,7 +20,7 @@
     --card-foreground: 222.2 84% 4.9%;
     --popover: 0 0% 100%;
     --popover-foreground: 222.2 84% 4.9%;
-    --primary: 173 80% 40%;
+    --primary: 175 77% 26%;
     --primary-foreground: 210 40% 98%;
     --secondary: 210 40% 96.1%;
     --secondary-foreground: 222.2 47.4% 11.2%;
@@ -32,7 +32,7 @@
     --destructive-foreground: 210 40% 98%;
     --border: 214.3 31.8% 91.4%;
     --input: 214.3 31.8% 91.4%;
-    --ring: 173 80% 40%;
+    --ring: 175 77% 26%;
     --radius: 0.75rem;
   }
 
@@ -63,13 +63,24 @@
   }
 
   html {
-    @apply scroll-smooth antialiased;
+    @apply scroll-smooth antialiased font-sans;
     overflow-x: clip;
+    caret-color: hsl(var(--primary));
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
 
   body {
-    @apply bg-background text-foreground min-h-screen;
+    @apply bg-background text-foreground min-h-screen font-sans;
     overflow-x: clip;
+    font-size: 0.875rem;
+    line-height: 1.5;
+  }
+
+  a {
+    text-underline-offset: 0.2em;
   }
 
   /* Coarse pointers (phones/tablets): larger default hit targets */
@@ -87,12 +98,7 @@
 
   *:hover,
   *:focus-within {
-    scrollbar-color: rgba(156, 163, 175, 0.5) transparent;
-  }
-
-  .dark *:hover,
-  .dark *:focus-within {
-    scrollbar-color: rgba(75, 85, 99, 0.5) transparent;
+    scrollbar-color: hsl(var(--muted-foreground) / 0.35) transparent;
   }
 
   ::-webkit-scrollbar {
@@ -109,11 +115,11 @@
   }
 
   *:hover::-webkit-scrollbar-thumb {
-    @apply bg-gray-300/50 dark:bg-dark-600/50;
+    background-color: hsl(var(--muted-foreground) / 0.35);
   }
 
   *:hover::-webkit-scrollbar-thumb:hover {
-    @apply bg-gray-400 dark:bg-dark-500;
+    background-color: hsl(var(--muted-foreground) / 0.55);
   }
 
   ::selection {
@@ -124,43 +130,49 @@
 /* ============ BUTTONS ============ */
 @utility btn {
   @apply inline-flex items-center justify-center gap-2;
-  @apply rounded-xl px-4 py-2.5 text-sm font-medium;
+  @apply rounded-xl px-4 py-2.5 text-sm font-semibold tracking-tight;
   @apply transition-all duration-150 ease-out;
-  @apply focus:outline-hidden focus:ring-1 focus:ring-ring focus:ring-offset-2;
-  @apply disabled:transform-none disabled:cursor-not-allowed disabled:opacity-50;
+  @apply focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2;
+  @apply disabled:transform-none disabled:cursor-not-allowed;
   @apply active:scale-[0.98];
 }
 
 @utility btn-primary {
   @apply bg-primary text-primary-foreground;
-  @apply hover:bg-[#0d9488] active:bg-[#0f766e];
-  @apply shadow-none;
+  @apply hover:bg-primary/90 active:bg-primary/85;
+  @apply shadow-xs;
+  @apply disabled:bg-muted disabled:text-muted-foreground disabled:opacity-100 disabled:shadow-none;
 }
 
 @utility btn-secondary {
   @apply bg-secondary text-secondary-foreground;
   @apply border border-border;
   @apply hover:bg-secondary/80;
+  @apply disabled:opacity-50;
 }
 
 @utility btn-ghost {
   @apply bg-transparent text-muted-foreground;
   @apply hover:bg-muted hover:text-foreground;
+  @apply disabled:opacity-50;
 }
 
 @utility btn-danger {
   @apply bg-destructive text-destructive-foreground;
   @apply hover:bg-destructive/90;
+  @apply disabled:bg-muted disabled:text-muted-foreground disabled:opacity-100 disabled:shadow-none;
 }
 
 @utility btn-success {
-  @apply bg-emerald-600 text-white;
-  @apply hover:bg-emerald-700 active:bg-emerald-800;
+  @apply bg-emerald-700 text-white;
+  @apply hover:bg-emerald-800 active:bg-emerald-900;
+  @apply disabled:bg-muted disabled:text-muted-foreground disabled:opacity-100 disabled:shadow-none;
 }
 
 @utility btn-warning {
-  @apply bg-amber-600 text-white;
-  @apply hover:bg-amber-700 active:bg-amber-800;
+  @apply bg-amber-700 text-white;
+  @apply hover:bg-amber-800 active:bg-amber-900;
+  @apply disabled:bg-muted disabled:text-muted-foreground disabled:opacity-100 disabled:shadow-none;
 }
 
 /* ============ INPUTS ============ */
@@ -201,7 +213,81 @@
 }
 
 @utility card-hover {
-  @apply hover:-translate-y-px hover:border-gray-300 dark:hover:border-dark-600 transition-all;
+  @apply hover:border-muted-foreground/25 transition-colors;
+}
+
+/* ============ USAGE PAPER (用量页) ============ */
+@utility usage-control {
+  @apply min-h-[38px] rounded-[8px] border border-border bg-card px-2.5 text-xs text-foreground;
+  @apply shadow-[0_1px_2px_rgb(0_0_0/0.07)];
+  @apply focus:border-ring focus:outline-hidden focus:ring-1 focus:ring-ring;
+}
+
+@utility usage-panel {
+  @apply overflow-hidden rounded-[13px] border border-border bg-card;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.07);
+}
+
+@utility usage-kpi {
+  @apply relative min-h-[148px] overflow-hidden rounded-[13px] border border-border bg-card px-[18px] py-[17px];
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.07);
+  display: grid;
+  grid-template-rows: auto minmax(2.4em, 1fr) auto;
+}
+
+@utility usage-kpi-dot {
+  @apply size-1.5 rounded-[2px] bg-primary opacity-80;
+}
+
+@utility usage-kpi-value {
+  @apply relative z-10 mt-2.5 flex min-h-[2.4em] items-center text-[clamp(22px,2.1vw,31px)] font-bold leading-[1.08] tracking-[-0.04em] text-foreground tabular-nums;
+}
+
+@utility usage-kpi-detail {
+  @apply relative z-10 mt-2 min-h-[2.4em] text-[11px] leading-snug text-muted-foreground;
+}
+
+.usage-kpi-value.is-compact {
+  font-size: clamp(16px, 1.6vw, 22px);
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+/* 图表坐标刻度跟随主题文字色：浅色 4.8:1 / 暗色 ~7:1，均过 AA（原硬编码 #9ca3af 在浅色仅 2.5:1） */
+.recharts-cartesian-axis-tick-value {
+  fill: hsl(var(--muted-foreground));
+}
+
+.metric-switch {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 2px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--muted));
+}
+
+.metric-switch-button {
+  min-height: 26px;
+  padding: 3px 7px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.metric-switch-button:hover {
+  color: hsl(var(--foreground));
+}
+
+.metric-switch-button.is-on {
+  background: hsl(var(--card));
+  color: hsl(var(--foreground));
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.07);
 }
 
 /* ============ STAT CARDS ============ */
@@ -236,7 +322,7 @@
 /* Table element styles that can't be pure utilities (descendants) */
 @layer components {
   .table th {
-    @apply border-b border-border bg-muted/40 px-4 py-3 font-medium;
+    @apply border-b border-border bg-muted/60 px-4 py-3 font-semibold;
     @apply text-muted-foreground text-xs uppercase tracking-wider;
   }
 
@@ -247,6 +333,6 @@
 
   .table tbody tr {
     @apply transition-colors duration-150;
-    @apply hover:bg-muted/30;
+    @apply hover:bg-muted/40;
   }
 }

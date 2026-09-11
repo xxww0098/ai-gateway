@@ -1,13 +1,9 @@
-//! The atomic Lua scripts the hold accounting runs inside Redis.
+//! Hold admission and available-balance Lua, plus a separate publish script.
 //!
-//! [`HOLD_SCRIPT`] and [`GET_BALANCE_SCRIPT`] are the only place where
-//! "available balance" is computed, and
+//! Both scripts are the only place where "available balance" is computed, and
 //! they must stay verbatim: multiple binaries can share one Redis during a
 //! cutover, so any divergence in the expiry cutoff or the summation would let
 //! two processes admit holds against different views of the same balance.
-//!
-//! [`RENEW_SCRIPT`] deliberately computes **nothing**: it is not a second
-//! admission, so it must not grow a third copy of that summation.
 
 use std::sync::LazyLock;
 
@@ -25,7 +21,7 @@ use redis::Script;
 ///
 /// The expiry cutoff (`now - ttl`) and the summation are the cutover
 /// contract: two binaries may share one Redis, and they must admit against
-/// the same view of the balance. `EXPIRE` and the optional floor (`ARGV[7]`)
+/// the same view of the balance. `EXPIRE` and the optional floor (`ARGV[6]`)
 /// are additive — a new script SHA can coexist with an old one; they do not
 /// change who is admitted for a given `(balance, holds, amount)`.
 ///
@@ -37,9 +33,8 @@ use redis::Script;
 /// ARGV[2] = request ID
 /// ARGV[3] = current timestamp (unix seconds)
 /// ARGV[4] = hold TTL seconds
-/// ARGV[5] = idempotency key (empty string if none)
-/// ARGV[6] = hold-key EXPIRE seconds (hold TTL + margin)
-/// ARGV[7] = min available (floor); defaults to ARGV[1] when absent/invalid
+/// ARGV[5] = hold-key EXPIRE seconds (hold TTL + margin)
+/// ARGV[6] = min available (floor); defaults to ARGV[1] when absent/invalid
 /// ```
 ///
 /// Re-holding an existing request id is idempotent: the script replies `OK`
@@ -61,8 +56,8 @@ local amount = tonumber(ARGV[1])
 local request_id = ARGV[2]
 local now = tonumber(ARGV[3])
 local ttl_seconds = tonumber(ARGV[4])
-local key_ttl = tonumber(ARGV[6])
-local min_available = tonumber(ARGV[7])
+local key_ttl = tonumber(ARGV[5])
+local min_available = tonumber(ARGV[6])
 if not min_available then
     min_available = amount
 end
@@ -179,40 +174,18 @@ return tostring(available)
     )
 });
 
-/// 只把租约的时间戳往后推一格。
+/// Conditional balance publish. Not the hold/get-balance admission scripts.
 ///
-/// 1. `ZSCORE` 取分数 —— 成员不在就回 `HOLD_NOT_FOUND`，
-///    **绝不 `ZADD` 把它造出来**：续租不是准入，它不许凭空产生一笔预留。
-/// 2. `HSET` 时间戳为 `now`，于是两个清理脚本的 `now - ttl` 截止线追不上它。
-/// 3. `EXPIRE` 两个 hold 键，与预扣时同样的余量。
-/// 4. 原样回那个分数 —— 调用方据此确认**金额没变**。
-///
-/// 分数一个字节不动，余额一次不读。
-///
-/// ```text
-/// KEYS[1] = ai-gateway:billing:holds:{userID}     (sorted set)
-/// KEYS[2] = ai-gateway:billing:holds:ts:{userID}  (hold timestamps hash)
-/// ARGV[1] = billing operation id
-/// ARGV[2] = current timestamp (unix seconds)
-/// ARGV[3] = hold-key EXPIRE seconds (hold TTL + margin)
-/// ```
-pub(crate) static RENEW_SCRIPT: LazyLock<Script> = LazyLock::new(|| {
+/// KEYS[1] = balance string, KEYS[2] = version string
+/// ARGV[1] = balance, ARGV[2] = version, ARGV[3] = ttl seconds
+pub(crate) static PUBLISH_BALANCE_SCRIPT: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
         r"
-local score = redis.call('ZSCORE', KEYS[1], ARGV[1])
-if not score then
-    return redis.error_reply('HOLD_NOT_FOUND')
-end
-
-redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
-
-local key_ttl = tonumber(ARGV[3])
-if key_ttl and key_ttl > 0 then
-    redis.call('EXPIRE', KEYS[1], key_ttl)
-    redis.call('EXPIRE', KEYS[2], key_ttl)
-end
-
-return score
+local cur = tonumber(redis.call('GET', KEYS[2]) or '0')
+if tonumber(ARGV[2]) < cur then return 'STALE' end
+redis.call('SETEX', KEYS[1], ARGV[3], ARGV[1])
+redis.call('SETEX', KEYS[2], ARGV[3], ARGV[2])
+return 'OK'
 ",
     )
 });
@@ -224,6 +197,3 @@ pub(crate) const CACHE_MISS: &str = "CACHE_MISS";
 /// The Lua `error_reply` marker meaning the hold was refused. The reply also
 /// carries the available balance after the colon, which the caller discards.
 pub(crate) const INSUFFICIENT_BALANCE: &str = "INSUFFICIENT_BALANCE";
-
-/// [`RENEW_SCRIPT`] 的拒绝标记：这个成员已经不在 zset 里了。
-pub(crate) const HOLD_NOT_FOUND: &str = "HOLD_NOT_FOUND";

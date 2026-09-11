@@ -17,13 +17,13 @@ export function DocsLayout({ children }: DocsLayoutProps) {
   const [theme, setTheme] = useState<Theme>(() => currentTheme())
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-50 via-primary-50/20 to-gray-100 dark:from-dark-950 dark:via-dark-900 dark:to-dark-950">
-      <header className="sticky top-0 z-30 border-b border-border bg-white/80 backdrop-blur-xl dark:bg-dark-900/80">
+    <div className="min-h-screen bg-muted/40">
+      <header className="sticky top-0 z-30 border-b border-border bg-background/80 backdrop-blur-xl">
         <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-4 px-4 sm:h-16 sm:px-6">
           <div className="flex min-w-0 items-center gap-6">
             <Link to="/" className="flex items-center gap-2.5 shrink-0">
               <img src="/icon.svg" alt={PRODUCT_NAME} className="h-8 w-8 rounded-xl" />
-              <span className="text-base font-bold text-gray-900 dark:text-white sm:text-lg">
+              <span className="text-base font-bold text-foreground sm:text-lg">
                 {PRODUCT_NAME}
               </span>
             </Link>
@@ -42,7 +42,7 @@ export function DocsLayout({ children }: DocsLayoutProps) {
                 setTheme(toggleTheme())
               }}
               aria-label={theme === 'dark' ? '切换到亮色模式' : '切换到暗色模式'}
-              className="rounded-xl p-2 text-gray-500 transition-colors hover:bg-gray-100 dark:text-dark-400 dark:hover:bg-dark-800"
+              className="rounded-xl p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
               {theme === 'dark' ? <Sun className="h-5 w-5 text-amber-500" /> : <Moon className="h-5 w-5" />}
             </button>
@@ -53,7 +53,7 @@ export function DocsLayout({ children }: DocsLayoutProps) {
             ) : (
               <Link
                 to="/login"
-                className="text-sm font-medium text-gray-600 transition-colors hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
+                className="text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
               >
                 登录
               </Link>
@@ -67,7 +67,7 @@ export function DocsLayout({ children }: DocsLayoutProps) {
           <nav className="sticky top-24 space-y-6" aria-label="接入指南目录">
             {docsNav.map((group) => (
               <div key={group.title}>
-                <div className="mb-2 px-2 text-[11px] font-semibold uppercase tracking-widest text-gray-400 dark:text-dark-400">
+                <div className="mb-2 px-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
                   {group.title}
                 </div>
                 <ul className="space-y-0.5">
@@ -80,8 +80,8 @@ export function DocsLayout({ children }: DocsLayoutProps) {
                           cn(
                             'block rounded-xl px-2.5 py-2 text-sm font-medium transition-colors',
                             isActive
-                              ? 'bg-primary-50 text-primary-700 dark:bg-primary-900/20 dark:text-primary-300'
-                              : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-dark-300 dark:hover:bg-dark-800 dark:hover:text-white',
+                              ? 'bg-primary/10 text-primary'
+                              : 'text-muted-foreground hover:bg-muted hover:text-foreground',
                           )
                         }
                       >
@@ -110,8 +110,8 @@ export function DocsLayout({ children }: DocsLayoutProps) {
                     cn(
                       'shrink-0 rounded-full px-3 py-1.5 text-xs font-semibold transition-colors',
                       isActive
-                        ? 'bg-primary-600 text-white'
-                        : 'bg-white text-gray-600 ring-1 ring-border dark:bg-dark-800 dark:text-dark-300',
+                        ? 'bg-primary text-primary-foreground'
+                        : 'bg-card text-muted-foreground ring-1 ring-border',
                     )
                   }
                 >

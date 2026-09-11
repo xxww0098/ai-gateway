@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { act } from 'react'
+import { MemoryRouter } from 'react-router-dom'
 import { QuickIntegrationPanel } from './QuickIntegrationPanel'
 import { anthropicBaseUrl, openaiBaseUrl } from '@/pages/docs/guide'
 import type { IntegrationTab } from '../types'
@@ -12,12 +13,16 @@ function renderPanel(tab: IntegrationTab): { container: HTMLDivElement; root: Ro
   const root = createRoot(container)
   act(() => {
     root.render(
-      createElement(QuickIntegrationPanel, {
-        apiKeyCount: 1,
-        totalRequests: 0,
-        integrationTab: tab,
-        onIntegrationTabChange: () => {},
-      }),
+      createElement(
+        MemoryRouter,
+        null,
+        createElement(QuickIntegrationPanel, {
+          apiKeyCount: 1,
+          totalRequests: 0,
+          integrationTab: tab,
+          onIntegrationTabChange: () => {},
+        })
+      )
     )
   })
   return { container, root }

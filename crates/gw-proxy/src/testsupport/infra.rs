@@ -17,6 +17,10 @@ pub(crate) struct FakeRateLimiter {
     pub(crate) allow: Mutex<bool>,
     pub(crate) released: Mutex<Vec<String>>,
     pub(crate) errors: Mutex<bool>,
+    pub(crate) seen_user_concurrency: Mutex<Vec<i64>>,
+    pub(crate) channel_denied: Mutex<std::collections::HashSet<String>>,
+    pub(crate) channel_acquired: Mutex<Vec<String>>,
+    pub(crate) channel_released: Mutex<Vec<String>>,
 }
 
 impl FakeRateLimiter {
@@ -35,7 +39,9 @@ impl RateLimiter for FakeRateLimiter {
         _tokens: i64,
         _model: &str,
         _group_id: Option<Id>,
+        user_concurrency: i64,
     ) -> anyhow::Result<(bool, Option<String>)> {
+        self.seen_user_concurrency.lock().push(user_concurrency);
         if *self.errors.lock() {
             anyhow::bail!("redis down");
         }
@@ -44,6 +50,26 @@ impl RateLimiter for FakeRateLimiter {
 
     async fn release_concurrency(&self, _identity: &str, release_id: &str) -> anyhow::Result<()> {
         self.released.lock().push(release_id.to_owned());
+        Ok(())
+    }
+
+    async fn acquire_channel(
+        &self,
+        auth_id: &str,
+        max_concurrent: i64,
+    ) -> anyhow::Result<(bool, Option<String>)> {
+        if max_concurrent <= 0 {
+            return Ok((true, None));
+        }
+        if self.channel_denied.lock().contains(auth_id) {
+            return Ok((false, None));
+        }
+        self.channel_acquired.lock().push(auth_id.to_owned());
+        Ok((true, Some(format!("ch-{auth_id}"))))
+    }
+
+    async fn release_channel(&self, auth_id: &str, _release_id: &str) -> anyhow::Result<()> {
+        self.channel_released.lock().push(auth_id.to_owned());
         Ok(())
     }
 }
@@ -76,6 +102,8 @@ impl CircuitBreaker for FakeCircuitBreaker {
 #[derive(Default)]
 pub(crate) struct FakeIdempotencyStore {
     pub(crate) entries: Mutex<HashMap<String, Vec<u8>>>,
+    pub(crate) fail_reads: Mutex<bool>,
+    pub(crate) fail_writes: Mutex<bool>,
 }
 
 impl FakeIdempotencyStore {
@@ -87,15 +115,24 @@ impl FakeIdempotencyStore {
 #[async_trait]
 impl IdempotencyStore for FakeIdempotencyStore {
     async fn get(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        if *self.fail_reads.lock() {
+            anyhow::bail!("redis down");
+        }
         Ok(self.entries.lock().get(key).cloned())
     }
 
     async fn set(&self, key: &str, value: Vec<u8>, _ttl: Duration) -> anyhow::Result<()> {
+        if *self.fail_writes.lock() {
+            anyhow::bail!("redis down");
+        }
         self.entries.lock().insert(key.to_owned(), value);
         Ok(())
     }
 
     async fn set_nx(&self, key: &str, value: Vec<u8>, _ttl: Duration) -> anyhow::Result<bool> {
+        if *self.fail_writes.lock() {
+            anyhow::bail!("redis down");
+        }
         let mut entries = self.entries.lock();
         if entries.contains_key(key) {
             return Ok(false);
@@ -105,6 +142,9 @@ impl IdempotencyStore for FakeIdempotencyStore {
     }
 
     async fn delete(&self, key: &str) -> anyhow::Result<()> {
+        if *self.fail_writes.lock() {
+            anyhow::bail!("redis down");
+        }
         self.entries.lock().remove(key);
         Ok(())
     }

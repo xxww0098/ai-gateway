@@ -32,12 +32,16 @@ impl RateLimiter for SharedRateLimiter {
         tokens: i64,
         model: &str,
         group_id: Option<Id>,
+        user_concurrency: i64,
     ) -> anyhow::Result<(bool, Option<String>)> {
-        // `infra::RateLimiter::allow` cannot fail: it fails open internally and
+        // `infra::RateLimiter::limit` cannot fail: it fails open internally and
         // says so in the decision, which is the posture the middleware wants —
         // a Redis outage must not stop traffic. The port's `Result` exists for
         // implementations that cannot make that promise.
-        let decision = self.0.allow(identity, tokens, model, group_id).await;
+        let decision = self
+            .0
+            .limit(identity, tokens, model, group_id, user_concurrency)
+            .await;
         Ok(match decision {
             gw_infra::RateLimitDecision::Allowed { release_id } => (true, release_id),
             gw_infra::RateLimitDecision::Denied { .. } => (false, None),
@@ -46,6 +50,22 @@ impl RateLimiter for SharedRateLimiter {
 
     async fn release_concurrency(&self, identity: &str, release_id: &str) -> anyhow::Result<()> {
         Ok(self.0.release_conc(identity, release_id).await?)
+    }
+
+    async fn acquire_channel(
+        &self,
+        auth_id: &str,
+        max_concurrent: i64,
+    ) -> anyhow::Result<(bool, Option<String>)> {
+        let decision = self.0.acquire_channel(auth_id, max_concurrent).await;
+        Ok(match decision {
+            gw_infra::RateLimitDecision::Allowed { release_id } => (true, release_id),
+            gw_infra::RateLimitDecision::Denied { .. } => (false, None),
+        })
+    }
+
+    async fn release_channel(&self, auth_id: &str, release_id: &str) -> anyhow::Result<()> {
+        Ok(self.0.release_channel(auth_id, release_id).await?)
     }
 }
 

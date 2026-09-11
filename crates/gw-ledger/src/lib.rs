@@ -22,10 +22,6 @@
 //!   per-request value, or a short-lived request would evict a long-lived
 //!   request's reservation.
 //!
-//! `hold_ttl` 是**一片租约**，不是一条流的最长时长：活着的流由
-//! [`Ledger::renew_lease`] 每隔半片续一次，而 [`DEFAULT_MAX_HOLD_DURATION`]
-//! 是「续到什么时候为止」的硬顶 —— 一条永不结束的流不许永久冻结余额。
-//!
 //! The `hold` / `settle` / `release` signatures and semantics are a hard
 //! project constraint — see `AGENTS.md`.
 //!
@@ -37,33 +33,31 @@
 // flips the workspace-level deny once the last one is clear.
 #![deny(clippy::todo, clippy::unimplemented)]
 
-mod ids;
 mod integrity;
 mod keys;
-mod lease;
 mod ledger;
 pub mod log_type;
-pub mod operation;
-mod operation_store;
+mod reconcile;
 mod scripts;
 mod settlement;
+mod shortfall;
 
 #[cfg(test)]
 mod testsupport;
 
-pub use ids::{BillingOperationId, ClientTraceId, IdempotencyScope, UpstreamAttemptId};
 pub use integrity::usd_to_micro;
 pub use keys::{
-    BALANCE_KEY_PREFIX, HOLDS_KEY_PREFIX, HOLDS_TS_KEY_PREFIX, balance_key, holds_key,
-    holds_ts_key, shortfall_resolve_reference,
+    BALANCE_KEY_PREFIX, BALANCE_VER_KEY_PREFIX, HOLDS_KEY_PREFIX, HOLDS_TS_KEY_PREFIX,
+    SERVICE_CREDIT_REF_PREFIX, balance_key, balance_ver_key, holds_key, holds_ts_key,
+    service_credit_reference, shortfall_resolve_reference,
 };
-pub use lease::{DEFAULT_MAX_HOLD_DURATION, LeaseRenewal, lease_exhausted};
-pub use ledger::{DEFAULT_BALANCE_TTL, DEFAULT_HOLD_TTL, HoldOutcome, Ledger, SettleOutcome};
-pub use operation::{
-    Admission, HoldError, NewOperation, NonTerminalOperation, OperationConflict, OperationRecord,
-    OperationState, ReleaseOnce, SettleOnce,
+pub use ledger::{
+    BalanceChange, DEFAULT_BALANCE_TTL, DEFAULT_HOLD_TTL, HoldOutcome, Ledger,
+    PENDING_INTENT_SCAN_SQL, PendingIntent, SettleOutcome,
 };
+pub use reconcile::StaleHold;
 pub use settlement::Settlement;
+pub use shortfall::{OutstandingShortfall, WriteOff, shortfall_gate_sql};
 
 /// Everything the ledger can fail with.
 ///
@@ -96,11 +90,9 @@ pub enum LedgerError {
     #[error("hold not found")]
     HoldNotFound,
 
-    /// 这笔预留从首次预扣算起已经到达
-    /// [`Ledger::max_hold_duration`] —— 不再续租。
-    /// 它会在剩余 TTL 到期时自然消亡，那一行留给对账。
-    #[error("hold lease has reached its maximum duration")]
-    LeaseExpired,
+    /// This gateway request id has already completed a successful settle.
+    #[error("already settled")]
+    AlreadySettled,
 
     /// A hold-path method was called on a ledger built without Redis. Holds
     /// have nowhere to live without it, so this is a wiring bug, not a

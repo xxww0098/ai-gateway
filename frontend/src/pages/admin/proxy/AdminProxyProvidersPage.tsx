@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/shared/components/ui/card'
 import { ProviderTab, type BaseChannelItem } from '@/features/admin-proxy/components/ProviderTab'
 import { ProviderModelsDialog } from '@/features/admin-proxy/components/ProviderModelsDialog'
@@ -12,6 +12,7 @@ import {
   providerLabel,
   type ProviderKind,
 } from '@/features/admin-proxy/providerConfig'
+import { AuthProviderBrandIcon } from '@/features/admin-proxy/components/AuthProviderBrandIcon'
 import type { ModelInfo } from '@/features/pricing/model_prices'
 
 function recordString(value: unknown, key: string): string {
@@ -40,6 +41,7 @@ async function fetchPersistedModelsUrl(channelKey: string): Promise<string> {
 
 export default function AdminProxyProvidersPage() {
   const [activeTab, setActiveTab] = useState<ProviderKind>('openai')
+  const [visitedTabs, setVisitedTabs] = useState<Set<ProviderKind>>(() => new Set<ProviderKind>(['openai']))
   const [modelsDialogItem, setModelsDialogItem] = useState<BaseChannelItem | null>(null)
   const [providerRefreshSignal, setProviderRefreshSignal] = useState(0)
 
@@ -53,7 +55,17 @@ export default function AdminProxyProvidersPage() {
 
   const activeIndex = providerTabs.findIndex(t => t.id === activeTab)
 
-  const handleOpenModelsDialog = async (item: BaseChannelItem) => {
+  const handleTabChange = useCallback((tabId: ProviderKind) => {
+    setActiveTab(tabId)
+    setVisitedTabs((prev) => {
+      if (prev.has(tabId)) return prev
+      const next = new Set(prev)
+      next.add(tabId)
+      return next
+    })
+  }, [])
+
+  const handleOpenModelsDialog = useCallback(async (item: BaseChannelItem) => {
     let nextItem = item
     try {
       const latest = await fetchProviderConfig(PROVIDER_ENDPOINTS[item.providerKind])
@@ -84,13 +96,22 @@ export default function AdminProxyProvidersPage() {
     }
 
     setModelsDialogItem(nextItem)
-  }
+  }, [])
 
-  const handleProbeForm = (apiKey: string, baseUrl: string, name: string, modelsUrl?: string) => {
-    setModelsDialogItem({ _id: 'test', providerKind: activeTab, index: -1, apiKey, baseUrl, modelsUrl, originalPayload: {}, name })
-  }
+  const handleProbeForm = useCallback((apiKey: string, baseUrl: string, name: string, modelsUrl?: string, providerKind?: ProviderKind) => {
+    setModelsDialogItem({
+      _id: 'test',
+      providerKind: providerKind || activeTab,
+      index: -1,
+      apiKey,
+      baseUrl,
+      modelsUrl,
+      originalPayload: {},
+      name,
+    })
+  }, [activeTab])
 
-  const handleSaveConfiguredModels = async (models: ModelInfo[]) => {
+  const handleSaveConfiguredModels = useCallback(async (models: ModelInfo[]) => {
     if (!modelsDialogItem || modelsDialogItem.index < 0) {
       throw new Error('请先保存供应商后再写入模型配置')
     }
@@ -130,9 +151,9 @@ export default function AdminProxyProvidersPage() {
         }
       }
     }
-  }
+  }, [modelsDialogItem])
 
-  const handleSaveModelsUrl = async (modelsUrl: string) => {
+  const handleSaveModelsUrl = useCallback(async (modelsUrl: string) => {
     if (!modelsDialogItem || modelsDialogItem.index < 0) {
       throw new Error('请先保存供应商后再保存模型列表 URL')
     }
@@ -150,53 +171,86 @@ export default function AdminProxyProvidersPage() {
       ...current,
       modelsUrl,
     } : current)
-  }
+  }, [modelsDialogItem])
 
   const dialogProviderKind = modelsDialogItem?.providerKind ?? activeTab
 
   return (
     <div className="space-y-6 max-w-6xl">
-      <Card>
-        <CardHeader>
-          <CardTitle>多渠道接口池</CardTitle>
-          <CardDescription>配置不同模型渠道的 API Keys 和自定义 Base URL（支持配置多个，自动负载均衡）。对于不支持或者自定义的协议，请使用 OpenAI 兼容格式。</CardDescription>
+      <Card className="border-border/80 shadow-xs">
+        <CardHeader className="pb-4">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <div>
+              <CardTitle className="text-base sm:text-lg font-semibold flex items-center gap-2">
+                <span>多渠道接口池</span>
+                <span className="text-xs font-normal text-muted-foreground py-0.5 px-2 bg-muted rounded-md">
+                  {providerTabs.find(t => t.id === activeTab)?.label}
+                </span>
+              </CardTitle>
+              <CardDescription className="text-xs sm:text-sm mt-1">
+                配置不同模型渠道的 API Keys 与自定义 Base URL（支持配置多个凭证，请求将自动故障转移与负载均衡）。
+              </CardDescription>
+            </div>
+          </div>
         </CardHeader>
         <CardContent>
           <div className="w-full mb-6">
-            <div className="bg-slate-100/80 dark:bg-dark-800/60 rounded-xl p-1 border border-slate-200/50 dark:border-dark-700/50">
+            <div className="bg-muted/70 dark:bg-muted/40 rounded-xl p-1 border border-border/60">
               <div className="relative flex w-full">
                 {/* Sliding Capsule Background */}
                 <div
-                  className="absolute inset-y-0 rounded-lg bg-white dark:bg-dark-700 shadow-sm border border-slate-200/50 dark:border-dark-600/50 transition-all duration-300 ease-out"
+                  className="absolute inset-y-0 rounded-lg bg-card shadow-xs border border-border/80 transition-all duration-300 ease-out"
                   style={{ width: `${100 / providerTabs.length}%`, transform: `translateX(${activeIndex * 100}%)` }}
                 />
 
                 {providerTabs.map((tab) => (
                   <button
                     key={tab.id}
+                    type="button"
                     className={cn(
-                      "relative z-10 flex-1 flex items-center justify-center py-2 text-sm font-medium transition-colors duration-300 rounded-lg cursor-pointer",
+                      "relative z-10 flex-1 flex items-center justify-center gap-1.5 sm:gap-2 py-2 px-1 sm:px-3 text-xs sm:text-sm font-medium transition-colors duration-200 rounded-lg cursor-pointer select-none",
                       activeTab === tab.id
-                        ? "text-slate-900 dark:text-white"
-                        : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-300"
+                        ? "text-foreground font-semibold"
+                        : "text-muted-foreground hover:text-foreground"
                     )}
-                    onClick={() => setActiveTab(tab.id)}
+                    onClick={() => handleTabChange(tab.id)}
                   >
-                    {tab.label}
+                    <AuthProviderBrandIcon
+                      provider={tab.id === 'vertex' ? 'google' : tab.id}
+                      size={15}
+                      className={cn(
+                        "transition-transform shrink-0",
+                        activeTab === tab.id ? "scale-105" : "opacity-70"
+                      )}
+                    />
+                    <span className="truncate">{tab.label}</span>
                   </button>
                 ))}
               </div>
             </div>
           </div>
 
-          <div key={activeTab} className="animate-in fade-in duration-300" style={{ willChange: 'opacity' }}>
-            <ProviderTab
-              providerKind={activeTab}
-              endpoint={PROVIDER_ENDPOINTS[activeTab]}
-              refreshSignal={providerRefreshSignal}
-              onOpenModelsDialog={handleOpenModelsDialog}
-              onProbeForm={handleProbeForm}
-            />
+          <div>
+            {providerTabs.map((tab) => {
+              if (!visitedTabs.has(tab.id)) return null
+              const isActive = activeTab === tab.id
+              return (
+                <div
+                  key={tab.id}
+                  className={cn(!isActive && 'hidden')}
+                  role="tabpanel"
+                  aria-hidden={!isActive}
+                >
+                  <ProviderTab
+                    providerKind={tab.id}
+                    endpoint={PROVIDER_ENDPOINTS[tab.id]}
+                    refreshSignal={providerRefreshSignal}
+                    onOpenModelsDialog={handleOpenModelsDialog}
+                    onProbeForm={handleProbeForm}
+                  />
+                </div>
+              )
+            })}
           </div>
         </CardContent>
       </Card>

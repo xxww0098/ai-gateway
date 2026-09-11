@@ -14,7 +14,6 @@ fn config(base_url: &str) -> ProviderConfig {
     ProviderConfig {
         base_url: base_url.to_owned(),
         api_key: "config-token".to_owned(),
-        enabled: true,
     }
 }
 
@@ -108,6 +107,26 @@ fn a_missing_or_non_string_model_reads_as_absent() {
     }
 }
 
+#[test]
+fn the_billing_model_falls_back_to_the_router_hint() {
+    let mut req = ProviderRequest {
+        payload: Bytes::from_static(br#"{"model":"gpt-5-codex"}"#),
+        model: "ignored-when-body-has-one".to_owned(),
+        ..Default::default()
+    };
+    assert_eq!(codex_billing_model(&req), "gpt-5-codex");
+
+    req.payload = Bytes::from_static(br#"{"messages":[]}"#);
+    assert_eq!(codex_billing_model(&req), "ignored-when-body-has-one");
+
+    req.model = String::new();
+    req.metadata.insert(
+        crate::common::REQUESTED_MODEL_METADATA_KEY.to_owned(),
+        "alias".to_owned(),
+    );
+    assert_eq!(codex_billing_model(&req), "alias");
+}
+
 // --- construction & credentials ----------------------------------------------
 
 #[test]
@@ -196,67 +215,53 @@ fn the_refresh_token_is_read_from_either_nesting_level() {
     );
 }
 
-// --- route plan ---------------------------------------------------------------
+// --- outbound request ---------------------------------------------------------
 
 #[test]
-fn a_request_without_a_token_is_refused_before_anything_is_planned() {
+fn a_request_without_a_token_is_refused_before_it_reaches_the_wire() {
     let provider = provider();
     let err = provider
-        .plan_request(
+        .build_request(
             &ProviderRequest::default(),
+            false,
             "",
             CODEX_DEFAULT_BASE_URL,
-            None,
         )
-        .expect_err("an empty access token must not produce a plan");
+        .expect_err("an empty access token must not produce a request");
     assert!(matches!(err, ProviderError::Credential(_)), "{err:?}");
 }
 
 #[test]
-fn streaming_requests_force_include_usage_like_the_openai_planner() {
+fn streaming_requests_force_include_usage_like_the_openai_executor() {
     let provider = provider();
     let req = ProviderRequest {
         payload: Bytes::from_static(br#"{"model":"gpt-5-codex","stream":true}"#),
         stream: true,
         ..Default::default()
     };
-    let plan = provider
-        .plan_request(&req, "tok", CODEX_DEFAULT_BASE_URL, None)
-        .expect("plans");
+    let request = provider
+        .build_request(&req, true, "tok", CODEX_DEFAULT_BASE_URL)
+        .unwrap()
+        .build()
+        .unwrap();
 
     assert_eq!(
-        plan.endpoint.as_str(),
+        request.url().as_str(),
         "https://api.openai.com/v1/chat/completions"
     );
-    assert!(matches!(&plan.credential, gw_relay::Credential::Bearer(t) if t == "tok"));
-    assert_eq!(plan.headers[ACCEPT], "text/event-stream");
-    let body = plan
-        .body
-        .as_ref()
-        .expect("a streaming plan rewrites the body");
-    let value: serde_json::Value = serde_json::from_slice(body).unwrap();
-    assert_eq!(value["stream"], json!(true));
-    assert_eq!(value["stream_options"]["include_usage"], json!(true));
-    assert!(plan.headers.contains_key("originator"));
-    assert!(plan.headers.contains_key("user-agent"));
-    assert!(!plan.headers.contains_key(http::header::AUTHORIZATION));
-}
-
-/// DSH `session_id` is copied onto the cache key then dropped. chatgpt.com
-/// 400s if it stays on the JSON.
-#[test]
-fn inbound_session_id_is_stripped_before_the_relay() {
-    let req = ProviderRequest {
-        payload: Bytes::from_static(br#"{"model":"gpt-5.5","session_id":"dsh-sess"}"#),
-        ..Default::default()
-    };
-    let plan = provider()
-        .plan_request(&req, "tok", CODEX_DEFAULT_BASE_URL, None)
-        .expect("plans");
-    let body = plan.body.expect("stripping session_id rewrites the body");
-    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(value.get("session_id").is_none());
-    assert!(plan.headers.contains_key("session-id"));
+    assert_eq!(request.headers()[AUTHORIZATION], "Bearer tok");
+    assert_eq!(request.headers()[ACCEPT], "text/event-stream");
+    // 与 openai executor 同理：插入后的 body 是两帧零拷贝流，上游看到的长度契约
+    // 是显式声明的 content-length。插入内容本身由 `common_tests` 覆盖。
+    let declared: usize = request.headers()[http::header::CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    // Cache rewrite may grow the JSON; include_usage still has to be spliced
+    // on top of that rewritten body, so the declared length is strictly larger
+    // than the inbound payload.
+    assert!(declared > req.payload.len());
 }
 
 // --- OAuth token rotation ------------------------------------------------------

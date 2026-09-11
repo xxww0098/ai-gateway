@@ -19,7 +19,6 @@
 //! | #17 | 本层读过的凭证载体被原样转给上游 → 出站先剥后设 |
 //! | #18 | 流式强制覆盖 `Accept` → 撤销，一个字节都不碰 |
 //! | #5  | `accept-encoding` 原样转发导致旁路 usage 必然读到 gzip 魔数 → 默认收敛成 `identity` |
-//! | RFC 7230 §6.1 | `Connection` **点名**的逐跳头被越跳转发 → 名单按每条消息现收 |
 
 use http::HeaderMap;
 use http::header::{
@@ -33,15 +32,11 @@ const X_API_KEY: HeaderName = HeaderName::from_static("x-api-key");
 /// Google AI Studio 的凭证载体。
 const X_GOOG_API_KEY: HeaderName = HeaderName::from_static("x-goog-api-key");
 
-/// 代理必须自己消费、绝不能转发的 header —— **与消息内容无关的那一半**。
+/// 代理必须自己消费、绝不能转发的 header。
 ///
-/// 前八个是 RFC 7230 §6.1 点名的逐跳集合；第九个 `expect` 是**缺陷 #10** 补上的：
+/// 前八个是 RFC 7230 §6.1 的逐跳集合；第九个 `expect` 是**缺陷 #10** 补上的：
 /// `Expect: 100-continue` 是逐跳的连接控制头，hyper 的 client 不做 100-continue
 /// 协商，转给上游只会多一次 RTT，严格的中间设备直接 417。
-///
-/// 另一半是**这条消息自己点名**的：`Connection` 的值本身就是一张逐跳头名单
-/// （RFC 7230 §6.1），见 [`connection_listed`]。这个静态集合覆盖不了它 ——
-/// 名单是随消息来的，不是写死的。
 ///
 /// `host` 与 `content-length` 不在这里 —— 它们不是逐跳头，是**本地重算**的头
 /// （审计 §4.1 #8 特意点了这个分类问题）。判定见 [`is_locally_rebuilt`]。
@@ -98,6 +93,12 @@ fn connection_listed(src: &HeaderMap) -> Vec<String> {
 
 /// 把 `src` 的 header 复制到 `dst`，**保留同名多值**，跳过逐跳头与本地重算头。
 ///
+/// # 逐跳名单是**按消息**算的
+///
+/// 除了 [`is_hop_by_hop`] 的静态那一半，还要跳掉 `src` 自己的 `Connection`
+/// 点名的每一个头（[`connection_listed`]）。名单先从 `src` 收齐再进循环：
+/// 判定属于**这条消息**，与遍历到第几个 header 无关。
+///
 /// # 根除缺陷 #7
 ///
 /// 必须 `append` 而不是 `insert`。OpenAI 经 Cloudflare 返回两条 `set-cookie`
@@ -109,12 +110,6 @@ fn connection_listed(src: &HeaderMap) -> Vec<String> {
 ///
 /// 黑名单里带 `expect`，见 [`is_hop_by_hop`]。
 ///
-/// # 逐跳名单是**按消息**算的
-///
-/// 除了静态那一半，还要跳掉 `src` 自己的 `Connection` 点名的每一个头
-/// （[`connection_listed`]）。名单先从 `src` 收齐再进循环：判定属于**这条消息**，
-/// 与遍历到第几个 header 无关。
-///
 /// # 两个方向共用
 ///
 /// 出站（客户端 → 上游）与回写（上游 → 客户端）走的是同一个函数体。
@@ -123,10 +118,10 @@ fn connection_listed(src: &HeaderMap) -> Vec<String> {
 pub fn copy_preserving_multivalue(dst: &mut HeaderMap, src: &HeaderMap) {
     let listed = connection_listed(src);
     for name in src.keys() {
-        if is_hop_by_hop(name) || is_locally_rebuilt(name) {
-            continue;
-        }
-        if listed.iter().any(|option| option == name.as_str()) {
+        if is_hop_by_hop(name)
+            || is_locally_rebuilt(name)
+            || listed.iter().any(|option| option == name.as_str())
+        {
             continue;
         }
         for value in src.get_all(name) {

@@ -23,7 +23,7 @@ export interface RegisterRequest {
 export interface AuthUser {
   id: number
   email: string
-  role: 'user' | 'admin'
+  role: 'user' | 'admin' | 'super_admin'
   balance: number
   status: string
   created_at: string

@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use axum::Router;
-use gw_config::Config;
+use gw_config::{BootstrapMode, Config};
 use gw_infra::{
     ApiKeyCache, CircuitBreaker as InfraCircuitBreaker, CircuitBreakerSettings, Db, DbSettings,
     RateLimitSettings, RateLimiter as InfraRateLimiter, Redis, SqlLogLevel, SweepHandle,
@@ -50,7 +50,7 @@ use gw_provider::common::ProviderConfig;
 use gw_provider::gemini::GeminiProvider;
 use gw_provider::kiro::KiroProvider;
 use gw_provider::openai::OpenAiCompatibleProvider;
-use gw_provider::route::RoutePlanner;
+use gw_provider::types::Provider;
 use gw_provider::vertex::VertexProvider;
 use gw_provider::xai::XaiProvider;
 use gw_proxy::adapters::{
@@ -76,7 +76,7 @@ pub const CHANNEL_POLICY_REFRESH: Duration = Duration::from_secs(60);
 /// How often the visible model catalogue snapshot is reloaded.
 pub const CATALOG_REFRESH: Duration = Duration::from_secs(60);
 
-/// The wired gateway: what [`crate::serve`] needs, plus the handles that must
+/// The wired gateway: what [`crate::serve_with_shutdown`] needs, plus the handles that must
 /// outlive this function.
 pub struct Wiring {
     /// Readiness probes over the live Postgres pool and Redis client.
@@ -137,8 +137,7 @@ impl Drop for Guards {
 /// Postgres, the migrations, the auth store's encryption key and any
 /// unparseable upstream base URL are all hard failures — a gateway that cannot
 /// reach its database or cannot decrypt its credentials must not accept
-/// traffic. Redis is a hard failure too: `PanelState` holds a live client
-/// rather than a nullable one, and without Redis the ledger cannot place
+/// traffic. Redis is a hard failure too: without it the ledger cannot place
 /// a hold, so "degraded" would mean "serving `/v1` for free".
 pub async fn wire(
     config: &Config,
@@ -228,16 +227,12 @@ pub async fn wire(
     let shared_ledger = Arc::new(SharedLedger::new(Arc::clone(&ledger)));
     let shared_calc = Arc::new(SharedCalculator::new(Arc::clone(&calc)));
 
-    // 配额存储是**同一个实例**：预扣在它的锁里落预留，Release 在它这里还回去。
-    // （结算那一支的「预留 → 实际」在 `SqlUsageStore` 的扣款事务里做，不经过它。）
-    let quota_store = Arc::new(SqlSubscriptionQuotaStore::new(pg.clone()));
-
     let settlement = Arc::new(
         Settlement::new(
             Arc::clone(&shared_ledger) as Arc<_>,
+            Arc::clone(&shared_calc) as Arc<_>,
             Arc::new(SqlUsageStore::new(pg.clone(), Arc::clone(&ledger))),
         )
-        .with_quota_store(Arc::clone(&quota_store) as Arc<_>)
         .with_low_balance_threshold(config.billing.low_balance_threshold_usd),
     );
     settlement.set_strict_usage_metadata(config.billing.strict_usage_metadata_mode);
@@ -258,6 +253,7 @@ pub async fn wire(
         Duration::ZERO,
     ));
 
+    let shared_rate_limiter = Arc::new(SharedRateLimiter::new(Arc::clone(&rate_limiter)));
     let hold = Arc::new(
         HoldMiddleware::new(
             Arc::clone(&shared_ledger) as Arc<_>,
@@ -265,8 +261,8 @@ pub async fn wire(
             Arc::clone(&settlement),
             config.billing.hold_ttl(),
         )
-        .with_quota_store(Arc::clone(&quota_store) as Arc<_>)
-        .with_rate_limiter(Arc::new(SharedRateLimiter::new(Arc::clone(&rate_limiter))))
+        .with_quota_store(Arc::new(SqlSubscriptionQuotaStore::new(pg.clone())))
+        .with_rate_limiter(Arc::clone(&shared_rate_limiter) as Arc<_>)
         .with_circuit_breaker(Arc::clone(&shared_breaker) as Arc<_>)
         .with_idempotency(Arc::clone(&idempotency)),
     );
@@ -305,6 +301,7 @@ pub async fn wire(
             Arc::clone(&settlement),
         )
         .with_circuit_breaker(Arc::clone(&shared_breaker) as Arc<_>)
+        .with_rate_limiter(Arc::clone(&shared_rate_limiter) as Arc<_>)
         .with_catalog(catalog),
     );
 
@@ -328,7 +325,6 @@ pub async fn wire(
     // ------------------------------------------------------------ panel state
     let panel_state = gw_panel::PanelState {
         pg: pg.clone(),
-        redis,
         cfg: Arc::new(config.clone()),
         // Same instance as the Calculator's, so an admin price upsert
         // invalidates the cache the calculator actually reads.
@@ -389,9 +385,35 @@ async fn run_seeds(pg: &Db, config: &Config) {
         ),
         Err(err) => tracing::error!(%err, "failed to seed SDK management records"),
     }
-    match gw_model::seed::ensure_bootstrap_admin(pg, &config.auth.bootstrap_admin_email).await {
+    seed_bootstrap_admin(pg, config).await;
+}
+
+/// Owner bootstrap: `BOOTSTRAP_ADMIN_EMAIL` alone promotes on register, the
+/// email+password pair also seeds the user. A bad pair is logged, never fatal.
+async fn seed_bootstrap_admin(pg: &Db, config: &Config) {
+    let (email, password_hash) = match config.auth.bootstrap_mode() {
+        Ok(BootstrapMode::Disabled) => return,
+        Ok(BootstrapMode::PromoteOnRegister { email }) => (email, None),
+        Ok(BootstrapMode::Seed { email, password }) => {
+            match gw_authcore::hash_password(&password) {
+                Ok(hash) => (email, Some(hash)),
+                Err(err) => {
+                    warn!(%err, "failed to hash bootstrap admin password; continuing startup");
+                    return;
+                }
+            }
+        }
+        Err(err) => {
+            warn!(%err, "invalid bootstrap admin config; continuing startup");
+            return;
+        }
+    };
+    match gw_model::seed::ensure_bootstrap_admin(pg, &email, password_hash.as_deref()).await {
         Ok(BootstrapAdmin::Promoted { user_id }) => {
             info!(user_id, "bootstrap admin promoted")
+        }
+        Ok(BootstrapAdmin::Created { user_id }) => {
+            info!(user_id, "bootstrap admin created")
         }
         Ok(outcome) => info!(?outcome, "bootstrap admin check complete"),
         Err(err) => warn!(%err, "failed to ensure bootstrap admin; continuing startup"),
@@ -438,15 +460,14 @@ fn sdk_seed_config(config: &Config) -> SdkSeedConfig {
 /// # Errors
 /// An unparseable `base_url` is rejected at wiring time rather than on the
 /// first request.
-fn build_providers(sdk: &gw_config::SdkConfig) -> anyhow::Result<Vec<Arc<dyn RoutePlanner>>> {
+fn build_providers(sdk: &gw_config::SdkConfig) -> anyhow::Result<Vec<Arc<dyn Provider>>> {
     let timeout = i64::from(sdk.timeout_seconds);
     let cfg = |p: &gw_config::SdkProviderConfig| ProviderConfig {
         base_url: p.base_url.clone(),
         api_key: p.api_key.clone(),
-        enabled: p.enabled,
     };
 
-    let mut providers: Vec<Arc<dyn RoutePlanner>> = Vec::with_capacity(7);
+    let mut providers: Vec<Arc<dyn Provider>> = Vec::with_capacity(7);
 
     let openai = sdk.openai_provider_config();
     if openai.complete() {
@@ -477,7 +498,6 @@ fn build_providers(sdk: &gw_config::SdkConfig) -> anyhow::Result<Vec<Arc<dyn Rou
     let oauth_only = ProviderConfig {
         base_url: String::new(),
         api_key: String::new(),
-        enabled: true,
     };
     providers.push(Arc::new(
         XaiProvider::new(&oauth_only, timeout).context("building the xAI upstream")?,

@@ -71,7 +71,12 @@ fn malformed_authorization_headers_are_rejected_outright() {
 fn one_prefix_covers_the_whole_metered_surface() {
     // 收敛后只剩一个前缀。`/v1beta` 曾经是 `/v1` 的**兄弟**而不是子路径，
     // 所以它需要自己的一条判据；那个面删掉之后判据也回到一条。
-    for path in ["/v1/chat/completions", "/v1/messages", "/v1/models"] {
+    for path in [
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/models",
+        "/v1/usage",
+    ] {
         assert!(is_proxy_path(path), "{path} escaped the gate");
     }
     for path in ["/v1beta/models", "/v1beta/models/gemini-2.5-pro"] {
@@ -83,11 +88,12 @@ fn one_prefix_covers_the_whole_metered_surface() {
 fn everything_billed_is_authenticated_first() {
     // 单向蕴含，不是等价：计费面**必须**是鉴权面的子集，否则会出现
     // 「计费但匿名」的路由。反向不成立是本轮有意为之 ——
-    // `GET /v1/models` 与 `count_tokens` 鉴权但不计费。
+    // `GET /v1/models`、`GET /v1/usage` 与 `count_tokens` 鉴权但不计费。
     for path in [
         "/v1/messages",
         "/v1/messages/count_tokens",
         "/v1/models",
+        "/v1/usage",
         "/api/panel/user/profile",
         "/healthz",
         "/v1betaX/models",
@@ -106,10 +112,11 @@ fn everything_billed_is_authenticated_first() {
 
 #[test]
 fn the_zero_cost_endpoints_are_authenticated_but_not_billed() {
-    // 移出计费范围的三条：两条 catalogue 读 + count_tokens。
+    // 移出计费范围的端点：catalogue 读、账户查询、count_tokens。
     for (method, path) in [
         (axum::http::Method::GET, "/v1/models"),
         (axum::http::Method::GET, "/v1/models/gpt-4o"),
+        (axum::http::Method::GET, "/v1/usage"),
         (axum::http::Method::POST, "/v1/messages/count_tokens"),
     ] {
         assert!(is_proxy_path(path), "{path} 必须仍然要鉴权");
@@ -353,6 +360,40 @@ async fn a_jwt_for_a_suspended_user_leaks_no_subscription_state() {
     );
 }
 
+#[tokio::test]
+async fn a_revoked_jwt_is_rejected_like_any_other_invalid_credential() {
+    let fixture = fixture();
+    fixture.crypto.with_jwt_version("token-1", 42, 0);
+    fixture
+        .directory
+        .users
+        .lock()
+        .insert(42, "active".to_owned());
+    fixture.directory.token_versions.lock().insert(42, 1);
+
+    assert_eq!(
+        fixture.auth("Bearer token-1").await.unwrap_err(),
+        AuthError::InvalidCredential
+    );
+}
+
+#[tokio::test]
+async fn a_token_version_lookup_outage_denies_rather_than_un_revoking() {
+    let fixture = fixture();
+    fixture.crypto.with_jwt("token-1", 42);
+    fixture
+        .directory
+        .users
+        .lock()
+        .insert(42, "active".to_owned());
+    *fixture.directory.token_version_errors.lock() = true;
+
+    assert_eq!(
+        fixture.auth("Bearer token-1").await.unwrap_err(),
+        AuthError::InvalidCredential
+    );
+}
+
 // ---------------------------------------------------------------- metadata
 
 #[tokio::test]
@@ -377,16 +418,9 @@ async fn an_active_subscription_travels_with_the_principal() {
     let sub = meta.subscription.clone().expect("subscription attached");
     assert_eq!(sub.id, 77);
     assert_eq!(sub.daily_limit_usd, Some(10.0));
-
-    // The map is stringified for the wire; the shape is preserved for logs
-    // and for parity with the legacy implementation.
-    let wire = meta.to_map();
-    assert_eq!(wire.get("user_id").map(String::as_str), Some("42"));
-    assert_eq!(wire.get("subscription_id").map(String::as_str), Some("77"));
-    assert_eq!(wire.get("daily_limit").map(String::as_str), Some("10"));
-    assert!(
-        !wire.contains_key("weekly_limit"),
-        "an unset limit must be absent, not zero — zero means 'no spend allowed'",
+    assert_eq!(
+        sub.weekly_limit_usd, None,
+        "an unset limit must stay absent, not zero — zero means 'no spend allowed'",
     );
 }
 

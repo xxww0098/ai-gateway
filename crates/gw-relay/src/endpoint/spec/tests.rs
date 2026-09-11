@@ -305,7 +305,6 @@ fn accept_cannot_flip_the_decision_but_the_disagreement_is_reported() {
     );
 }
 
-
 /// 生产路径的顶层扫描必须与 serde 对照物逐字段一致。
 ///
 /// 守护的 bug：扫描器漏掉一种合法写法（转义、重复键、空白、三种上限字段），
@@ -364,7 +363,6 @@ fn top_level_scan_agrees_with_serde_on_a_corpus() {
         );
     }
 }
-
 
 /// 顶层数组不是请求对象。serde 会把 `[]` 当成「全是 default 的结构体」
 /// （位置反序列化 + 每个字段都有 `default`），生产路径不跟这个怪癖走：

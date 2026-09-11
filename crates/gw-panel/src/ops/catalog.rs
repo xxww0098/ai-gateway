@@ -24,10 +24,7 @@ use crate::{AdminUser, PanelState, err, ok};
 #[cfg(test)]
 mod tests;
 
-/// 对应 `apiErrorBadRequest`。
-const ERR_BAD_REQUEST: i32 = 4000;
-/// 对应 `apiErrorInternal`。
-const ERR_INTERNAL: i32 = 5000;
+use crate::codes::{BAD_REQUEST as ERR_BAD_REQUEST, INTERNAL as ERR_INTERNAL};
 
 /// `model_id` of the row that carries a channel's models URL instead of a real
 /// model. 对应 `ModelID: "__models_url__"` 这一字面量。

@@ -35,8 +35,8 @@ fn jwt_shaped_tokens_take_the_jwt_path() {
     // A real HS256 token: three base64url segments. Nothing about it may be
     // mistaken for an API key, or a valid JWT would be hashed and looked up in
     // `api_keys` and rejected.
-    let token =
-        gw_authcore::generate_jwt(1, "user@example.test", "secret", 1).expect("token generation");
+    let token = gw_authcore::generate_jwt_with_version(1, "user@example.test", "secret", 1, 0)
+        .expect("token generation");
     assert!(!is_api_key_token(&token));
 }
 
@@ -73,7 +73,14 @@ fn role_normalisation_agrees_with_the_admin_gate() {
     // `AuthUser::is_admin` is declared in the crate root and compares exactly;
     // this module is what feeds it. If either side changes independently, an
     // admin stops being able to reach admin routes — so pin the pairing.
-    for raw in ["admin", "ADMIN", "  Admin  ", "\tadmin\n"] {
+    for raw in [
+        "admin",
+        "ADMIN",
+        "  Admin  ",
+        "\tadmin\n",
+        "super_admin",
+        "SUPER_ADMIN",
+    ] {
         let identity = Identity {
             role: Some(raw.to_owned()),
             ..Identity::default()

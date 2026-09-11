@@ -43,7 +43,9 @@ export default function AlipayPayment({ initialOrderId, onSuccess }: AlipayPayme
   }, [initialOrderId])
 
   const onSuccessRef = useRef(onSuccess)
-  onSuccessRef.current = onSuccess
+  useEffect(() => {
+    onSuccessRef.current = onSuccess
+  })
   const handledOrderRef = useRef<string | null>(null)
 
   useEffect(() => {

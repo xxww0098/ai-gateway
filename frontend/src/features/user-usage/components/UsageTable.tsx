@@ -40,10 +40,10 @@ function fmtDateTime(iso: string): string {
 function StatusPill({ failed }: { failed: boolean }) {
   return (
     <span
-      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${
         failed
-          ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300'
-          : 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-300'
+          ? 'border-red-200/80 bg-red-50 text-red-700 dark:border-red-800/50 dark:bg-red-950/40 dark:text-red-300'
+          : 'border-emerald-200/80 bg-emerald-50 text-emerald-700 dark:border-emerald-800/50 dark:bg-emerald-950/40 dark:text-emerald-300'
       }`}
     >
       <span className={`h-1.5 w-1.5 rounded-full ${failed ? 'bg-red-500' : 'bg-emerald-500'}`} />
@@ -67,24 +67,28 @@ function LogDetailBody({ log }: { log: UsageLog }) {
     <div className="space-y-4 text-sm">
       <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs">
         <div className="text-muted-foreground">模型</div>
-        <div className="font-mono text-right break-all">{log.model}</div>
+        <div className="font-mono text-right break-all font-medium text-foreground">{log.model}</div>
         <div className="text-muted-foreground">Key</div>
-        <div className="text-right truncate">{log.api_key_name || '-'}</div>
+        <div className="text-right truncate text-foreground">{log.api_key_name || '-'}</div>
         <div className="text-muted-foreground">类型</div>
-        <div className="text-right">{log.stream ? 'Stream' : 'Sync'}</div>
+        <div className="text-right">
+          <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold ${log.stream ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300' : 'bg-muted text-muted-foreground'}`}>
+            {log.stream ? 'Stream' : 'Sync'}
+          </span>
+        </div>
         <div className="text-muted-foreground">耗时</div>
-        <div className="text-right tabular-nums">{fmtDuration(log.duration_ms)}</div>
+        <div className="text-right tabular-nums text-foreground">{fmtDuration(log.duration_ms)}</div>
         <div className="text-muted-foreground">时间</div>
-        <div className="text-right tabular-nums">{fmtDateTime(log.created_at)}</div>
+        <div className="text-right tabular-nums text-muted-foreground">{fmtDateTime(log.created_at)}</div>
         <div className="text-muted-foreground">状态</div>
         <div className="text-right"><StatusPill failed={log.failed} /></div>
         <div className="self-center text-muted-foreground">请求 ID</div>
         <div className="flex min-w-0 items-center justify-end gap-2">
-          <code className="truncate font-mono text-[11px]" title={log.request_id}>{log.request_id}</code>
+          <code className="truncate font-mono text-[11px] text-muted-foreground" title={log.request_id}>{log.request_id}</code>
           <button
             type="button"
             onClick={() => void copyRequestId()}
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-border text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-border text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             aria-label={copied ? '请求 ID 已复制' : '复制请求 ID'}
           >
             {copied ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
@@ -92,55 +96,61 @@ function LogDetailBody({ log }: { log: UsageLog }) {
         </div>
       </div>
 
-      <div className="rounded-lg border border-border p-3 space-y-2">
-        <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Tokens</div>
-        <div className="flex justify-between gap-4">
-          <span className="text-muted-foreground">输入</span>
-          <span className="tabular-nums font-medium">{log.input_tokens.toLocaleString()}</span>
+      <div className="rounded-lg border border-border bg-card/40 p-3 space-y-2">
+        <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-teal-700 dark:text-teal-300">
+          <span className="h-1.5 w-1.5 rounded-full bg-teal-500" />
+          Tokens
         </div>
-        <div className="flex justify-between gap-4">
+        <div className="flex justify-between gap-4 text-xs">
+          <span className="text-muted-foreground">输入</span>
+          <span className="tabular-nums font-medium text-foreground">{log.input_tokens.toLocaleString()}</span>
+        </div>
+        <div className="flex justify-between gap-4 text-xs">
           <span className="text-muted-foreground">输出</span>
-          <span className="tabular-nums font-medium">{log.output_tokens.toLocaleString()}</span>
+          <span className="tabular-nums font-medium text-foreground">{log.output_tokens.toLocaleString()}</span>
         </div>
         {log.cached_tokens > 0 && (
-          <div className="flex justify-between gap-4">
+          <div className="flex justify-between gap-4 text-xs">
             <span className="text-muted-foreground">缓存</span>
-            <span className="tabular-nums">{fmtTokens(log.cached_tokens)}</span>
+            <span className="tabular-nums text-teal-700 dark:text-teal-300 font-medium">{fmtTokens(log.cached_tokens)}</span>
           </div>
         )}
         {log.reasoning_tokens > 0 && (
-          <div className="flex justify-between gap-4">
+          <div className="flex justify-between gap-4 text-xs">
             <span className="text-muted-foreground">推理</span>
-            <span className="tabular-nums">{fmtTokens(log.reasoning_tokens)}</span>
+            <span className="tabular-nums text-indigo-700 dark:text-indigo-300 font-medium">{fmtTokens(log.reasoning_tokens)}</span>
           </div>
         )}
       </div>
 
-      <div className="rounded-lg border border-border p-3 space-y-2">
-        <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">费用</div>
+      <div className="rounded-lg border border-border bg-card/40 p-3 space-y-2">
+        <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-[#716dff] dark:text-[#a09dff]">
+          <span className="h-1.5 w-1.5 rounded-full bg-[#716dff]" />
+          费用
+        </div>
         {log.input_cost > 0 && (
-          <div className="flex justify-between gap-4">
+          <div className="flex justify-between gap-4 text-xs">
             <span className="text-muted-foreground">输入</span>
-            <span className="tabular-nums">{fmtCost(log.input_cost)}</span>
+            <span className="tabular-nums text-foreground">{fmtCost(log.input_cost)}</span>
           </div>
         )}
         {log.output_cost > 0 && (
-          <div className="flex justify-between gap-4">
+          <div className="flex justify-between gap-4 text-xs">
             <span className="text-muted-foreground">输出</span>
-            <span className="tabular-nums">{fmtCost(log.output_cost)}</span>
+            <span className="tabular-nums text-foreground">{fmtCost(log.output_cost)}</span>
           </div>
         )}
-        <div className="flex justify-between gap-4">
+        <div className="flex justify-between gap-4 text-xs">
           <span className="text-muted-foreground">倍率</span>
-          <span className="tabular-nums font-medium">{log.rate_multiplier}x</span>
+          <span className="tabular-nums font-medium text-foreground">{log.rate_multiplier}x</span>
         </div>
-        <div className="flex justify-between gap-4">
+        <div className="flex justify-between gap-4 text-xs">
           <span className="text-muted-foreground">标准费用</span>
-          <span className="tabular-nums">{fmtCost(log.total_cost)}</span>
+          <span className="tabular-nums text-foreground">{fmtCost(log.total_cost)}</span>
         </div>
-        <div className="flex justify-between gap-4 border-t border-border pt-2">
-          <span className="font-medium">实际扣费</span>
-          <span className="tabular-nums font-bold">{fmtCost(log.actual_cost)}</span>
+        <div className="flex justify-between gap-4 border-t border-border pt-2 text-xs rounded-md bg-[#716dff]/5 dark:bg-[#716dff]/10 p-2">
+          <span className="font-semibold text-foreground">实际扣费</span>
+          <span className="tabular-nums font-bold text-[#716dff] dark:text-[#a09dff] text-sm">{fmtCost(log.actual_cost)}</span>
         </div>
       </div>
     </div>
@@ -229,7 +239,8 @@ export const UsageTable = memo(function UsageTable({
   return (
     <>
       {/* Mobile cards */}
-      <div className="md:hidden space-y-3">
+      <div className="space-y-3 md:hidden">
+        <h2 className="text-sm font-bold text-foreground">请求明细</h2>
         {loading ? (
           <div className="rounded-xl border border-border bg-card flex h-32 items-center justify-center gap-2 text-muted-foreground text-sm">
             <RefreshCw className="w-4 h-4 animate-spin text-primary" />
@@ -241,7 +252,7 @@ export const UsageTable = memo(function UsageTable({
             size="compact"
             tone="no-results"
             icon={FileText}
-            title="当前筛选条件下暂无调用记录"
+            title="没有匹配的调用记录"
             description="请尝试调整时间范围或清除筛选条件。每次成功请求都会在此记录 Token 消耗与扣费明细。"
           />
         ) : (
@@ -288,8 +299,12 @@ export const UsageTable = memo(function UsageTable({
       </div>
 
       {/* Desktop table */}
-      <div className="rounded-xl border border-border bg-card overflow-hidden hidden md:block">
-        <div className="overflow-x-auto">
+      <div className="usage-panel hidden overflow-hidden md:block">
+        <div className="flex min-h-[58px] items-center justify-between px-4">
+          <h2 className="text-sm font-bold text-foreground">请求明细</h2>
+          <p className="text-[11px] text-muted-foreground">倒序 · 点一行看完整字段</p>
+        </div>
+        <div className="overflow-x-auto border-t border-border">
           <table className="table">
             <thead>
               <tr>
@@ -317,7 +332,7 @@ export const UsageTable = memo(function UsageTable({
                   colSpan={7}
                   tone="no-results"
                   icon={FileText}
-                  title="当前筛选条件下暂无调用记录"
+                  title="没有匹配的调用记录"
                   description="请尝试调整时间范围或清除筛选条件。每次成功请求都会在此记录 Token 消耗与扣费明细。"
                 />
               ) : (

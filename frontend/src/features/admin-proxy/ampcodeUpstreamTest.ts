@@ -5,6 +5,7 @@ type AmpcodeUpstreamTestStatus = 'connected' | 'reachable' | 'failed'
 export interface AmpcodeUpstreamTestInput {
   upstreamUrl: string
   upstreamApiKey: string
+  allowFallback?: boolean
 }
 
 export interface AmpcodeUpstreamTestResult {
@@ -15,6 +16,9 @@ export interface AmpcodeUpstreamTestResult {
   statusCode?: number
   elapsedMs?: number
   bodyPreview?: string
+  headersPreview?: Record<string, string>
+  diagnosticStep?: string
+  isLatencyHealthy?: boolean
 }
 
 export type AmpcodeApiCall = (payload: ApiCallRequest) => Promise<ApiCallResult>
@@ -25,6 +29,7 @@ interface EndpointAttempt {
   elapsedMs?: number
   statusCode?: number
   bodyPreview?: string
+  headersPreview?: Record<string, string>
   error?: string
 }
 
@@ -73,6 +78,16 @@ export function buildAmpcodeControlPlaneEndpoints(upstreamUrl: string): string[]
   ]
 }
 
+export function buildAmpcodeFallbackEndpoints(upstreamUrl: string): string[] {
+  const base = normalizeAmpcodeGatewayBase(upstreamUrl)
+  if (!base) return []
+
+  return [
+    joinUrl(base, '/v1/models'),
+    joinUrl(base, '/models'),
+  ]
+}
+
 function bodyToText(result: ApiCallResult): string {
   if (result.bodyText) return result.bodyText
   if (result.body === null || result.body === undefined) return ''
@@ -114,12 +129,23 @@ async function probeEndpoint(
     const elapsedMs = Date.now() - startedAt
     const ok = result.statusCode >= 200 && result.statusCode < 400
 
+    const rawHeaders = result.header || {}
+    const headersPreview: Record<string, string> = {}
+    for (const [key, value] of Object.entries(rawHeaders)) {
+      if (value !== undefined && value !== null) {
+        headersPreview[key.toLowerCase()] = Array.isArray(value)
+          ? value.join(', ')
+          : String(value)
+      }
+    }
+
     return {
       endpoint,
       ok,
       elapsedMs,
       statusCode: result.statusCode,
       bodyPreview: createPreview(result, apiKey),
+      headersPreview: Object.keys(headersPreview).length > 0 ? headersPreview : undefined,
     }
   } catch (error) {
     return {
@@ -141,7 +167,11 @@ function resultFromAttempt(
   status: AmpcodeUpstreamTestStatus,
   message: string,
   attempt: EndpointAttempt,
+  diagnosticStep?: string,
 ): AmpcodeUpstreamTestResult {
+  const isLatencyHealthy =
+    typeof attempt.elapsedMs === 'number' ? attempt.elapsedMs < 1000 : undefined
+
   return {
     status,
     message,
@@ -150,6 +180,9 @@ function resultFromAttempt(
     statusCode: attempt.statusCode,
     elapsedMs: attempt.elapsedMs,
     bodyPreview: attempt.bodyPreview || attempt.error,
+    headersPreview: attempt.headersPreview,
+    diagnosticStep,
+    isLatencyHealthy,
   }
 }
 
@@ -167,6 +200,7 @@ export async function testAmpcodeUpstream(
       message: '请输入上游地址',
       endpoint: '',
       checkedAt,
+      diagnosticStep: 'validate_url',
     }
   }
 
@@ -176,6 +210,7 @@ export async function testAmpcodeUpstream(
       message: '上游地址必须以 http:// 或 https:// 开头',
       endpoint: upstreamUrl,
       checkedAt,
+      diagnosticStep: 'validate_url',
     }
   }
 
@@ -191,7 +226,7 @@ export async function testAmpcodeUpstream(
     attempts.push(attempt)
 
     if (attempt.ok) {
-      return resultFromAttempt('connected', '连接成功，Amp control-plane 已响应', attempt)
+      return resultFromAttempt('connected', '连接成功，Amp control-plane 已响应', attempt, 'control_plane_probe')
     }
 
     if (attempt.statusCode === 401 || attempt.statusCode === 403) {
@@ -199,6 +234,7 @@ export async function testAmpcodeUpstream(
         'failed',
         `上游已响应，但认证失败或访问被拒绝：${attemptSummary(attempt)}`,
         attempt,
+        'control_plane_auth',
       )
     }
 
@@ -207,7 +243,43 @@ export async function testAmpcodeUpstream(
         'reachable',
         `上游网络可达，但 Amp control-plane 未确认可用：${attemptSummary(attempt)}`,
         attempt,
+        'control_plane_probe',
       )
+    }
+  }
+
+  const allControlPlane404 = attempts.length > 0 && attempts.every(a => a.statusCode === 404)
+  if (allControlPlane404 && input.allowFallback !== false) {
+    for (const endpoint of buildAmpcodeFallbackEndpoints(upstreamUrl)) {
+      const attempt = await probeEndpoint(request, endpoint, headers, upstreamApiKey)
+      attempts.push(attempt)
+
+      if (attempt.ok) {
+        return resultFromAttempt(
+          'connected',
+          '连接成功，上游模型接口已响应',
+          attempt,
+          'models_fallback_probe',
+        )
+      }
+
+      if (attempt.statusCode === 401 || attempt.statusCode === 403) {
+        return resultFromAttempt(
+          'failed',
+          `上游已响应，但认证失败或访问被拒绝：${attemptSummary(attempt)}`,
+          attempt,
+          'models_fallback_auth',
+        )
+      }
+
+      if (attempt.statusCode && attempt.statusCode !== 404) {
+        return resultFromAttempt(
+          'reachable',
+          `上游网络可达，但模型接口未确认可用：${attemptSummary(attempt)}`,
+          attempt,
+          'models_fallback_probe',
+        )
+      }
     }
   }
 
@@ -220,5 +292,7 @@ export async function testAmpcodeUpstream(
       ok: false,
       error: '请求未完成',
     },
+    'probe_failed',
   )
 }
+

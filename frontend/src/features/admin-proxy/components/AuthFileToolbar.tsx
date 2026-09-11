@@ -38,7 +38,7 @@ export function AuthFileToolbar({
   const smartViews: SmartViewDef[] = [
     { id: 'all', label: '全部', count: counts.all, color: '' },
     { id: 'healthy', label: '路由中', count: counts.healthy, color: 'text-emerald-600' },
-    { id: 'warning', label: '异常', count: counts.warning, color: 'text-amber-600' },
+    { id: 'warning', label: '异常', count: counts.warning, color: 'text-amber-700 dark:text-amber-400' },
     { id: 'disabled', label: '已停用', count: counts.disabled, color: 'text-gray-500' },
   ]
 

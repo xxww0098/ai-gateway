@@ -22,7 +22,6 @@ fn provider(base_url: &str, api_key: &str) -> ClaudeProvider {
         &ProviderConfig {
             base_url: base_url.to_owned(),
             api_key: api_key.to_owned(),
-            enabled: true,
         },
         0,
     )
@@ -30,7 +29,7 @@ fn provider(base_url: &str, api_key: &str) -> ClaudeProvider {
 }
 
 fn endpoint(base_url: &str) -> Url {
-    ClaudeProvider::messages_endpoint(None, &[], base_url).expect("endpoint")
+    ClaudeProvider::messages_endpoint(&[], base_url).expect("endpoint")
 }
 
 // --- count_tokens（根除伪造值，`docs/relay-surface-plan.md` §2.1 缺陷 ①）--------
@@ -46,8 +45,8 @@ fn the_count_tokens_endpoint_hangs_off_the_messages_endpoint() {
         "https://relay.example.com/v1",
         "https://relay.example.com/v1/messages",
     ] {
-        let messages = ClaudeProvider::messages_endpoint(None, &[], base).expect("messages");
-        let counting = ClaudeProvider::count_tokens_endpoint(None, &[], base).expect("count");
+        let messages = ClaudeProvider::messages_endpoint(&[], base).expect("messages");
+        let counting = ClaudeProvider::count_tokens_endpoint(&[], base).expect("count");
         assert_eq!(
             counting.origin(),
             messages.origin(),
@@ -66,13 +65,35 @@ fn the_count_tokens_endpoint_hangs_off_the_messages_endpoint() {
 #[test]
 fn caller_query_parameters_reach_the_count_tokens_endpoint() {
     let query = vec![("beta".to_owned(), "1".to_owned())];
-    let url = ClaudeProvider::count_tokens_endpoint(None, &query, "https://relay.example.com")
+    let url = ClaudeProvider::count_tokens_endpoint(&query, "https://relay.example.com")
         .expect("endpoint");
     let pairs: Vec<(String, String)> = url
         .query_pairs()
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect();
     assert_eq!(pairs, query);
+}
+
+/// 上游给不出数就**报错**，绝不回落到估算 —— 回落等于把伪造值请回来，
+/// 而调用方无从分辨真假。
+#[test]
+fn a_count_response_without_a_usable_number_is_an_error_not_an_estimate() {
+    let counted = parse_count_tokens(br#"{"input_tokens":123}"#).expect("well-formed response");
+    assert_eq!(counted, 123);
+
+    for broken in [
+        &b""[..],
+        b"not json",
+        br#"{}"#,
+        br#"{"input_tokens":"twelve"}"#,
+        br#"{"tokens":12}"#,
+    ] {
+        assert!(
+            parse_count_tokens(broken).is_err(),
+            "{} 应当报错而不是编一个数",
+            String::from_utf8_lossy(broken)
+        );
+    }
 }
 
 // --- endpoint ---------------------------------------------------------------
@@ -104,7 +125,6 @@ fn trailing_slashes_and_padding_do_not_change_the_endpoint() {
 #[test]
 fn caller_query_parameters_reach_the_endpoint_in_order() {
     let url = ClaudeProvider::messages_endpoint(
-        None,
         &[
             ("beta".to_owned(), "first".to_owned()),
             ("beta".to_owned(), "second".to_owned()),
@@ -128,9 +148,9 @@ fn caller_query_parameters_reach_the_endpoint_in_order() {
 
 #[test]
 fn a_base_url_without_a_host_is_rejected() {
-    assert!(ClaudeProvider::messages_endpoint(None, &[], "not-a-url").is_err());
+    assert!(ClaudeProvider::messages_endpoint(&[], "not-a-url").is_err());
     assert!(
-        ClaudeProvider::messages_endpoint(None, &[], "https://").is_err(),
+        ClaudeProvider::messages_endpoint(&[], "https://").is_err(),
         "a hostless URL must not re-parse with a path segment as the host"
     );
     assert!(
@@ -138,7 +158,6 @@ fn a_base_url_without_a_host_is_rejected() {
             &ProviderConfig {
                 base_url: "not-a-url".to_owned(),
                 api_key: String::new(),
-                enabled: true,
             },
             0
         )
@@ -278,39 +297,25 @@ fn token_data_encoded_as_a_json_string_is_still_readable() {
 // --- headers ----------------------------------------------------------------
 
 /// An inbound `x-api-key` belongs to the client leg and must never reach
-/// Anthropic. The planner does not stamp one at all — the credential rides on
-/// [`RoutePlan::credential`], and `gw-relay` strips the client's carrier
-/// before setting it.
+/// Anthropic.
 #[test]
-fn the_plan_carries_the_credential_as_a_credential_not_as_a_header() {
-    let provider = provider("https://api.anthropic.com", "sk-config");
+fn the_resolved_credential_replaces_any_caller_supplied_key() {
     let mut headers = HeaderMap::new();
     headers.insert("x-api-key", HeaderValue::from_static("caller-key"));
-    let req = ProviderRequest {
-        headers,
-        ..Default::default()
-    };
-    let plan = provider
-        .plan_messages(
-            &req,
-            &ClaudeCredential {
-                value: "real-key".to_owned(),
-                source: CredentialSource::ApiKey,
-            },
-            "https://api.anthropic.com",
-        )
-        .expect("plans");
-
-    assert!(
-        !plan.headers.contains_key("x-api-key"),
-        "the credential must not be planned as a plain header"
-    );
-    assert!(matches!(&plan.credential, gw_relay::Credential::XApiKey(k) if k == "real-key"));
+    ClaudeProvider::inject_credential_headers(
+        &mut headers,
+        &ClaudeCredential {
+            value: "real-key".to_owned(),
+            source: CredentialSource::ApiKey,
+        },
+    )
+    .expect("inject");
+    assert_eq!(headers["x-api-key"], "real-key");
+    assert_eq!(headers.get_all("x-api-key").iter().count(), 1);
 }
 
 #[test]
 fn a_caller_supplied_api_version_survives_but_a_missing_one_is_filled_in() {
-    let provider = provider("https://api.anthropic.com", "sk-config");
     let credential = ClaudeCredential {
         value: "k".to_owned(),
         source: CredentialSource::ApiKey,
@@ -318,205 +323,82 @@ fn a_caller_supplied_api_version_survives_but_a_missing_one_is_filled_in() {
 
     let mut pinned = HeaderMap::new();
     pinned.insert("anthropic-version", HeaderValue::from_static("1999-01-01"));
-    let plan = provider
-        .plan_messages(
-            &ProviderRequest {
-                headers: pinned,
-                ..Default::default()
-            },
-            &credential,
-            "https://api.anthropic.com",
-        )
-        .expect("plans");
-    assert!(
-        !plan.headers.contains_key("anthropic-version"),
-        "a pinned version is left alone so the relay forwards the client's own"
-    );
+    ClaudeProvider::inject_credential_headers(&mut pinned, &credential).expect("inject");
+    assert_eq!(pinned["anthropic-version"], "1999-01-01");
 
-    let plan = provider
-        .plan_messages(
-            &ProviderRequest::default(),
-            &credential,
-            "https://api.anthropic.com",
-        )
-        .expect("plans");
-    assert!(plan.headers.contains_key("anthropic-version"));
+    let mut bare = HeaderMap::new();
+    ClaudeProvider::inject_credential_headers(&mut bare, &credential).expect("inject");
+    assert!(bare.contains_key("anthropic-version"));
 }
 
 #[test]
-fn oauth_tokens_would_be_bearer_but_are_not_sent_over_rustls() {
-    let provider = provider("https://api.anthropic.com", "sk-config");
-    let err = provider
-        .plan_messages(
-            &ProviderRequest::default(),
-            &ClaudeCredential {
-                value: "oat".to_owned(),
-                source: CredentialSource::OauthToken,
-            },
-            "https://api.anthropic.com",
-        )
-        .expect_err("OAuth inference must fail closed without Chrome TLS");
-    let dump = err.to_string();
-    assert!(
-        dump.contains("rustls") && dump.contains("refused"),
-        "{dump}"
-    );
-
-    let key = provider
-        .plan_messages(
-            &ProviderRequest::default(),
-            &ClaudeCredential {
-                value: "sk".to_owned(),
-                source: CredentialSource::ApiKey,
-            },
-            "https://api.anthropic.com",
-        )
-        .expect("plans");
-    assert!(matches!(&key.credential, gw_relay::Credential::XApiKey(k) if k == "sk"));
-}
-
-/// Prompt-cache and OAuth are separate Anthropic betas. An API-key plan must
-/// not claim the OAuth beta (that header is rejected on console keys).
-#[test]
-fn beta_features_follow_the_credential_source() {
-    let provider = provider("https://api.anthropic.com", "sk-config");
-    fingerprint::assert_oauth_http_fingerprint(&fingerprint::probe_headers());
-
-    let key = provider
-        .plan_messages(
-            &ProviderRequest::default(),
-            &ClaudeCredential {
-                value: "sk".to_owned(),
-                source: CredentialSource::ApiKey,
-            },
-            "https://api.anthropic.com",
-        )
-        .expect("plans");
-    let key_beta = key
-        .headers
-        .get("anthropic-beta")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(key_beta.contains("prompt-caching"), "{key_beta}");
-    assert!(!key_beta.contains("oauth"), "{key_beta}");
-    assert!(!key.headers.contains_key(http::header::USER_AGENT));
-}
-
-/// Cloak still builds a CC-shaped body; the planner must not hand that
-/// body to `gw-relay` while TLS is rustls.
-#[test]
-fn oauth_messages_are_cloaked_and_then_refused() {
-    let provider = provider("https://api.anthropic.com", "sk-config");
-    let payload = serde_json::json!({
-        "system": "stable prefix",
-        "messages": [{"role": "user", "content": "hey"}]
-    })
-    .to_string();
-    let req = ProviderRequest {
-        payload: bytes::Bytes::from(payload.clone()),
-        ..Default::default()
-    };
+fn a_credential_that_cannot_be_a_header_value_is_reported_not_panicked() {
     let mut headers = HeaderMap::new();
-    let cloaked = fingerprint::cloak(&req, &mut headers).expect("cloak");
-    let value: serde_json::Value = serde_json::from_slice(&cloaked).expect("json");
-    let first = value["system"][0]["text"].as_str().unwrap_or("");
-    assert!(
-        first.starts_with("x-anthropic-billing-header:"),
-        "cloak skipped the billing block: {first}"
-    );
-    assert!(value["system"][0].get("cache_control").is_none());
-
-    let err = provider
-        .plan_messages(
-            &req,
-            &ClaudeCredential {
-                value: "oat".to_owned(),
-                source: CredentialSource::OauthToken,
-            },
-            "https://api.anthropic.com",
-        )
-        .expect_err("must not send the cloaked body over rustls");
-    assert!(err.to_string().contains("refused"), "{err}");
-
-    let key = provider
-        .plan_messages(
-            &ProviderRequest {
-                payload: bytes::Bytes::from(payload),
-                ..Default::default()
-            },
-            &ClaudeCredential {
-                value: "sk".to_owned(),
-                source: CredentialSource::ApiKey,
-            },
-            "https://api.anthropic.com",
-        )
-        .expect("plans");
-    if let Some(body) = key.body {
-        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
-        let first = value["system"][0]["text"].as_str().unwrap_or("");
-        assert!(
-            !first.starts_with("x-anthropic-billing-header:"),
-            "console keys must not wear the Claude Code billing cloak"
-        );
-    }
+    let err = ClaudeProvider::inject_credential_headers(
+        &mut headers,
+        &ClaudeCredential {
+            value: "bad\nvalue".to_owned(),
+            source: CredentialSource::ApiKey,
+        },
+    )
+    .expect_err("rejected");
+    assert!(matches!(err, ProviderError::Credential(_)));
 }
 
 #[test]
-fn a_caller_supplied_beta_list_is_left_alone() {
-    let provider = provider("https://api.anthropic.com", "sk-config");
+fn streaming_pins_accept_but_a_plain_request_keeps_the_callers_choice() {
+    let mut streamed = HeaderMap::new();
+    streamed.insert(http::header::ACCEPT, HeaderValue::from_static("text/plain"));
+    default_content_negotiation(&mut streamed, true);
+    assert_eq!(streamed[http::header::ACCEPT], "text/event-stream");
+
+    let mut plain = HeaderMap::new();
+    plain.insert(http::header::ACCEPT, HeaderValue::from_static("text/plain"));
+    default_content_negotiation(&mut plain, false);
+    assert_eq!(plain[http::header::ACCEPT], "text/plain");
+
+    let mut bare = HeaderMap::new();
+    default_content_negotiation(&mut bare, false);
+    assert!(bare.contains_key(http::header::ACCEPT));
+    assert!(bare.contains_key(http::header::CONTENT_TYPE));
+}
+
+#[test]
+fn outbound_accept_encoding_is_identity_even_when_the_caller_asked_for_gzip() {
     let mut headers = HeaderMap::new();
-    headers.insert("anthropic-beta", HeaderValue::from_static("custom-beta"));
-    let plan = provider
-        .plan_messages(
-            &ProviderRequest {
-                headers,
-                ..Default::default()
-            },
-            &ClaudeCredential {
-                value: "sk".to_owned(),
-                source: CredentialSource::ApiKey,
-            },
-            "https://api.anthropic.com",
-        )
-        .expect("plans");
-    assert!(!plan.headers.contains_key("anthropic-beta"));
-}
-
-/// A body that already opted into cache_control is forwarded untouched.
-#[test]
-fn existing_cache_control_is_not_rewritten() {
-    let original =
-        br#"{"system":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}"#;
-    assert!(inject_prompt_cache_breakpoints(original).is_none());
-}
-
-/// A string system prompt becomes a breakpointed block so subsequent turns
-/// share a prefix. The property is "a cache_control object appears", not a
-/// particular Anthropic date string.
-#[test]
-fn a_string_system_prompt_gains_a_cache_breakpoint() {
-    let rewritten =
-        inject_prompt_cache_breakpoints(br#"{"system":"stable prefix","tools":[{"name":"x"}]}"#)
-            .expect("rewritten");
-    let value: serde_json::Value = serde_json::from_slice(&rewritten).expect("json");
-    assert!(json_contains_key(&value, "cache_control"));
-    assert_eq!(value["system"][0]["text"], "stable prefix");
+    headers.insert(
+        http::header::ACCEPT_ENCODING,
+        HeaderValue::from_static("gzip, deflate, br"),
+    );
+    default_content_negotiation(&mut headers, false);
+    assert_eq!(headers[http::header::ACCEPT_ENCODING], "identity");
 }
 
 #[test]
-fn a_blank_credential_is_refused_before_anything_is_planned() {
-    let provider = provider("https://api.anthropic.com", "sk-config");
-    let err = provider
-        .plan_messages(
-            &ProviderRequest::default(),
-            &ClaudeCredential {
-                value: String::new(),
-                source: CredentialSource::ApiKey,
-            },
-            "https://api.anthropic.com",
-        )
-        .expect_err("a keyless account must not produce a plan");
-    assert!(matches!(err, ProviderError::Credential(_)), "{err:?}");
+fn hop_by_hop_and_authorization_headers_never_reach_the_upstream() {
+    let mut src = HeaderMap::new();
+    src.insert(
+        http::header::AUTHORIZATION,
+        HeaderValue::from_static("Bearer leak"),
+    );
+    src.insert(
+        http::header::HOST,
+        HeaderValue::from_static("inbound.example"),
+    );
+    src.insert("anthropic-beta", HeaderValue::from_static("tools-2024"));
+    src.insert("x-api-key", HeaderValue::from_static("caller-key"));
+    src.insert("x-goog-api-key", HeaderValue::from_static("goog-key"));
+
+    let mut dst = HeaderMap::new();
+    copy_outbound_headers(&mut dst, &src);
+    assert!(!dst.contains_key(http::header::AUTHORIZATION));
+    assert!(!dst.contains_key(http::header::HOST));
+    assert!(
+        !dst.contains_key("x-api-key"),
+        "the client's credential carrier is a different trust domain",
+    );
+    assert!(!dst.contains_key("x-goog-api-key"));
+    assert_eq!(dst["anthropic-beta"], "tools-2024");
 }
 
 // --- stream usage -----------------------------------------------------------
@@ -634,6 +516,18 @@ fn setting_a_query_key_drops_every_earlier_value_for_it() {
     );
 }
 
+#[test]
+fn an_upstream_failure_carries_the_status_and_the_whole_body() {
+    let err = upstream_error(429, br#"{"error":{"type":"rate_limit_error"}}"#);
+    match err {
+        ProviderError::Upstream { status, body } => {
+            assert_eq!(status, 429);
+            assert!(body.contains("rate_limit_error"));
+        }
+        other => panic!("expected an upstream error, got {other}"),
+    }
+}
+
 /// [`ClaudeCredential`] 的 `Debug` 不许带出解析出来的活密钥。
 ///
 /// 这个类型存在的理由就是「密钥 + 它来自哪一级」，于是任何一句
@@ -653,7 +547,7 @@ fn claude_credential_debug_never_carries_the_live_secret() {
         let dump = format!("{cred:?}");
         assert!(!dump.contains(LIVE), "凭证的 Debug 打出了活密钥：{dump}");
         assert!(
-            dump.contains(source.as_str()) || dump.contains(&format!("{source:?}")),
+            dump.contains(&format!("{source:?}")),
             "来源是排错要看的那一半，不该跟着被抹掉：{dump}"
         );
     }

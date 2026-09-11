@@ -23,7 +23,9 @@ export default function WechatPaySection({ onSuccess }: WechatPaySectionProps) {
   const status = statusQuery.data?.status ?? null
 
   const onSuccessRef = useRef(onSuccess)
-  onSuccessRef.current = onSuccess
+  useEffect(() => {
+    onSuccessRef.current = onSuccess
+  })
   const handledOrderRef = useRef<string | null>(null)
 
   useEffect(() => {

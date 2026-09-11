@@ -146,17 +146,11 @@ export function useBatchToggleAuthFiles() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: async ({ files, disabled }: { files: AuthFileItem[]; disabled: boolean }) => {
-      let successCount = 0
-      let failCount = 0
-      for (const file of files) {
-        try {
-          await toggleAuthFileStatus(file.name, disabled)
-          successCount++
-        } catch (e) {
-          console.error(`Failed to update ${file.name}`, e)
-          failCount++
-        }
-      }
+      const results = await Promise.allSettled(
+        files.map(file => toggleAuthFileStatus(file.name, disabled)),
+      )
+      const successCount = results.filter(r => r.status === 'fulfilled').length
+      const failCount = results.filter(r => r.status === 'rejected').length
       return { successCount, failCount, disabled }
     },
     onSuccess: ({ successCount, failCount, disabled }) => {
@@ -179,17 +173,9 @@ export function useBatchDeleteAuthFiles() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: async (names: string[]) => {
-      let successCount = 0
-      let failCount = 0
-      for (const name of names) {
-        try {
-          await deleteAuthFile(name)
-          successCount++
-        } catch (e) {
-          console.error(`Failed to delete ${name}`, e)
-          failCount++
-        }
-      }
+      const results = await Promise.allSettled(names.map(name => deleteAuthFile(name)))
+      const successCount = results.filter(r => r.status === 'fulfilled').length
+      const failCount = results.filter(r => r.status === 'rejected').length
       return { successCount, failCount }
     },
     onSuccess: ({ successCount, failCount }) => {

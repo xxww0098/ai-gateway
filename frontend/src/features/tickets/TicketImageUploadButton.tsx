@@ -1,10 +1,9 @@
 import { useRef, useState } from "react"
 import { ImagePlus, Loader2 } from "lucide-react"
 import { Button } from "@/shared/components/ui/button"
-import { fetchApiFormData } from "@/shared/api/client"
 import { toast } from "sonner"
 
-const maxBytes = 4 * 1024 * 1024
+import { uploadTicketImageFile } from "./api"
 
 export type TicketImageUploadButtonProps = {
   onInsert: (markdown: string) => void
@@ -23,24 +22,9 @@ export function TicketImageUploadButton({ onInsert, disabled, compact }: TicketI
     const file = e.target.files?.[0]
     e.target.value = ""
     if (!file) return
-    if (!file.type.startsWith("image/")) {
-      toast.error("请选择图片文件")
-      return
-    }
-    if (file.size > maxBytes) {
-      toast.error("图片不能超过 4MB")
-      return
-    }
-    const fd = new FormData()
-    fd.append("image", file)
     setBusy(true)
     try {
-      const res = (await fetchApiFormData("/user/ticket-images", fd)) as {
-        data?: { markdown?: string }
-      }
-      const data = res?.data
-      const md = typeof data?.markdown === "string" ? data.markdown : ""
-      if (!md) throw new Error("上传失败")
+      const md = await uploadTicketImageFile(file)
       onInsert(md)
       toast.success("图片已插入")
     } catch (err) {

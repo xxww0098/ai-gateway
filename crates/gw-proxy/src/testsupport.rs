@@ -18,6 +18,7 @@ mod upstream;
 
 pub(crate) use billing::{
     FakeCalculator, FakeLedger, FakeQuotaStore, FakeScanner, FakeUsageStore, LedgerCall,
+    fold_model_usage,
 };
 pub(crate) use harness::{
     Harness, TEST_API_KEY, TEST_USER_ID, anonymous_request, chat_body, send, send_settled,
@@ -29,5 +30,5 @@ pub(crate) use infra::{
 };
 pub(crate) use pg::{fresh_db, seed_user};
 pub(crate) use upstream::{
-    CannedResponse, FakeAuthStore, FakeCatalog, FakePlanner, FakeTransport, auth_record,
+    FakeAuthStore, FakeCatalog, FakeProvider, auth_record, ok_response, ok_response_without_usage,
 };

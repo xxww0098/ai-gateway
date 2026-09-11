@@ -130,7 +130,7 @@ export function AdminSubscriptionGroupDialog({
 
           <div className="flex justify-end gap-2 pt-4">
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-            <Button type="submit" disabled={savingGroup} className="bg-amber-600 hover:bg-amber-700 text-white">
+            <Button type="submit" disabled={savingGroup} className="bg-amber-700 hover:bg-amber-800 text-white">
               {savingGroup ? "保存中..." : editingGroupId ? "更新套餐" : "创建套餐"}
             </Button>
           </div>

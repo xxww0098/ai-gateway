@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { fetchApi, isAbortError, createApiClient, ApiError, apiClient, sdkClient } from '@/shared/api/client'
-import { extractErrorMessage, errorMessage } from '@/shared/api/errors'
+import { extractErrorMessage, errorMessage, httpFallbackMessage, GATEWAY_UNREACHABLE } from '@/shared/api/errors'
 import { unwrapResponse } from '@/shared/api/unwrap'
 import { useAuthStore } from '@/features/auth/auth_store'
 
@@ -261,6 +261,40 @@ describe('createApiClient', () => {
     expect(logoutMock).toHaveBeenCalled()
   })
 
+  it('maps an empty Vite 502 to the gateway-down message', async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce({
+      ok: false,
+      status: 502,
+      statusText: '',
+      text: async () => '',
+    } as unknown as Response)
+
+    await expect(apiClient.post('/admin/sdk-management/gemini-cli-auth-url')).rejects.toThrow(
+      GATEWAY_UNREACHABLE,
+    )
+  })
+
+  it('maps a refused connection to the gateway-down message', async () => {
+    vi.mocked(globalThis.fetch).mockRejectedValueOnce(new TypeError('Failed to fetch'))
+
+    await expect(apiClient.get('/health')).rejects.toThrow(GATEWAY_UNREACHABLE)
+  })
+
+  it('omits Content-Type when the request has no body', async () => {
+    // 带 `Content-Type: application/json` 的空 body 会被 axum 的
+    // `Option<Json<T>>` 判成 400 Bad Request（OAuth 发起就是这么挂的）。
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce({
+      ok: true,
+      text: async () => JSON.stringify({ code: 0, data: null, message: 'ok' })
+    } as unknown as Response)
+
+    await sdkClient.post('/codex-auth-url?is_webui=true')
+
+    const passedOptions = vi.mocked(globalThis.fetch).mock.calls[0]?.[1] || {}
+    expect(passedOptions.body).toBeUndefined()
+    expect((passedOptions.headers as Headers).has('Content-Type')).toBe(false)
+  })
+
   it('should send POST body as JSON', async () => {
     vi.mocked(globalThis.fetch).mockResolvedValueOnce({
       ok: true,
@@ -373,6 +407,19 @@ describe('extractErrorMessage', () => {
 
   it('should skip empty string fields', () => {
     expect(extractErrorMessage({ msg: '', message: '', error: 'fallback error' })).toBe('fallback error')
+  })
+})
+
+describe('httpFallbackMessage', () => {
+  it('names a down gateway instead of the empty Vite 502 body', () => {
+    expect(httpFallbackMessage(502, '')).toBe(GATEWAY_UNREACHABLE)
+    expect(httpFallbackMessage(503, 'Service Unavailable')).toBe(GATEWAY_UNREACHABLE)
+    expect(httpFallbackMessage(504)).toBe(GATEWAY_UNREACHABLE)
+  })
+
+  it('keeps the status text for other failures', () => {
+    expect(httpFallbackMessage(400, 'Bad Request')).toBe('Bad Request')
+    expect(httpFallbackMessage(500, '')).toBe('请求异常')
   })
 })
 

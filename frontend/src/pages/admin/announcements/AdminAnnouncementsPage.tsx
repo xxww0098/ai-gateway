@@ -241,7 +241,7 @@ export default function Announcements() {
                       ) : (
                         <Badge variant="outline" className={
                           r.type === 'danger' ? 'bg-destructive/10 text-destructive border-transparent' : 
-                          r.type === 'warning' ? 'bg-amber-500/10 text-amber-600 border-transparent' : 
+                          r.type === 'warning' ? 'bg-amber-500/10 text-amber-700 dark:text-amber-400 border-transparent' : 
                           'bg-primary/10 text-primary border-transparent'
                         }>{r.type}</Badge>
                       )}

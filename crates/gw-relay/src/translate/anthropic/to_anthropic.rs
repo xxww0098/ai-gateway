@@ -11,12 +11,12 @@
 use bytes::Bytes;
 use serde_json::{Map, Value, json};
 
-use super::{
-    OPENAI_DONE, SseSplit, openai_frame, parse_object, parse_upstream_object, present, sse_data,
-    str_at, to_bytes,
-};
+use super::{OPENAI_DONE, SseSplit, present, str_at, to_bytes};
 use crate::contract::{
     RelayUsage, StreamTranslator, Surface, TranslateError, Translator, UpstreamDialect,
+};
+use crate::translate::common::{
+    openai_frame, parse_object, parse_upstream_object, sse_data, unix_secs,
 };
 
 /// Anthropic Messages 的 `max_tokens` 是**必填**，OpenAI Chat 的是选填。
@@ -333,7 +333,6 @@ fn split_system(src: &Map<String, Value>) -> Result<(Vec<Value>, Vec<Value>), Tr
 
     let mut system = Vec::new();
     let mut msgs: Vec<Value> = Vec::new();
-    let mut seen_dialogue = false;
 
     for (i, item) in items.iter().enumerate() {
         let msg = item
@@ -346,26 +345,12 @@ fn split_system(src: &Map<String, Value>) -> Result<(Vec<Value>, Vec<Value>), Tr
 
         let (out_role, blocks) = match role {
             "system" | "developer" => {
-                if seen_dialogue {
-                    return Err(TranslateError::Unsupported(format!(
-                        "`messages[{i}]` 的 {role} 消息出现在对话开始之后；                         Anthropic 只能把 system 放在顶层，搬过去会静默改变指令顺序"
-                    )));
-                }
                 system.extend(text_blocks(msg.get("content"), i)?);
                 continue;
             }
-            "user" => {
-                seen_dialogue = true;
-                ("user", user_blocks(msg, i)?)
-            }
-            "assistant" => {
-                seen_dialogue = true;
-                ("assistant", assistant_blocks(msg, i)?)
-            }
-            "tool" => {
-                seen_dialogue = true;
-                ("user", vec![tool_result_block(msg, i)?])
-            }
+            "user" => ("user", user_blocks(msg, i)?),
+            "assistant" => ("assistant", assistant_blocks(msg, i)?),
+            "tool" => ("user", vec![tool_result_block(msg, i)?]),
             "function" => {
                 return Err(TranslateError::Unsupported(
                     "已废弃的 `role: \"function\"`，请改用 `role: \"tool\"` + `tool_call_id`"
@@ -542,11 +527,6 @@ fn assistant_blocks(msg: &Map<String, Value>, i: usize) -> Result<Vec<Value>, Tr
                 ))
             })?
         };
-        if !input.is_object() {
-            return Err(TranslateError::Malformed(format!(
-                "`messages[{i}].tool_calls[].function.arguments` 必须编码 JSON object"
-            )));
-        }
         out.push(json!({"type": "tool_use", "id": id, "name": name, "input": input}));
     }
     Ok(out)
@@ -635,7 +615,7 @@ fn response(body: &[u8]) -> Result<Bytes, TranslateError> {
         src.get("id").cloned().unwrap_or(Value::Null),
     );
     out.insert("object".to_owned(), json!("chat.completion"));
-    out.insert("created".to_owned(), json!(unix_now()));
+    out.insert("created".to_owned(), json!(unix_secs()));
     out.insert(
         "model".to_owned(),
         src.get("model").cloned().unwrap_or(Value::Null),
@@ -711,7 +691,7 @@ struct AnthropicSseToOpenAi {
 impl StreamTranslator for AnthropicSseToOpenAi {
     fn push(&mut self, upstream_frame: &[u8]) -> Result<Vec<Bytes>, TranslateError> {
         let mut out = Vec::new();
-        for event in self.split.push(upstream_frame)? {
+        for event in self.split.push(upstream_frame) {
             self.handle(&event, &mut out)?;
         }
         Ok(out)
@@ -749,7 +729,7 @@ impl AnthropicSseToOpenAi {
                 let msg = ev.get("message");
                 self.id = str_at(msg, "id").to_owned();
                 self.model = str_at(msg, "model").to_owned();
-                self.created = unix_now();
+                self.created = unix_secs();
                 if let Some(u) = msg.and_then(|m| m.get("usage")) {
                     self.absorb_usage(u);
                 }
@@ -904,12 +884,4 @@ impl AnthropicSseToOpenAi {
             self.usage.cached_tokens = Some(v);
         }
     }
-}
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_secs()).ok())
-        .unwrap_or_default()
 }

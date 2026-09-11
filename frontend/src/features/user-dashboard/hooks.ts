@@ -1,7 +1,8 @@
 // React-query hooks for user-dashboard feature
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { queryKeys } from '@/shared/api/query-keys'
 import { useAuthStore } from '@/features/auth/auth_store'
+import { isStaff } from '@/shared/role_core'
 import type { DashboardStats, UsageStats } from './types'
 import {
   fetchAdminDashboard,
@@ -25,8 +26,9 @@ import {
  * Uses the default staleTime (5min) from the query client config.
  */
 export function useDashboardStats() {
+  const queryClient = useQueryClient()
   const user = useAuthStore(s => s.user)
-  const isAdmin = user?.role === 'admin'
+  const isAdmin = isStaff(user?.role)
 
   const adminQuery = useQuery({
     queryKey: queryKeys.dashboard.stats('admin'),
@@ -48,14 +50,18 @@ export function useDashboardStats() {
     queryKey: queryKeys.dashboard.stats('user'),
     queryFn: async () => {
       const [profileRes, usageRes] = await Promise.all([
-        fetchUserProfile(),
+        queryClient.ensureQueryData({
+          queryKey: queryKeys.auth.profile(),
+          queryFn: fetchUserProfile,
+        }),
         fetchUserUsageStats().catch(() => null),
       ])
       const ustats = usageRes?.usage ?? null
       const userBalance = profileRes.available_balance ?? profileRes.user?.balance ?? 0
+      const keyCount = profileRes.key_count
       const stats: DashboardStats = {
         users: { total: 1, active: 1 },
-        api_keys: { total: profileRes.key_count, active: profileRes.key_count },
+        api_keys: { total: keyCount, active: keyCount },
         usage: { today_requests: ustats?.total_requests || 0, today_cost: userBalance, week_requests: 0 },
         isUser: true,
         balance: userBalance,
@@ -85,11 +91,10 @@ export function useDashboardStats() {
  */
 export function useDashboardTrend(days: 7 | 30) {
   const user = useAuthStore(s => s.user)
-  const isAdmin = user?.role === 'admin'
-  const role = isAdmin ? 'admin' : 'user'
+  const isAdmin = isStaff(user?.role)
 
   return useQuery({
-    queryKey: queryKeys.dashboard.trend(days, role),
+    queryKey: isAdmin ? queryKeys.dashboard.trend(days, 'admin') : queryKeys.usage.trend(days),
     queryFn: () => isAdmin ? fetchAdminUsageTrend(days) : fetchUserUsageTrend(days),
   })
 }
@@ -101,11 +106,10 @@ export function useDashboardTrend(days: 7 | 30) {
  */
 export function useDashboardModels() {
   const user = useAuthStore(s => s.user)
-  const isAdmin = user?.role === 'admin'
-  const role = isAdmin ? 'admin' : 'user'
+  const isAdmin = isStaff(user?.role)
 
   return useQuery({
-    queryKey: queryKeys.dashboard.models(role),
+    queryKey: isAdmin ? queryKeys.dashboard.models('admin') : queryKeys.usage.models(30),
     queryFn: () => isAdmin ? fetchAdminModelStats() : fetchUserModelStats(),
   })
 }
@@ -118,7 +122,7 @@ export function useDashboardModels() {
  */
 export function useRecentUsage() {
   const user = useAuthStore(s => s.user)
-  const isAdmin = user?.role === 'admin'
+  const isAdmin = isStaff(user?.role)
 
   return useQuery({
     queryKey: queryKeys.dashboard.recentUsage(),

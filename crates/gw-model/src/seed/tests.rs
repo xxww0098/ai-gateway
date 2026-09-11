@@ -231,19 +231,21 @@ async fn existing_model_prices_are_never_overwritten() {
     assert_eq!(kept, operator_price, "种子覆盖了运维已经维护过的价目");
 }
 
-/// 引导管理员的四个分支：没配 → 用户不存在 → 提权 → 已有管理员后永久失效。
+/// 引导主人的分支：没配 → 用户不存在 → 提权 → 已有 super_admin 后永久失效。
 #[sqlx::test]
 #[ignore = "需要本地 Postgres（见 testsupport::fresh_db 的用法说明）"]
-async fn bootstrap_admin_only_fires_when_no_admin_exists() {
+async fn bootstrap_admin_only_fires_when_no_super_admin_exists() {
     let pool = fresh_db("bootstrap_admin").await;
     MIGRATOR.run(&pool).await.expect("迁移");
 
     assert_eq!(
-        ensure_bootstrap_admin(&pool, "   ").await.expect("空邮箱"),
+        ensure_bootstrap_admin(&pool, "   ", None)
+            .await
+            .expect("空邮箱"),
         BootstrapAdmin::NotConfigured
     );
     assert_eq!(
-        ensure_bootstrap_admin(&pool, "boss@example.test")
+        ensure_bootstrap_admin(&pool, "boss@example.test", None)
             .await
             .expect("用户不存在"),
         BootstrapAdmin::UserNotFound
@@ -260,17 +262,38 @@ async fn bootstrap_admin_only_fires_when_no_admin_exists() {
     .expect("建用户");
 
     assert_eq!(
-        ensure_bootstrap_admin(&pool, " BOSS@example.test ")
+        ensure_bootstrap_admin(&pool, " BOSS@example.test ", None)
             .await
             .expect("提权"),
         BootstrapAdmin::Promoted { user_id },
         "邮箱应当先 trim + 小写再匹配"
     );
     assert_eq!(
-        ensure_bootstrap_admin(&pool, "boss@example.test")
+        ensure_bootstrap_admin(&pool, "boss@example.test", None)
             .await
             .expect("再来一次"),
-        BootstrapAdmin::AlreadyAdministered,
-        "已经有活跃管理员之后这条路径必须永久失效"
+        BootstrapAdmin::AlreadyHasSuperAdmin,
+        "已经有活跃 super_admin 之后这条路径必须永久失效"
     );
+}
+
+#[sqlx::test]
+#[ignore = "需要本地 Postgres（见 testsupport::fresh_db 的用法说明）"]
+async fn bootstrap_creates_the_owner_when_given_a_password_hash() {
+    let pool = fresh_db("bootstrap_create").await;
+    MIGRATOR.run(&pool).await.expect("迁移");
+
+    let created = ensure_bootstrap_admin(&pool, "ops@example.test", Some("not-a-real-hash"))
+        .await
+        .expect("create");
+    let user_id = match created {
+        BootstrapAdmin::Created { user_id } => user_id,
+        other => panic!("expected Created, got {other:?}"),
+    };
+    let role: String = sqlx::query_scalar("SELECT role FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .expect("role");
+    assert_eq!(role, gw_role::Role::SuperAdmin.as_str());
 }

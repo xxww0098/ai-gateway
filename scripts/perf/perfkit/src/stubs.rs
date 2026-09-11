@@ -19,11 +19,11 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use gw_authcore::{AuthRecord, AuthStore, Claims};
 use gw_proxy::ports::{
-    AccessMetadata, ApiKeyRow, AuthCrypto, BalanceEvent, BillingError, BillingLedger, HoldAdmit,
-    ChannelPolicy, ChannelPolicyStore, CircuitBreaker, Id, IdempotencyStore, ModelCatalog,
-    ModelEntry, PricingCalculator, RateLimiter, SettleReceipt, SettlementCommit,
-    SubscriptionQuota, SubscriptionQuotaStore, TenantDirectory, TokenUsage, UsageLogEntry,
-    UsageStore,
+    AccessMetadata, ApiKeyRow, AuthCrypto, BalanceEvent, BillingError, BillingLedger,
+    ChannelPolicy, ChannelPolicyStore, CircuitBreaker, HoldAdmit, Id, IdempotencyStore,
+    ModelCatalog, ModelEntry, ModelTokenUsage, PricingCalculator, RateLimiter, SettleReceipt,
+    SettlementCommit, SubscriptionQuota, SubscriptionQuotaStore, TenantDirectory, TokenUsage,
+    UsageLogEntry, UsageStore,
 };
 
 /// 压测租户。
@@ -37,32 +37,10 @@ pub use crate::PERF_API_KEY;
 #[derive(Default)]
 pub struct NullLedger {
     pub holds: AtomicU64,
-    pub settles: AtomicU64,
 }
 
 #[async_trait]
 impl BillingLedger for NullLedger {
-    async fn hold(
-        &self,
-        _user_id: Id,
-        _amount: f64,
-        _request_id: &str,
-        _ttl: Duration,
-    ) -> Result<(), BillingError> {
-        self.holds.fetch_add(1, Ordering::Relaxed);
-        Ok(())
-    }
-
-    async fn settle(
-        &self,
-        _user_id: Id,
-        _request_id: &str,
-        _actual_amount: f64,
-    ) -> Result<f64, BillingError> {
-        self.settles.fetch_add(1, Ordering::Relaxed);
-        Ok(0.0)
-    }
-
     async fn release(&self, _user_id: Id, _request_id: &str) -> Result<(), BillingError> {
         Ok(())
     }
@@ -88,13 +66,13 @@ impl BillingLedger for NullLedger {
     /// in-memory harness and must not change who is admitted there.
     async fn hold_gated(
         &self,
-        user_id: Id,
-        amount: f64,
+        _user_id: Id,
+        _amount: f64,
         _min_available: f64,
-        request_id: &str,
-        ttl: Duration,
+        _request_id: &str,
+        _ttl: Duration,
     ) -> Result<HoldAdmit, BillingError> {
-        self.hold(user_id, amount, request_id, ttl).await?;
+        self.holds.fetch_add(1, Ordering::Relaxed);
         Ok(HoldAdmit::Reserved)
     }
 }
@@ -152,10 +130,15 @@ pub struct NullUsageStore {
 
 #[async_trait]
 impl UsageStore for NullUsageStore {
-    async fn commit_settlement(
+    async fn model_usage_since(
         &self,
-        _commit: &SettlementCommit,
-    ) -> anyhow::Result<SettleReceipt> {
+        _user_id: Id,
+        _since: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<ModelTokenUsage>> {
+        Ok(Vec::new())
+    }
+
+    async fn commit_settlement(&self, _commit: &SettlementCommit) -> anyhow::Result<SettleReceipt> {
         self.commits.fetch_add(1, Ordering::Relaxed);
         Ok(SettleReceipt::Committed {
             shortfall: 0.0,
@@ -173,7 +156,12 @@ impl UsageStore for NullUsageStore {
         Ok(())
     }
 
-    async fn clear_hold(&self, _user_id: Id, _request_id: &str) -> anyhow::Result<()> {
+    async fn clear_hold(
+        &self,
+        _user_id: Id,
+        _request_id: &str,
+        _balance_after: Option<f64>,
+    ) -> anyhow::Result<()> {
         Ok(())
     }
 }
@@ -244,12 +232,12 @@ impl TenantDirectory for StaticDirectory {
         Ok(None)
     }
 
-    async fn holds_group_entitlement(
-        &self,
-        _user_id: Id,
-        _group_id: Id,
-    ) -> anyhow::Result<bool> {
+    async fn holds_group_entitlement(&self, _user_id: Id, _group_id: Id) -> anyhow::Result<bool> {
         Ok(true)
+    }
+
+    async fn token_version(&self, _user_id: Id) -> anyhow::Result<i64> {
+        Ok(0)
     }
 
     async fn touch_api_key(&self, _api_key_id: Id) {}
@@ -282,6 +270,7 @@ impl RateLimiter for AllowAllRateLimiter {
         _tokens: i64,
         _model: &str,
         _group_id: Option<Id>,
+        _user_concurrency: i64,
     ) -> anyhow::Result<(bool, Option<String>)> {
         Ok((true, None))
     }
@@ -313,7 +302,12 @@ pub struct MemIdempotencyStore {
 #[async_trait]
 impl IdempotencyStore for MemIdempotencyStore {
     async fn get(&self, key: &str) -> anyhow::Result<Option<Vec<u8>>> {
-        Ok(self.map.lock().expect("idempotency mutex").get(key).cloned())
+        Ok(self
+            .map
+            .lock()
+            .expect("idempotency mutex")
+            .get(key)
+            .cloned())
     }
 
     async fn set(&self, key: &str, value: Vec<u8>, _ttl: Duration) -> anyhow::Result<()> {
@@ -359,6 +353,10 @@ impl ModelCatalog for OneModelCatalog {
             id: "gpt-4o".to_owned(),
             created: 0,
             owned_by: "openai".to_owned(),
+            context_length: None,
+            max_output_tokens: None,
+            input_modalities: vec!["text".to_owned()],
+            reasoning: None,
         }])
     }
 
@@ -422,5 +420,6 @@ pub fn perf_access_metadata() -> AccessMetadata {
         group_id: None,
         rate_mult: 1.0,
         subscription: None,
+        concurrency: 0,
     }
 }

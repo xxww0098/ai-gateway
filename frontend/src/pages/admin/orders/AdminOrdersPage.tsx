@@ -25,12 +25,12 @@ interface PaymentOrder {
 
 const PROVIDER_MAP: Record<string, { label: string; color: string }> = {
   stripe:  { label: 'Stripe', color: 'text-blue-500' },
-  alipay:  { label: '支付宝', color: 'text-sky-500' },
+  alipay:  { label: '支付宝', color: 'text-sky-700 dark:text-sky-400' },
   wechat:  { label: '微信支付', color: 'text-emerald-500' },
 }
 
 const STATUS_MAP: Record<string, { label: string; color: string; bg: string; icon: React.ElementType }> = {
-  pending:  { label: '待支付', color: 'text-amber-600 dark:text-amber-400', bg: 'bg-amber-50 dark:bg-amber-900/20', icon: Clock },
+  pending:  { label: '待支付', color: 'text-amber-700 dark:text-amber-400', bg: 'bg-amber-50 dark:bg-amber-900/20', icon: Clock },
   paid:     { label: '已支付', color: 'text-emerald-600 dark:text-emerald-400', bg: 'bg-emerald-50 dark:bg-emerald-900/20', icon: CheckCircle2 },
   failed:   { label: '失败',   color: 'text-red-600 dark:text-red-400',      bg: 'bg-red-50 dark:bg-red-900/20',      icon: XCircle },
   refunded: { label: '已退款', color: 'text-gray-600 dark:text-gray-400',    bg: 'bg-gray-100 dark:bg-dark-700',      icon: AlertCircle },
@@ -54,12 +54,7 @@ function fmtDateTime(iso: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
-type AdminOrdersProps = {
-  /** When true, omit page chrome (embedded in Commerce tabs). */
-  embedded?: boolean
-}
-
-export default function AdminOrders({ embedded = false }: AdminOrdersProps) {
+export default function AdminOrders() {
   const [orders, setOrders] = useState<PaymentOrder[]>([])
   const [loading, setLoading] = useState(true)
   const [page, setPage] = useState(1)
@@ -122,36 +117,23 @@ export default function AdminOrders({ embedded = false }: AdminOrdersProps) {
     toast.success('导出成功')
   }
 
-  return (
-    <div
-      className={`space-y-6 ${embedded ? '' : 'animate-in fade-in slide-in-from-bottom-4 duration-500'}`}
-      style={embedded ? undefined : { willChange: 'transform, opacity' }}
-    >
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        {!embedded ? (
-          <div>
-            <h2 className="text-2xl font-bold tracking-tight text-gray-900 dark:text-white">订单管理</h2>
-            <p className="text-gray-500 dark:text-dark-300 mt-1 max-w-2xl">
-              查看和管理所有用户的充值订单，支持按状态、渠道筛选与导出。
-            </p>
-          </div>
-        ) : (
-          <p className="text-sm text-gray-500 dark:text-dark-300">
-            用户充值订单，支持按状态、渠道筛选与导出。
-          </p>
-        )}
-        <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-          <span className="rounded-md border border-gray-200 dark:border-dark-600 bg-gray-50 dark:bg-dark-800 px-2 py-1 font-medium tabular-nums">
-            {loading ? '加载中...' : `${totalOrders} 笔订单`}
-          </span>
-          <button className="btn btn-secondary h-9 px-3 text-sm" onClick={handleExport}>
-            <Download className="h-4 w-4" />
-            导出 CSV
-          </button>
-        </div>
-      </div>
+  const orderActions = (
+    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+      <span className="rounded-lg border border-border bg-muted px-2 py-1 font-medium tabular-nums">
+        {loading ? '加载中...' : `${totalOrders} 笔订单`}
+      </span>
+      <button className="btn btn-secondary h-9 px-3 text-sm" onClick={handleExport}>
+        <Download className="h-4 w-4" />
+        导出 CSV
+      </button>
+    </div>
+  )
 
-      <div className="rounded-xl border border-gray-200 dark:border-dark-600 bg-white dark:bg-dark-800/70 shadow-sm p-3">
+  return (
+    <div className="space-y-6">
+      {orderActions}
+
+      <div className="rounded-xl border border-border bg-card p-3">
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(200px,1fr)_130px_130px_auto]">
           <div className="relative">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
@@ -231,7 +213,7 @@ export default function AdminOrders({ embedded = false }: AdminOrdersProps) {
                     colSpan={8}
                     tone="first-use"
                     icon={ClipboardList}
-                    title="暂无充值订单"
+                    title="还没有充值订单"
                     description="用户发起在线充值后将在此生成订单记录。系统核对到账后将自动为用户账户充值。"
                   />
                 )

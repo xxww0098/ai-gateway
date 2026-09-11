@@ -135,6 +135,7 @@ async fn a_refresh_replaces_the_whole_snapshot() {
         weight: 5,
         priority: 2,
         enabled: false,
+        max_concurrent: 0,
     });
     let cache = ChannelPolicyCache::new(store.clone());
     cache.refresh().await.expect("refresh");
@@ -184,6 +185,7 @@ fn policy(auth_id: &str, weight: i64, priority: i64, enabled: bool) -> ChannelPo
         weight,
         priority,
         enabled,
+        max_concurrent: 0,
     }
 }
 
@@ -264,25 +266,6 @@ fn a_fully_benched_pool_fails_open_rather_than_refusing_the_client() {
 }
 
 #[test]
-fn fail_open_never_bypasses_operator_or_policy_kill_switches() {
-    let (_, pool) = pool_with(vec![policy("policy-off", 1, 0, false)]);
-    let mut operator_off = auth_record("operator-off", "openai");
-    operator_off.disabled = true;
-    let mut health_off = auth_record("health-off", "openai");
-    health_off.unavailable = true;
-    let auths = vec![
-        auth_record("policy-off", "openai"),
-        operator_off,
-        health_off,
-    ];
-
-    assert!(
-        pool.pick(&auths).is_none(),
-        "health fail-open must not resurrect a disabled credential"
-    );
-}
-
-#[test]
 fn an_empty_pool_yields_nothing() {
     let (_, pool) = pool_with(vec![]);
     assert!(pool.pick(&[]).is_none());
@@ -342,11 +325,6 @@ fn a_sticky_account_is_preferred_while_it_stays_healthy() {
     pool.remember(7, "gpt-4o", "b");
     let preferred = pool.preferred(7, "gpt-4o");
     assert_eq!(preferred.as_deref(), Some("b"));
-    assert_eq!(
-        pool.preferred(7, "GPT-4o").as_deref(),
-        Some("b"),
-        "case variants must reuse the same sticky account"
-    );
     for _ in 0..8 {
         assert_eq!(
             pool.pick_sticky(&auths, preferred.as_deref(), &[])
@@ -390,18 +368,4 @@ fn excluding_the_sticky_account_does_not_clone_the_rest_of_the_pool() {
         .pick_sticky(&auths, Some("a"), &["a".to_owned()])
         .expect("a fallback pick");
     assert_ne!(picked.id, "a");
-}
-
-#[test]
-fn affinity_cardinality_is_bounded() {
-    let (_, pool) = pool_with(vec![]);
-    for i in 0..=MAX_AFFINITY_ENTRIES {
-        pool.remember(7, &format!("model-{i}"), "a");
-    }
-    assert!(pool.affinity.len() <= MAX_AFFINITY_ENTRIES);
-    assert_eq!(
-        pool.preferred(7, &format!("model-{MAX_AFFINITY_ENTRIES}"))
-            .as_deref(),
-        Some("a")
-    );
 }

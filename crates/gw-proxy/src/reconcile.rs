@@ -1,24 +1,13 @@
-//! Recovery of billing operations abandoned by a crashed request.
+//! Recovery of holds abandoned by a crashed request.
 //!
 //! Charging a crash-orphaned request is a policy choice, so the scan always
 //! runs (it feeds the `agw_orphaned_holds` gauge) while the settlement half is
-//! opt-in through `BILLING_AUTO_RECONCILE_HOLDS`.
+//! opt-in through `BILLING_AUTO_RECONCILE_HOLDS` (replay expired SQL pending
+//! intents; Redis holds are only the short admission lock).
 //!
-//! # The scan reads Postgres
-//!
-//! The input is the set of non-terminal `billing_operations` rows, **not** a
-//! Redis `SCAN` for surviving reservations. A reservation is a cache entry: it
-//! expires on a TTL, it can be evicted, and it dies with its box — none of
-//! which is evidence about whether the money was accounted for. The `held` row
-//! is that evidence, and it is the only thing that outlives a crash.
-//!
-//! # It cannot double-charge
-//!
-//! Not because the caller remembers to ask. `commit_settlement` moves the
-//! operation to a terminal state inside the same transaction as the debit, so
-//! a second reconciler — or the request's own late settle — gets
-//! [`SettleReceipt::AlreadyTerminal`] and moves nothing. There is no flag to
-//! forget.
+//! Reconciliation is idempotent and safe to run concurrently: `Ledger::settle_tx`
+//! claims the request id inside the debit transaction, so a hold can never be
+//! charged twice.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -28,53 +17,39 @@ use chrono::Utc;
 use serde_json::json;
 use tokio_util::task::TaskTracker;
 
-use gw_ledger::BillingOperationId;
-
 use crate::ports::{Id, MetricsSink, SettleReceipt, SettlementCommit, UsageLogEntry};
 use crate::usage::Settlement;
 
-/// A `billing_operations` row still `held` long after its request should have
-/// finished. Matches `gw_ledger::NonTerminalOperation`.
+/// A Redis reservation that outlived its TTL without being settled or released.
+/// Matches `gw_ledger::StaleHold`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct OrphanedOperation {
+pub struct StaleHold {
     pub user_id: Id,
-    /// The money key. Everything below charges against this and nothing else.
-    pub operation: BillingOperationId,
-    /// What the client saw, carried through so the reconciled usage row still
-    /// joins to the tenant's own logs.
-    pub client_trace_id: String,
-    /// The reserved upper bound — the most this operation may be charged.
-    pub reserved_amount: f64,
+    pub request_id: String,
+    pub amount: f64,
 }
 
 /// Environment flag that arms automatic reconciliation.
 pub const AUTO_RECONCILE_ENV: &str = "BILLING_AUTO_RECONCILE_HOLDS";
 
-/// How old a non-terminal operation must be before the scan treats its request
-/// as dead.
-pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(30 * 60);
+/// Default recovery grace, equal to the default hold TTL. Production must pass
+/// the configured `Ledger::hold_ttl()` so a 3600s lock is not scanned at 30 min.
+pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(300);
 
 /// How often the scan runs (5 minutes).
 pub const DEFAULT_SCAN_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// How many operations one scan may take on.
-///
-/// Bounded so a large backlog cannot turn a periodic job into an unbounded
-/// read; whatever is left is picked up on the next tick. When a scan comes
-/// back full, [`scan_once`] says so in the log rather than reporting a
-/// truncated count as if it were the whole picture.
-pub const DEFAULT_SCAN_LIMIT: i64 = 500;
-
-/// Source of orphaned operations. Backed by Postgres, never by Redis.
+/// Source of orphaned reservations.
 #[async_trait::async_trait]
-pub trait NonTerminalOperationScanner: Send + Sync {
-    /// `billing_operations` rows still `held` and older than `older_than`, at
-    /// most `limit` of them.
-    async fn scan_non_terminal(
-        &self,
-        older_than: Duration,
-        limit: i64,
-    ) -> anyhow::Result<Vec<OrphanedOperation>>;
+pub trait StaleHoldScanner: Send + Sync {
+    /// Holds still present well past their TTL, never settled or released.
+    /// Pending settlement intents older than the admission lock TTL.
+    async fn scan_stale_holds(&self, older_than: Duration) -> anyhow::Result<Vec<StaleHold>>;
+
+    /// Cutoff for recovery. Production returns the configured hold TTL.
+    fn recovery_grace(&self) -> Duration {
+        DEFAULT_STALE_AFTER
+    }
 }
 
 /// Whether automatic reconciliation is armed.
@@ -82,59 +57,62 @@ pub fn auto_reconcile_enabled() -> bool {
     std::env::var(AUTO_RECONCILE_ENV).is_ok_and(|v| v == "true")
 }
 
-/// Settles the given orphaned operations, charging the reserved amount — the
-/// bound that was admitted, never more — and clearing the reservation.
+/// Settles the given orphaned holds, charging the reserved amount — a
+/// conservative estimate, never more — and clearing the reservation.
 ///
 /// Returns how many were reconciled.
-pub async fn reconcile_orphaned_operations(
-    settlement: &Settlement,
-    operations: &[OrphanedOperation],
-) -> usize {
+pub async fn reconcile_orphaned_holds(settlement: &Settlement, holds: &[StaleHold]) -> usize {
     let mut settled = 0;
-    for op in operations {
-        if op.user_id == 0 || op.reserved_amount <= 0.0 {
+    for hold in holds {
+        if hold.request_id.is_empty() || hold.user_id == 0 || hold.amount <= 0.0 {
             continue;
         }
         let entry = UsageLogEntry {
-            user_id: op.user_id,
-            request_id: op.client_trace_id.clone(),
-            // Never empty on a settled row: this is the money key.
-            event_key: op.operation.to_string(),
-            cost: op.reserved_amount,
+            user_id: hold.user_id,
+            request_id: hold.request_id.clone(),
+            cost: hold.amount,
             rate_multiplier: 1.0,
             failed: false,
             raw_metadata: Some(json!({
                 "reconciled": true,
-                "reason": "orphaned_operation",
+                "reason": "orphaned_hold",
                 "timestamp": Utc::now().to_rfc3339(),
             })),
             ..UsageLogEntry::default()
         };
         let commit = SettlementCommit {
-            user_id: op.user_id,
-            operation: op.operation.clone(),
-            actual_cost: op.reserved_amount,
+            user_id: hold.user_id,
+            request_id: hold.request_id.clone(),
+            actual_cost: hold.amount,
             entry,
             subscription_id: None,
         };
 
         match settlement.store().commit_settlement(&commit).await {
-            Ok(SettleReceipt::Committed { .. }) => {
+            Ok(SettleReceipt::Committed {
+                balance_after,
+                balance_version,
+                ..
+            }) => {
                 if let Err(err) = settlement
                     .store()
-                    .clear_hold(op.user_id, &op.operation)
+                    .clear_hold(
+                        hold.user_id,
+                        &hold.request_id,
+                        balance_version.map(|version| (balance_after, version)),
+                    )
                     .await
                 {
-                    tracing::warn!(user_id = op.user_id, operation = %op.operation, %err,
-                        "clear reservation after reconcile failed");
+                    tracing::warn!(user_id = hold.user_id, request_id = %hold.request_id, %err,
+                        "clear hold after reconcile failed");
                 }
                 settled += 1;
             }
-            // The request settled itself first, or a concurrent reconciler won.
-            // Either way this call moved no money and must not count.
-            Ok(SettleReceipt::AlreadyTerminal) => {}
+            // Already settled, or an infrastructure error: either way do not
+            // clear the reservation and do not count it.
+            Ok(SettleReceipt::AlreadySettled) => {}
             Err(err) => {
-                tracing::warn!(user_id = op.user_id, operation = %op.operation, %err,
+                tracing::warn!(user_id = hold.user_id, request_id = %hold.request_id, %err,
                     "reconcile settle failed");
             }
         }
@@ -144,19 +122,16 @@ pub async fn reconcile_orphaned_operations(
 
 /// One scan: publish the gauge, and reconcile when armed.
 pub async fn scan_once(
-    scanner: &dyn NonTerminalOperationScanner,
+    scanner: &dyn StaleHoldScanner,
     settlement: &Settlement,
     metrics: &dyn MetricsSink,
     auto_reconcile: bool,
     stale_after: Duration,
 ) -> usize {
-    let stale = match scanner
-        .scan_non_terminal(stale_after, DEFAULT_SCAN_LIMIT)
-        .await
-    {
+    let stale = match scanner.scan_stale_holds(stale_after).await {
         Ok(stale) => stale,
         Err(err) => {
-            tracing::warn!(%err, "non-terminal operation scan failed");
+            tracing::warn!(%err, "stale hold scan failed");
             return 0;
         }
     };
@@ -164,25 +139,17 @@ pub async fn scan_once(
     if stale.is_empty() {
         return 0;
     }
-    if stale.len() as i64 >= DEFAULT_SCAN_LIMIT {
-        // Say it out loud. A capped count reported as the whole picture is how
-        // a growing backlog looks like a steady state.
-        tracing::warn!(
-            limit = DEFAULT_SCAN_LIMIT,
-            "orphaned-operation scan hit its limit; more remain for the next tick",
-        );
-    }
     tracing::warn!(
         count = stale.len(),
         auto_reconcile,
-        "orphaned billing operations detected (likely a prior crash)",
+        "orphaned holds detected (likely a prior crash)",
     );
     if !auto_reconcile {
         return 0;
     }
-    let n = reconcile_orphaned_operations(settlement, &stale).await;
+    let n = reconcile_orphaned_holds(settlement, &stale).await;
     if n > 0 {
-        tracing::info!(count = n, "auto-reconciled orphaned billing operations");
+        tracing::info!(count = n, "auto-reconciled orphaned holds");
     }
     n
 }
@@ -211,7 +178,7 @@ pub async fn scan_once(
 /// closed over — letting the tests drive both paths without touching
 /// process-wide state.
 pub fn spawn_scanner(
-    scanner: Arc<dyn NonTerminalOperationScanner>,
+    scanner: Arc<dyn StaleHoldScanner>,
     settlement: Arc<Settlement>,
     metrics: Arc<dyn MetricsSink>,
     interval: Duration,
@@ -237,7 +204,7 @@ pub fn spawn_scanner(
                     settlement.clone(),
                     metrics.clone(),
                     true,
-                    DEFAULT_STALE_AFTER,
+                    scanner.recovery_grace(),
                 ));
                 // Awaited, not fire-and-forget: two overlapping reconciles
                 // would race for the same orphaned holds.
@@ -250,7 +217,7 @@ pub fn spawn_scanner(
                     settlement.as_ref(),
                     metrics.as_ref(),
                     false,
-                    DEFAULT_STALE_AFTER,
+                    scanner.recovery_grace(),
                 )
                 .await;
             }
@@ -261,7 +228,7 @@ pub fn spawn_scanner(
 
 /// [`scan_once`] over owned handles, so it can be spawned onto the tracker.
 async fn scan_owned(
-    scanner: Arc<dyn NonTerminalOperationScanner>,
+    scanner: Arc<dyn StaleHoldScanner>,
     settlement: Arc<Settlement>,
     metrics: Arc<dyn MetricsSink>,
     auto_reconcile: bool,

@@ -84,16 +84,11 @@ where
     if let Some(v) = raw("CREDENTIAL_ENCRYPTION_KEY") {
         cfg.auth.credential_encryption_key = v;
     }
-    if let Some(v) = raw("ADMIN_EMAILS") {
-        cfg.auth.admin_emails = v
-            .split(',')
-            .map(str::trim)
-            .filter(|part| !part.is_empty())
-            .map(str::to_owned)
-            .collect();
-    }
     if let Some(v) = raw("BOOTSTRAP_ADMIN_EMAIL") {
         cfg.auth.bootstrap_admin_email = v.trim().to_lowercase();
+    }
+    if let Some(v) = raw("BOOTSTRAP_ADMIN_PASSWORD") {
+        cfg.auth.bootstrap_admin_password = v;
     }
 
     // -- SDK (upstream provider defaults)
@@ -108,9 +103,6 @@ where
     }
 
     // -- Billing
-    if let Some(v) = int("BILLING_HOLD_AMOUNT") {
-        cfg.billing.hold_amount = v;
-    }
     if let Some(v) = float("BILLING_DEFAULT_PRICE_PER_1K_TOKENS") {
         cfg.billing.default_price_per_1k_tokens = v;
     }
@@ -119,12 +111,6 @@ where
     }
     if let Some(v) = int("BILLING_BALANCE_CACHE_TTL_SECONDS") {
         cfg.billing.balance_cache_ttl_seconds = v;
-    }
-    if let Some(v) = int("BILLING_BUDGET_TOKEN_MULTIPLIER") {
-        cfg.billing.budget_token_multiplier = v;
-    }
-    if let Some(v) = int("BILLING_BUDGET_TOKEN_TTL_SECONDS") {
-        cfg.billing.budget_token_ttl_seconds = v;
     }
     if let Some(v) = int("BILLING_PRICE_CACHE_REFRESH_SECONDS") {
         cfg.billing.price_cache_refresh_seconds = v;
@@ -146,14 +132,28 @@ where
     if let Some(v) = int("RATE_LIMIT_MAX_CONCURRENT") {
         cfg.rate_limit.max_concurrent = v;
     }
-    if let Some(v) = int("RATE_LIMIT_BURST_SIZE") {
-        cfg.rate_limit.burst_size = v;
-    }
     if let Some(v) = int("RATE_LIMIT_GLOBAL_REQUEST_CAP") {
         cfg.rate_limit.global_request_cap = v;
     }
     if let Some(v) = long("RATE_LIMIT_GLOBAL_TOKEN_CAP") {
         cfg.rate_limit.global_token_cap = v;
+    }
+
+    // -- Service surface (`/api/service`). An empty SERVICE_TOKEN leaves the
+    //    whole group unmounted, so the empty-var-is-unset rule above is exactly
+    //    the behaviour wanted here: there is no way to "clear" a token by
+    //    exporting an empty value into a process that already read the YAML.
+    if let Some(v) = raw("SERVICE_TOKEN") {
+        cfg.service.token = v;
+    }
+    if let Some(v) = float("SERVICE_INITIAL_CREDIT") {
+        cfg.service.initial_credit = v;
+    }
+    if let Some(v) = raw("SERVICE_CURRENCY") {
+        cfg.service.currency = v;
+    }
+    if let Some(v) = float("SERVICE_MAX_CREDIT") {
+        cfg.service.max_credit = v;
     }
 
     // -- Circuit breaker

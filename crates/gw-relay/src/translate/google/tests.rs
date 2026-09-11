@@ -744,6 +744,59 @@ fn openai_stream_never_emits_a_choiceless_chunk() {
     }
 }
 
+/// 两个 functionCall 分在**两个上游帧**里到达时，`tool_calls[].index` 与 `id`
+/// 必须全局单调、互不相同 —— OpenAI 客户端按 index **跨帧**累加参数增量，
+/// index 每帧从 0 重来会把第二个调用的参数拼进第一个里。
+#[test]
+fn openai_stream_tool_calls_split_across_frames_keep_distinct_indexes() {
+    let mut st = OpenAiToGoogle.stream_translator();
+    let mut frames = Vec::new();
+    for name in ["get_weather", "get_time"] {
+        let payload = json!({
+            "candidates": [{ "content": { "role": "model", "parts": [
+                { "functionCall": { "name": name, "args": { "city": "SF" } } }
+            ] } }]
+        });
+        let frame = format!("data: {payload}\n\n");
+        frames.extend(
+            st.push(frame.as_bytes())
+                .expect("push should not fail on a real Google frame"),
+        );
+    }
+    frames.extend(st.finish().expect("finish should not fail"));
+
+    let mut calls: Vec<(i64, String)> = Vec::new();
+    for (_, value) in decode(&frames) {
+        if let Some(list) = value["choices"][0]["delta"]["tool_calls"].as_array() {
+            for call in list {
+                calls.push((
+                    call["index"]
+                        .as_i64()
+                        .expect("tool_calls[].index 必须是数字"),
+                    call["id"]
+                        .as_str()
+                        .expect("tool_calls[].id 必须是字符串")
+                        .to_owned(),
+                ));
+            }
+        }
+    }
+    assert_eq!(
+        calls.len(),
+        2,
+        "两个 functionCall 必须各产出一个 tool_call 增量"
+    );
+    assert_eq!(
+        (calls[0].0, calls[1].0),
+        (0, 1),
+        "跨帧的 index 必须从 0 起单调递增，不许每帧重来"
+    );
+    assert_ne!(
+        calls[0].1, calls[1].1,
+        "两个调用的 id 相同会让客户端把参数拼在一起"
+    );
+}
+
 /// Anthropic 方向的序列合法性 —— 本任务里最硬的一条不变量。
 ///
 /// 检查的全是**跨帧**的性质，一条都不比对期望字符串：
@@ -888,11 +941,8 @@ fn billing_usage_is_dialect_independent() {
 /// 缺失是上游根本没说 —— 后者要走 fallback 结算，前者不能。
 #[test]
 fn a_missing_count_is_not_a_zero_count() {
-    let zero = concat!(
-        r#"data: {"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0}}"#,
-        "\n\n"
-    );
-    let absent = concat!(r#"data: {"usageMetadata":{"promptTokenCount":0}}"#, "\n\n");
+    let zero = r#"data: {"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0}}"#;
+    let absent = r#"data: {"usageMetadata":{"promptTokenCount":0}}"#;
 
     let mut st = OpenAiToGoogle.stream_translator();
     st.push(zero.as_bytes()).expect("push");
@@ -935,5 +985,3 @@ fn the_frame_reader_handles_multiline_and_multiframe_input() {
         .collect();
     assert_eq!(text, "ab");
 }
-
-mod stream_framing;

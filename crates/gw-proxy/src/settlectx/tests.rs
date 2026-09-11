@@ -7,13 +7,12 @@ use std::sync::Arc;
 use super::*;
 
 fn billing() -> Arc<RequestBilling> {
-    Arc::new(RequestBilling::new(
-        SettleCtx {
-            user_id: 1,
-            ..SettleCtx::default()
-        },
-        false,
-    ))
+    Arc::new(RequestBilling::new(SettleCtx {
+        request_id: "req-1".to_owned(),
+        user_id: 1,
+        rate_mult: 1.0,
+        ..SettleCtx::default()
+    }))
 }
 
 #[test]
@@ -48,16 +47,6 @@ async fn exactly_one_of_many_concurrent_claimants_settles() {
         }
         assert_eq!(winners.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
-}
-
-#[test]
-fn budget_token_reservations_skip_redis_release_in_the_finalizer() {
-    let billing = RequestBilling::new(SettleCtx::default(), true);
-    assert!(
-        billing.used_budget_token,
-        "a budget-token reservation must be distinguishable, or the finalizer \
-         would Release a Redis hold that was never taken",
-    );
 }
 
 #[test]

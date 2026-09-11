@@ -11,10 +11,25 @@ export const queryKeys = {
   auth: {
     profile: () => ['auth', 'profile'] as const,
   },
+  notifications: {
+    all: () => ['notifications'] as const,
+    unread: () => ['notifications', 'unread'] as const,
+    list: () => ['notifications', 'list'] as const,
+  },
+  billing: {
+    all: () => ['billing'] as const,
+    history: (params: { page: number; pageSize: number; kind?: string }) =>
+      ['billing', 'history', params] as const,
+  },
   users: {
     all: () => ['users'] as const,
-    list: (params: { page: number; pageSize: number }) =>
-      ['users', 'list', params] as const,
+    list: (params: {
+      page: number
+      pageSize?: number
+      search?: string
+      role?: string
+      status?: string
+    }) => ['users', 'list', params] as const,
     detail: (id: number) => ['users', 'detail', id] as const,
   },
   subscriptions: {
@@ -42,6 +57,8 @@ export const queryKeys = {
     all: () => ['usage'] as const,
     logs: (params: Record<string, unknown>) => ['usage', 'logs', params] as const,
     summary: () => ['usage', 'summary'] as const,
+    trend: (days: number) => ['usage', 'trend', days] as const,
+    models: (days: number) => ['usage', 'models', days] as const,
   },
   pricing: {
     all: () => ['pricing'] as const,

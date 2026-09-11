@@ -96,14 +96,6 @@ fn an_unparseable_body_is_a_failure() {
     assert!(matches!(outcome, DevicePollOutcome::Failed { .. }));
 }
 
-#[test]
-fn classify_matches_interpret() {
-    let left = classify_device_token_body(400, r#"{"error":"authorization_pending"}"#, 5);
-    let right = interpret_token_http(400, r#"{"error":"authorization_pending"}"#, 5);
-    assert!(left.is_pending());
-    assert!(right.is_pending());
-}
-
 // ---------------------------------------------------------------- xAI host
 
 #[test]
@@ -226,4 +218,97 @@ fn a_device_session_is_recognised_without_a_redirect() {
     };
     assert!(is_device_flow(&config));
     assert!(!is_device_flow(&SessionConfig::default()));
+}
+
+#[test]
+fn every_kiro_method_alias_routes_somewhere() {
+    // 四个 method 各自走不同的后端流程，认错一个就会静默启动另一种登录。
+    for (raw, expected) in [
+        ("", "device"),
+        ("builder-id", "device"),
+        ("builder_id", "device"),
+        ("  Device  ", "device"),
+        ("auth-code", "authcode"),
+        ("authorization_code", "authcode"),
+        ("authorization-code", "authcode"),
+        ("IAM", "idc"),
+        ("sso", "idc"),
+        ("Import", "import"),
+        ("没听过的方式", "device"),
+    ] {
+        let body = KiroStartBody::from_value(Some(&json!({ "method": raw })));
+        assert_eq!(body.method_key(), expected, "method={raw:?}");
+    }
+}
+
+#[test]
+fn idc_and_import_sessions_need_no_redirect_either() {
+    for flow in ["idc", "import"] {
+        let config = SessionConfig {
+            flow: flow.to_owned(),
+            ..SessionConfig::default()
+        };
+        assert!(is_device_flow(&config), "flow={flow}");
+    }
+    // authorization_code 是带 redirect 的，不能被当成设备码会话。
+    let config = SessionConfig {
+        flow: "authorization_code".to_owned(),
+        ..SessionConfig::default()
+    };
+    assert!(!is_device_flow(&config));
+}
+
+#[test]
+fn the_device_start_payload_opens_the_prefilled_page() {
+    // 控制台直接 window.open 这个 URL：带 user_code 的那个能省掉操作者手输。
+    let started = DeviceCodeResponse {
+        device_code: "dc-1".to_owned(),
+        user_code: "WDJB-MJHT".to_owned(),
+        verification_uri: "https://auth.x.ai/device".to_owned(),
+        verification_uri_complete: "https://auth.x.ai/device?user_code=WDJB-MJHT".to_owned(),
+        expires_in: 900,
+        interval: 0,
+    };
+    let payload = device_start_payload("st-1", &started);
+    assert_eq!(
+        payload["auth_url"],
+        json!(started.verification_uri_complete)
+    );
+    assert_eq!(payload["url"], json!(started.verification_uri_complete));
+    assert_eq!(payload["state"], json!("st-1"));
+    assert_eq!(payload["user_code"], json!("WDJB-MJHT"));
+    assert_eq!(payload["flow"], json!("device"));
+    // interval 为 0 时必须补默认值，否则前端会拿到 0 并疯狂轮询。
+    assert_eq!(payload["interval"], json!(5));
+}
+
+#[test]
+fn a_start_without_a_complete_uri_falls_back_to_the_plain_one() {
+    let started = DeviceCodeResponse {
+        device_code: "dc-1".to_owned(),
+        user_code: "ABCD-EFGH".to_owned(),
+        verification_uri: "https://oidc.us-east-1.amazonaws.com/device".to_owned(),
+        verification_uri_complete: String::new(),
+        expires_in: 600,
+        interval: 5,
+    };
+    let payload = device_start_payload("st-2", &started);
+    assert_eq!(payload["auth_url"], json!(started.verification_uri));
+}
+
+#[test]
+fn a_poll_records_the_interval_the_provider_asked_for() {
+    let mut config = SessionConfig {
+        interval: 5,
+        ..SessionConfig::default()
+    };
+    let now = Utc::now();
+    mark_polled(&mut config, now, 10);
+    assert_eq!(config.interval, 10);
+    assert!(!interval_elapsed(&config, now));
+    assert!(interval_elapsed(&config, now + Duration::seconds(10)));
+
+    // interval <= 0 不能把已经知道的节奏清成 0。
+    mark_polled(&mut config, now, 0);
+    assert_eq!(config.interval, 10);
 }

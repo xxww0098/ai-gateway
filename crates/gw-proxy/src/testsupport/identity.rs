@@ -22,12 +22,16 @@ impl FakeCrypto {
     }
 
     pub(crate) fn with_jwt(self: &Arc<Self>, token: &str, user_id: Id) {
+        self.with_jwt_version(token, user_id, 0);
+    }
+
+    pub(crate) fn with_jwt_version(self: &Arc<Self>, token: &str, user_id: Id, token_version: i64) {
         self.jwts.lock().insert(
             token.to_owned(),
             Claims {
                 user_id,
                 email: format!("user{user_id}@example.test"),
-                token_version: 1,
+                token_version,
                 exp: 0,
                 iat: 0,
                 nbf: None,
@@ -56,11 +60,14 @@ impl AuthCrypto for FakeCrypto {
 pub(crate) struct FakeDirectory {
     pub(crate) api_keys: Mutex<HashMap<String, ApiKeyRow>>,
     pub(crate) users: Mutex<HashMap<Id, String>>,
+    pub(crate) concurrency: Mutex<HashMap<Id, i64>>,
     pub(crate) groups: Mutex<HashMap<Id, f64>>,
     pub(crate) entitlements: Mutex<Vec<(Id, Id)>>,
     pub(crate) subscriptions: Mutex<HashMap<Id, SubscriptionQuota>>,
     pub(crate) touched: Mutex<Vec<Id>>,
     pub(crate) user_status_errors: Mutex<bool>,
+    pub(crate) token_versions: Mutex<HashMap<Id, i64>>,
+    pub(crate) token_version_errors: Mutex<bool>,
 }
 
 impl FakeDirectory {
@@ -92,12 +99,33 @@ impl TenantDirectory for FakeDirectory {
         Ok(self.users.lock().get(&user_id).cloned())
     }
 
+    async fn user_concurrency(&self, user_id: Id) -> anyhow::Result<Option<i64>> {
+        if self.users.lock().get(&user_id).is_none() {
+            return Ok(None);
+        }
+        Ok(Some(
+            self.concurrency.lock().get(&user_id).copied().unwrap_or(0),
+        ))
+    }
+
     async fn active_subscription(&self, user_id: Id) -> anyhow::Result<Option<SubscriptionQuota>> {
         Ok(self.subscriptions.lock().get(&user_id).cloned())
     }
 
     async fn holds_group_entitlement(&self, user_id: Id, group_id: Id) -> anyhow::Result<bool> {
         Ok(self.entitlements.lock().contains(&(user_id, group_id)))
+    }
+
+    async fn token_version(&self, user_id: Id) -> anyhow::Result<i64> {
+        if *self.token_version_errors.lock() {
+            anyhow::bail!("db down");
+        }
+        Ok(self
+            .token_versions
+            .lock()
+            .get(&user_id)
+            .copied()
+            .unwrap_or(0))
     }
 
     async fn touch_api_key(&self, api_key_id: Id) {

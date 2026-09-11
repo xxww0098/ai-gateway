@@ -18,6 +18,7 @@ interface BaseFields {
   base_url: string
   project_id: string
   location: string
+  max_concurrent: string
 }
 
 interface SecretFields {
@@ -35,6 +36,7 @@ const emptyBase: BaseFields = {
   base_url: '',
   project_id: '',
   location: '',
+  max_concurrent: '0',
 }
 
 const emptySecrets: SecretFields = {
@@ -68,6 +70,7 @@ export function AuthFileEditDialog({ open, onOpenChange, item, saving, onSave }:
       base_url: typeof item.base_url === 'string' ? item.base_url : '',
       project_id: typeof item.project_id === 'string' ? item.project_id : '',
       location: typeof item.location === 'string' ? item.location : '',
+      max_concurrent: typeof item.max_concurrent === 'number' ? String(item.max_concurrent) : '0',
     })
     setSecrets(emptySecrets)
     setEditSecrets(false)
@@ -112,6 +115,7 @@ export function AuthFileEditDialog({ open, onOpenChange, item, saving, onSave }:
       base_url: base.base_url.trim(),
       project_id: base.project_id.trim(),
       location: base.location.trim(),
+      max_concurrent: Math.max(0, parseInt(base.max_concurrent) || 0),
     }
     if (editSecrets) {
       for (const key of secretLayout.fields) {
@@ -159,6 +163,7 @@ export function AuthFileEditDialog({ open, onOpenChange, item, saving, onSave }:
             <Field label="Base URL" placeholder="https://api.example.com" value={base.base_url} onChange={(v) => setBase((s) => ({ ...s, base_url: v }))} className="sm:col-span-2" />
             <Field label="Project ID" placeholder="GCP project id" value={base.project_id} onChange={(v) => setBase((s) => ({ ...s, project_id: v }))} />
             <Field label="Location" placeholder="us-central1" value={base.location} onChange={(v) => setBase((s) => ({ ...s, location: v }))} />
+            <Field label="并发上限 (0=不限)" placeholder="0" value={base.max_concurrent} onChange={(v) => setBase((s) => ({ ...s, max_concurrent: v }))} />
           </fieldset>
 
           {/* Secret editor */}

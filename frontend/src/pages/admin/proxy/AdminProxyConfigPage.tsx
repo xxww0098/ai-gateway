@@ -104,18 +104,24 @@ export default function AdminProxyConfigPage() {
   const fetchAllConfig = async () => {
     setLoading(true)
     try {
-      const globalConfig = await fetchMgmtApi('/config')
-      
-      const debugData = (await fetchMgmtApi('/debug')) as Record<string, unknown>
+      const [globalConfig, debugRaw, routingRaw, forcePrefixRaw, sizeRaw] = await Promise.all([
+        fetchMgmtApi('/config'),
+        fetchMgmtApi('/debug'),
+        fetchMgmtApi('/routing/strategy'),
+        fetchMgmtApi('/force-model-prefix'),
+        fetchMgmtApi('/logs-max-total-size-mb'),
+      ])
+
+      const debugData = debugRaw as Record<string, unknown>
       setDebug(Boolean(debugData.debug ?? debugData.value ?? false))
 
-      const routingData = (await fetchMgmtApi('/routing/strategy')) as Record<string, unknown>
+      const routingData = routingRaw as Record<string, unknown>
       setRoutingStrategy(String(routingData.strategy ?? routingData['routing-strategy'] ?? routingData.routingStrategy ?? 'round-robin'))
 
-      const forcePrefixData = (await fetchMgmtApi('/force-model-prefix')) as Record<string, unknown>
+      const forcePrefixData = forcePrefixRaw as Record<string, unknown>
       setForceModelPrefix(Boolean(forcePrefixData['force-model-prefix'] ?? forcePrefixData.forceModelPrefix ?? false))
 
-      const sizeData = (await fetchMgmtApi('/logs-max-total-size-mb')) as Record<string, unknown>
+      const sizeData = sizeRaw as Record<string, unknown>
       setLogsMaxSize(Number(sizeData['logs-max-total-size-mb'] ?? sizeData.logsMaxTotalSizeMb ?? 100))
 
       const config = globalConfig as Record<string, unknown>
@@ -200,7 +206,7 @@ export default function AdminProxyConfigPage() {
             />
             <ConfigSetting 
               title="请求日志记录" 
-              description="是否在内存和日志页中记录所有通过的经过网关的完整请求与报错。" 
+              description="是否在内存和日志页中记录经过网关的完整请求与报错。" 
               loading={loading || togglesLoading['reqLog']} 
               value={requestLog} 
               onChange={(val: boolean) => updateSetting('reqLog', '/request-log', val, setRequestLog)} 

@@ -1,15 +1,11 @@
 //! [`UsageStore`] over Postgres — the atomic settle.
 //!
-//! The settle transaction plus hold clearing. One transaction carries four
+//! The settle transaction plus hold clearing. One transaction carries three
 //! writes that must land together:
 //!
 //! 1. the balance debit (`Ledger::settle_tx`, which also records any shortfall),
 //! 2. the `usage_logs` row,
-//! 3. **删掉这次操作的配额预留**，
-//! 4. 把 `actual_cost` 加进那个订阅的三个周期计数器。
-//!
-//! 3 和 4 必须同一个事务：只删不加 = 白用一次额度；只加不删 = 在途与实际
-//! 同时占着额度，一次请求被算两遍。
+//! 3. the subscription counter accumulation.
 //!
 //! The Redis reservation is cleared **only after that transaction commits**.
 //! Clearing it earlier — which a nested standalone settle would do — reopens
@@ -22,8 +18,6 @@ use async_trait::async_trait;
 use gw_infra::Db;
 use gw_ledger::Ledger;
 use std::sync::Arc;
-
-use gw_ledger::{BillingOperationId, SettleOnce};
 
 use crate::ports::{
     BalanceEvent, Id, ModelTokenUsage, SettleReceipt, SettlementCommit, UsageLogEntry, UsageStore,
@@ -51,29 +45,21 @@ impl UsageStore for SqlUsageStore {
     async fn commit_settlement(&self, commit: &SettlementCommit) -> anyhow::Result<SettleReceipt> {
         let mut tx = self.db.begin().await?;
 
-        // The once-guard, unconditional and inside the transaction. The
-        // conditional `UPDATE billing_operations ... WHERE state = 'held'` takes
-        // the row lock, so a second caller — a retry, a concurrent reconciler,
-        // the request's own late finalizer — finds the operation already
-        // terminal and this whole transaction rolls back without a debit.
-        //
-        // There is no caller-supplied flag here on purpose: an idempotency
-        // guard you have to remember to switch on is one you will forget.
         let outcome = match self
             .ledger
-            .settle_once_tx(
+            .settle_tx(
                 &mut tx,
-                &commit.operation,
                 commit.user_id,
+                &commit.request_id,
                 commit.actual_cost,
             )
-            .await?
+            .await
         {
-            SettleOnce::Debited(outcome) => outcome,
-            SettleOnce::AlreadyTerminal(_) => {
+            Err(gw_ledger::LedgerError::AlreadySettled) => {
                 tx.rollback().await?;
-                return Ok(SettleReceipt::AlreadyTerminal);
+                return Ok(SettleReceipt::AlreadySettled);
             }
+            other => other?,
         };
 
         // Read the balance back inside the same transaction so it reflects the
@@ -98,29 +84,13 @@ impl UsageStore for SqlUsageStore {
         entry.raw_metadata = merge_shortfall(entry.raw_metadata, outcome.shortfall);
         insert_usage_log(&mut tx, &entry).await?;
 
-        // 在途预留 → 实际用量，就在这个事务里。
-        //
-        // 订阅 id 取自**预留行自己**，不是 `commit.subscription_id`：对账
-        // 结算一笔崩溃遗留的操作时并不知道它属于哪个订阅，而那一行知道。
-        // 删掉它同时也是「这一格额度已经不在途了」的唯一标记。
-        let reserved_for: Option<(Id,)> = sqlx::query_as(
-            "DELETE FROM quota_reservations WHERE billing_operation_id = $1 \
-             RETURNING subscription_id",
-        )
-        .bind(commit.operation.as_str())
-        .fetch_optional(&mut *tx)
-        .await?;
-
         // Accumulate quota only for a real charge against a live subscription.
         // A lapsed or cancelled one is filtered in the predicate rather than
         // read first, so the check and the update cannot race.
-        //
-        // 没有预留行（没订阅、或这个部署没开配额）时退回原来的纯累加口径。
-        let subscription_id = reserved_for
-            .map(|(id,)| id)
-            .or(commit.subscription_id)
-            .unwrap_or_default();
-        if subscription_id != 0 && commit.actual_cost > 0.0 {
+        if let Some(subscription_id) = commit.subscription_id
+            && subscription_id != 0
+            && commit.actual_cost > 0.0
+        {
             sqlx::query(
                 // The cast is explicit so the addition happens in `numeric`.
                 // Without it Postgres resolves `numeric + float8` by widening
@@ -145,6 +115,7 @@ impl UsageStore for SqlUsageStore {
             shortfall: outcome.shortfall,
             balance_before,
             balance_after,
+            balance_version: outcome.balance_version,
         })
     }
 
@@ -168,8 +139,16 @@ impl UsageStore for SqlUsageStore {
         Ok(())
     }
 
-    async fn clear_hold(&self, user_id: Id, operation: &BillingOperationId) -> anyhow::Result<()> {
-        Ok(self.ledger.clear_hold(user_id, operation.as_str()).await?)
+    async fn clear_hold(
+        &self,
+        user_id: Id,
+        request_id: &str,
+        published: Option<(f64, i64)>,
+    ) -> anyhow::Result<()> {
+        Ok(self
+            .ledger
+            .clear_hold(user_id, request_id, published)
+            .await?)
     }
 
     async fn model_usage_since(
@@ -240,11 +219,11 @@ async fn insert_usage_log(
             cost, \
             rate_multiplier, stream, duration_ms, ip_address, raw_metadata, failed, created_at \
          ) VALUES ( \
-            $1, $2, $3, $4, $5, $6, \
-            $7, $8, $9, \
-            $10, $11, $12, $13, \
-            $14, \
-            $15, $16, $17, $18, $19, $20, NOW() \
+            $1, $2, $3, $4, $5, '', \
+            $6, $7, $8, \
+            $9, $10, $11, $12, \
+            $13, \
+            $14, $15, $16, $17, $18, $19, NOW() \
          )",
     )
     .bind(entry.user_id)
@@ -252,9 +231,6 @@ async fn insert_usage_log(
     .bind(entry.group_id)
     .bind(&entry.request_id)
     .bind(&entry.idempotency_key)
-    // `event_key` used to be a hard-coded empty string. It is the operation id
-    // now: the one column that says *which billing operation* this row is.
-    .bind(&entry.event_key)
     .bind(&entry.model)
     .bind(&entry.provider)
     .bind(&entry.auth_id)

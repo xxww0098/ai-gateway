@@ -49,8 +49,7 @@ use super::{
 #[cfg(test)]
 mod tests;
 
-/// 对应 `apiErrorBadRequest`。
-const ERR_BAD_REQUEST: i32 = 4000;
+use crate::codes::BAD_REQUEST as ERR_BAD_REQUEST;
 
 // ---------------------------------------------------------------- /user/usage
 

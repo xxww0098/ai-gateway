@@ -32,6 +32,7 @@ fn every_rejection() -> Vec<HoldRejection> {
         HoldRejection::PaymentRequired,
         HoldRejection::IdempotencyConflict,
         HoldRejection::IdempotencyReplayUnavailable,
+        HoldRejection::IdempotencyStoreUnavailable,
     ]
 }
 
@@ -126,6 +127,10 @@ fn dispatch_failures_map_onto_distinguishable_statuses() {
     assert_eq!(
         DispatchError::NoUpstream("openai".to_owned()).status(),
         StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        DispatchError::ChannelBusy.status(),
+        StatusCode::TOO_MANY_REQUESTS
     );
     assert_eq!(
         DispatchError::UnknownModel("nope".to_owned()).status(),

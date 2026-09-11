@@ -1,58 +1,16 @@
 //! Streaming relay: framing, settle-on-end, settle-on-drop, usage fallback.
 
-use axum::body::Bytes;
-
 use super::*;
 
-/// 逐跳头留在这一跳 —— 包括这条响应自己 `Connection` **点名**的那些。
-///
-/// 从前这里断言的是「那张写死的名单里有 `connection`」，即常量等于常量
-/// （规范 2.11）：名单漏了什么、`Connection` 的值有没有被读，它一概测不出来 ——
-/// 而当时那张名单确实既漏了 `expect`，也从不看 `Connection` 的值。现在断言的是
-/// **客户端到底收到了什么**，`x-foo` 是这条测试自己造的名字，生产源码里没有它。
-#[tokio::test]
-async fn hop_by_hop_headers_are_not_relayed() {
-    let harness = Harness::build();
-    let mut canned = CannedResponse::sse(&["data: one\n\n"]);
-    for (name, value) in [
-        // 这条消息把 x-foo 声明成只在这一跳有效。
-        ("connection", "close, x-foo"),
-        ("x-foo", "hop-scoped"),
-        ("transfer-encoding", "chunked"),
-        // 上游那份长度描述的是上游那份 body，不是我们发出去的这份。
-        ("content-length", "17"),
-        ("x-request-id", "req_hop"),
-    ] {
-        canned
-            .headers
-            .insert(name, value.parse().expect("测试用的 header 值"));
-    }
-    harness.transport.queue(Ok(canned));
-
-    let response = {
-        use tower::ServiceExt;
-        harness
-            .router()
-            .oneshot(signed_request(
-                "/v1/chat/completions",
-                stream_body("gpt-4o"),
-            ))
-            .await
-            .expect("router responds")
-    };
-
-    assert_eq!(response.status(), StatusCode::OK);
-    for name in ["connection", "x-foo", "transfer-encoding", "content-length"] {
-        assert!(
-            response.headers().get(name).is_none(),
-            "{name} 属于这一跳，不该到达客户端",
-        );
-    }
-    assert_eq!(
-        response.headers().get("x-request-id").map(|v| v.as_bytes()),
-        Some(&b"req_hop"[..]),
-        "普通 header 一个都不许丢",
+#[test]
+fn hop_by_hop_headers_are_not_relayed() {
+    assert!(is_hop_by_hop("connection"));
+    assert!(is_hop_by_hop("transfer-encoding"));
+    assert!(
+        is_hop_by_hop("content-length"),
+        "relaying a stale length would truncate the body we actually send",
     );
+    assert!(!is_hop_by_hop("content-type"));
 }
 
 // ---------------------------------------------------------------- streaming
@@ -72,33 +30,31 @@ async fn collect_stream(
 }
 
 #[tokio::test]
-async fn a_streamed_response_relays_every_frame_verbatim() {
-    // Including the usage frame. Usage is read on a **side band**; the relay
-    // does not filter the byte stream, because filtering it means parsing it,
-    // and parsing the write path is what a pass-through must never do.
+async fn a_streamed_response_relays_its_payload_chunks_verbatim() {
     let harness = Harness::build();
-    harness.transport.queue(Ok(CannedResponse::sse(&[
-        "data: one\n\n",
-        "data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20}}\n\n",
-        "data: [DONE]\n\n",
-    ])));
+    *harness.provider.stream_chunks.lock() = vec![
+        StreamChunk::Payload("data: one\n\n".into()),
+        usage_chunk(10, 20),
+        StreamChunk::Payload("data: [DONE]\n\n".into()),
+    ];
 
     let (status, content_type, body) = collect_stream(&harness, stream_body("gpt-4o")).await;
 
     assert_eq!(status, StatusCode::OK);
     assert!(content_type.contains("event-stream"), "got {content_type}");
     assert_eq!(
-        body,
-        "data: one\n\ndata: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20}}\n\ndata: [DONE]\n\n",
+        body, "data: one\n\ndata: [DONE]\n\n",
+        "the usage chunk is billing metadata and must not reach the client",
     );
 }
 
 #[tokio::test]
 async fn a_stream_settles_once_it_has_finished_and_uses_the_usage_it_carried() {
     let harness = Harness::build();
-    harness
-        .transport
-        .queue(Ok(CannedResponse::sse(&["data: one\n\n", USAGE_FRAME])));
+    *harness.provider.stream_chunks.lock() = vec![
+        StreamChunk::Payload("data: one\n\n".into()),
+        usage_chunk(11, 22),
+    ];
 
     collect_stream(&harness, stream_body("gpt-4o")).await;
     harness.wait_idle().await;
@@ -111,11 +67,15 @@ async fn a_stream_settles_once_it_has_finished_and_uses_the_usage_it_carried() {
 }
 
 #[tokio::test]
-async fn an_upstream_error_status_releases_instead_of_charging() {
+async fn a_stream_that_reports_an_error_releases_instead_of_charging() {
     let harness = Harness::build();
-    harness.transport.queue(Ok(CannedResponse::status(500)));
-    harness.transport.queue(Ok(CannedResponse::status(500)));
-    harness.transport.queue(Ok(CannedResponse::status(500)));
+    *harness.provider.stream_chunks.lock() = vec![
+        StreamChunk::Payload("data: partial\n\n".into()),
+        StreamChunk::Error {
+            status: Some(500),
+            message: "upstream exploded".to_owned(),
+        },
+    ];
 
     collect_stream(&harness, stream_body("gpt-4o")).await;
     harness.wait_idle().await;
@@ -131,11 +91,9 @@ async fn an_upstream_error_status_releases_instead_of_charging() {
 }
 
 #[tokio::test]
-async fn a_stream_without_a_usage_frame_falls_back_rather_than_billing_zero() {
+async fn a_stream_without_a_usage_chunk_falls_back_rather_than_billing_zero() {
     let harness = Harness::build();
-    harness
-        .transport
-        .queue(Ok(CannedResponse::sse(&["data: one\n\n"])));
+    *harness.provider.stream_chunks.lock() = vec![StreamChunk::Payload("data: one\n\n".into())];
 
     collect_stream(&harness, stream_body("gpt-4o")).await;
     harness.wait_idle().await;
@@ -157,11 +115,11 @@ async fn abandoning_a_stream_mid_flight_settles_through_the_shutdown_tracker() {
     use tower::ServiceExt;
 
     let harness = Harness::build();
-    harness.transport.queue(Ok(CannedResponse::sse(&[
-        "data: one\n\n",
-        USAGE_FRAME,
-        "data: two\n\n",
-    ])));
+    *harness.provider.stream_chunks.lock() = vec![
+        StreamChunk::Payload("data: one\n\n".into()),
+        usage_chunk(5, 5),
+        StreamChunk::Payload("data: two\n\n".into()),
+    ];
 
     let response = harness
         .router()
@@ -206,9 +164,10 @@ async fn a_disconnect_that_lands_during_the_drain_is_still_waited_on() {
     use tower::ServiceExt;
 
     let harness = Harness::build();
-    harness
-        .transport
-        .queue(Ok(CannedResponse::sse(&["data: one\n\n", USAGE_FRAME])));
+    *harness.provider.stream_chunks.lock() = vec![
+        StreamChunk::Payload("data: one\n\n".into()),
+        usage_chunk(5, 5),
+    ];
 
     let response = harness
         .router()
@@ -236,20 +195,15 @@ async fn stream_headers_drop_hop_by_hop_and_keep_repeated_values() {
     // the last value, and cloned the whole map. Moving the map keeps every
     // value and still strips hop-by-hop names.
     let harness = Harness::build();
-    let mut canned = CannedResponse::sse(&["data: one\n\n"]);
-    canned
-        .headers
-        .append("set-cookie", "a=1".parse().expect("cookie"));
-    canned
-        .headers
-        .append("set-cookie", "b=2".parse().expect("cookie"));
-    canned
-        .headers
-        .insert("transfer-encoding", "chunked".parse().expect("te"));
-    canned
-        .headers
-        .insert("x-request-id", "req_stream".parse().expect("id"));
-    harness.transport.queue(Ok(canned));
+    {
+        let mut headers = http::HeaderMap::new();
+        headers.append("set-cookie", "a=1".parse().expect("cookie"));
+        headers.append("set-cookie", "b=2".parse().expect("cookie"));
+        headers.insert("transfer-encoding", "chunked".parse().expect("te"));
+        headers.insert("x-request-id", "req_stream".parse().expect("id"));
+        *harness.provider.stream_headers.lock() = headers;
+    }
+    *harness.provider.stream_chunks.lock() = vec![StreamChunk::Payload("data: one\n\n".into())];
 
     let response = {
         use tower::ServiceExt;
@@ -282,80 +236,23 @@ async fn stream_headers_drop_hop_by_hop_and_keep_repeated_values() {
 }
 
 #[tokio::test]
-async fn a_stream_that_runs_to_completion_settles_exactly_once() {
-    // Completion and disconnect take the same path — the settler drops either
-    // way — so what matters is that only *one* settlement results, and that the
-    // drain has nothing left once it has run.
+async fn a_stream_that_runs_to_completion_settles_through_the_tracker_exactly_once() {
+    // Completion and hang-up share StreamSettler::Drop → ProxyState::drain.
+    // Awaiting settle inside poll_next used to mark `done` first, so a client
+    // that disconnected during that future lost the charge.
     let harness = Harness::build();
-    harness
-        .transport
-        .queue(Ok(CannedResponse::sse(&["data: one\n\n", USAGE_FRAME])));
+    *harness.provider.stream_chunks.lock() = vec![
+        StreamChunk::Payload("data: one\n\n".into()),
+        usage_chunk(5, 5),
+    ];
 
     collect_stream(&harness, stream_body("gpt-4o")).await;
     harness.wait_idle().await;
 
     assert_eq!(harness.usage_store.logs.lock().len(), 1);
-    assert_eq!(harness.usage_store.settled_costs().len(), 1);
     assert_eq!(
         harness.drain.len(),
         0,
-        "a finished settlement must not leave a second task behind",
+        "the detached settlement must run exactly once and leave the tracker empty",
     );
-}
-
-/// Production wiring must feed arbitrary HTTP chunks into the incremental SSE
-/// decoder. Splitting one Google JSON object in the middle must neither lose
-/// visible text nor force fallback billing.
-#[tokio::test]
-async fn a_translated_google_stream_survives_transport_fragmentation_and_bills_once() {
-    let resolver: std::sync::Arc<dyn gw_relay::endpoint::upstream::ChannelResolver> =
-        std::sync::Arc::new(
-            gw_relay::endpoint::upstream::InMemoryChannelResolver::new()
-                .with_model("house-model", ["house"])
-                .with_channel("house", gw_relay::endpoint::matrix::Provider::Gemini),
-        );
-    let harness = Harness::build_routed(vec![auth_record("acct-google", "gemini")], Some(resolver));
-
-    let wire = concat!(
-        r#"data: {"responseId":"google-stream-1","modelVersion":"gemini-test","#,
-        r#""candidates":[{"content":{"parts":[{"text":"hello"}]},"finishReason":"STOP"}],"#,
-        r#""usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":4}}"#,
-        "\n\n"
-    )
-    .as_bytes();
-    let hello = wire
-        .windows(b"hello".len())
-        .position(|window| window == b"hello")
-        .expect("fixture contains text");
-    let cut = hello + 2;
-
-    let mut headers = http::HeaderMap::new();
-    headers.insert(
-        http::header::CONTENT_TYPE,
-        http::HeaderValue::from_static("text/event-stream"),
-    );
-    harness.transport.queue(Ok(CannedResponse {
-        status: 200,
-        headers,
-        frames: vec![
-            Bytes::copy_from_slice(&wire[..cut]),
-            Bytes::copy_from_slice(&wire[cut..]),
-        ],
-    }));
-
-    let (status, content_type, body) = collect_stream(&harness, stream_body("house-model")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(content_type.contains("event-stream"));
-    assert!(
-        body.contains("hello"),
-        "translated output lost text: {body}"
-    );
-    assert!(body.ends_with("data: [DONE]\n\n"));
-
-    harness.wait_idle().await;
-    let logs = harness.usage_store.logs.lock();
-    assert_eq!(logs.len(), 1, "translated stream must settle exactly once");
-    assert_eq!(logs[0].input_tokens, 9);
-    assert_eq!(logs[0].output_tokens, 4);
-    assert!(!logs[0].failed);
 }

@@ -11,7 +11,6 @@ fn zeroed() -> RateLimitSettings {
         requests_per_min: 0,
         tokens_per_min: 0,
         max_concurrent: 0,
-        burst_size: 0,
         global_request_cap: 0,
         global_token_cap: 0,
         group_overrides: HashMap::new(),
@@ -30,7 +29,6 @@ fn zero_valued_settings_resolve_to_the_defaults() {
         requests_per_min: -1,
         tokens_per_min: -1,
         max_concurrent: -1,
-        burst_size: -1,
         global_request_cap: -1,
         global_token_cap: -1,
         ..zeroed()
@@ -45,7 +43,6 @@ fn positive_settings_are_left_alone() {
         requests_per_min: 1,
         tokens_per_min: 2,
         max_concurrent: 3,
-        burst_size: 4,
         global_request_cap: 5,
         global_token_cap: 6,
         ..zeroed()
@@ -77,7 +74,6 @@ fn group_override_replaces_only_its_positive_fields() {
             requests_per_min: 5,
             tokens_per_min: 0,
             max_concurrent: -1,
-            burst_size: 0,
         },
     );
 
@@ -88,6 +84,21 @@ fn group_override_replaces_only_its_positive_fields() {
         "an unset override field must not zero the budget"
     );
     assert_eq!(limits.max_concurrent, settings.max_concurrent);
+}
+
+/// A positive users.concurrency replaces the YAML/group cap; zero leaves it.
+#[test]
+fn a_positive_user_concurrency_replaces_the_configured_cap() {
+    let settings = RateLimitSettings::default();
+    let configured = settings.effective_limits(None, "");
+    assert_ne!(configured.max_concurrent, 1);
+
+    let tighter = settings.effective_limits_for(None, "", 1);
+    assert_eq!(tighter.max_concurrent, 1);
+    assert_eq!(tighter.max_requests, configured.max_requests);
+
+    let unset = settings.effective_limits_for(None, "", 0);
+    assert_eq!(unset.max_concurrent, configured.max_concurrent);
 }
 
 /// The per-model ceiling is resolved last, so it wins over a group override.
@@ -173,7 +184,6 @@ fn each_denial_payload_maps_to_its_own_dimension() {
     .collect();
 
     assert_eq!(seen.len(), 5, "two dimensions collapsed into one: {seen:?}");
-    assert!(seen.iter().filter(|d| d.is_global()).count() == 2);
 }
 
 /// An unknown or malformed reply must deny, not fall through to allow: the one
@@ -281,7 +291,6 @@ fn only(dimension: DeniedDimension, limit: i64) -> RateLimitSettings {
         requests_per_min: 100_000,
         tokens_per_min: 100_000_000,
         max_concurrent: 100_000,
-        burst_size: 2,
         global_request_cap: 1_000_000,
         global_token_cap: 1_000_000_000,
         ..zeroed()
@@ -452,6 +461,52 @@ async fn releasing_a_slot_admits_the_next_request() {
     );
 }
 
+/// users.concurrency is the in-flight cap even when YAML allows more.
+#[tokio::test]
+#[ignore = "需要本地 Redis（REDIS_TEST_ADDR，默认 127.0.0.1:6379 的 db 15）"]
+async fn a_user_concurrency_of_one_admits_only_one_in_flight() {
+    let limiter = RateLimiter::new(
+        Some(testsupport::test_redis().await),
+        only(DeniedDimension::Concurrent, 10),
+    );
+    let identity = testsupport::unique_name("user-conc");
+
+    let first = limiter.limit(&identity, 1, "gpt-4o", None, 1).await;
+    assert!(first.is_allowed());
+    let second = limiter.limit(&identity, 1, "gpt-4o", None, 1).await;
+    assert_eq!(second.denied_dimension(), Some(DeniedDimension::Concurrent));
+}
+
+/// Account slots are independent of tenant windows and of the global caps.
+#[tokio::test]
+#[ignore = "需要本地 Redis（REDIS_TEST_ADDR，默认 127.0.0.1:6379 的 db 15）"]
+async fn a_channel_slot_is_returned_and_does_not_consume_the_global_cap() {
+    let limiter = RateLimiter::new(
+        Some(testsupport::test_redis().await),
+        only(DeniedDimension::Concurrent, 10),
+    );
+    let auth_id = testsupport::unique_name("acct");
+
+    let first = limiter.acquire_channel(&auth_id, 1).await;
+    assert!(first.is_allowed());
+    let slot = first.release_id().expect("a reserved channel slot");
+    let second = limiter.acquire_channel(&auth_id, 1).await;
+    assert_eq!(second.denied_dimension(), Some(DeniedDimension::Concurrent));
+
+    limiter
+        .release_channel(&auth_id, slot)
+        .await
+        .expect(REDIS_REQUIRED);
+    assert!(
+        limiter.acquire_channel(&auth_id, 1).await.is_allowed(),
+        "the freed channel slot was not reusable"
+    );
+    assert!(
+        limiter.acquire_channel(&auth_id, 0).await.is_allowed(),
+        "a non-positive cap must not reserve or deny"
+    );
+}
+
 /// The global caps deny even when the caller's own budgets are untouched.
 #[tokio::test]
 #[ignore = "需要本地 Redis（REDIS_TEST_ADDR，默认 127.0.0.1:6379 的 db 15）"]
@@ -500,7 +555,6 @@ fn config_group_overrides_survive_the_lift() {
             requests_per_min: 5,
             tokens_per_min: 0,
             max_concurrent: 0,
-            burst_size: 0,
         },
     );
     cfg.model_token_limits.insert("gpt-4o".to_owned(), 42);

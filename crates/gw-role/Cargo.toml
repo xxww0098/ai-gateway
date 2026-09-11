@@ -1,0 +1,14 @@
+[package]
+name = "gw-role"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true
+
+# Zero crate dependencies on purpose: other projects copy `src/role_core.rs`
+# or depend on this crate. Do not add serde/sqlx/axum here.

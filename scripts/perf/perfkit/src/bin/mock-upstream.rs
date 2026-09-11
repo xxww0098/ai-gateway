@@ -27,12 +27,12 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::Query;
 use axum::http::{StatusCode, header};
 use axum::response::Response;
 use axum::routing::post;
-use axum::Router;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -76,7 +76,8 @@ fn default_interval_us() -> u64 {
 /// 结算路径，量到的就不是正常路径的开销。
 fn unary_body(target: usize) -> Vec<u8> {
     const HEAD: &str = r#"{"id":"perf","object":"chat.completion","created":0,"model":"gpt-4o","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":""#;
-    const TAIL: &str = r#""}}],"usage":{"prompt_tokens":256,"completion_tokens":512,"total_tokens":768}}"#;
+    const TAIL: &str =
+        r#""}}],"usage":{"prompt_tokens":256,"completion_tokens":512,"total_tokens":768}}"#;
     let overhead = HEAD.len() + TAIL.len();
     let pad = target.saturating_sub(overhead);
     let mut out = Vec::with_capacity(overhead + pad);

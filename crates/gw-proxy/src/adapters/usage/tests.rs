@@ -1,18 +1,15 @@
 //! The atomic settle. These need Postgres because atomicity is precisely what
 //! cannot be observed against a fake.
 
-use gw_ledger::NewOperation;
-
 use super::*;
 use crate::ports::{UsageLogEntry, UsageStore};
 use crate::testsupport::{fresh_db, seed_user};
 
-fn entry(user_id: Id, operation: &BillingOperationId, cost: f64) -> UsageLogEntry {
+fn entry(user_id: Id, request_id: &str, cost: f64) -> UsageLogEntry {
     UsageLogEntry {
         user_id,
         api_key_id: 1,
-        request_id: "trace-the-client-saw".to_owned(),
-        event_key: operation.to_string(),
+        request_id: request_id.to_owned(),
         model: "gpt-4o".to_owned(),
         provider: "openai".to_owned(),
         input_tokens: 100,
@@ -23,33 +20,14 @@ fn entry(user_id: Id, operation: &BillingOperationId, cost: f64) -> UsageLogEntr
     }
 }
 
-fn commit(user_id: Id, operation: &BillingOperationId, cost: f64) -> SettlementCommit {
+fn commit(user_id: Id, request_id: &str, cost: f64) -> SettlementCommit {
     SettlementCommit {
         user_id,
-        operation: operation.clone(),
+        request_id: request_id.to_owned(),
         actual_cost: cost,
-        entry: entry(user_id, operation, cost),
+        entry: entry(user_id, request_id, cost),
         subscription_id: None,
     }
-}
-
-/// Admits an operation so there is a `held` row for the settle to terminate.
-/// Every commit needs one — that row *is* the once-guard.
-async fn hold_operation(pool: &sqlx::PgPool, user_id: Id, amount: f64) -> BillingOperationId {
-    let ledger = Ledger::new(pool.clone(), None);
-    let operation = NewOperation {
-        operation_id: BillingOperationId::mint(),
-        user_id,
-        reserved_amount: amount,
-        admitted_liability: amount,
-        request_fingerprint: "fingerprint".to_owned(),
-        client_trace_id: "trace-the-client-saw".to_owned(),
-    };
-    ledger
-        .begin_operation(&operation)
-        .await
-        .expect("begin operation");
-    operation.operation_id
 }
 
 /// A store over a ledger with no Redis: `settle_tx` is pure Postgres, and the
@@ -71,12 +49,12 @@ async fn balance_of(pool: &sqlx::PgPool, user_id: Id) -> f64 {
 
 async fn usage_rows(
     pool: &sqlx::PgPool,
-    operation: &BillingOperationId,
+    request_id: &str,
 ) -> Vec<(f64, bool, Option<serde_json::Value>)> {
     sqlx::query_as::<_, (gw_model::compat::Money, bool, Option<serde_json::Value>)>(
-        "SELECT cost, failed, raw_metadata FROM usage_logs WHERE event_key = $1",
+        "SELECT cost, failed, raw_metadata FROM usage_logs WHERE request_id = $1",
     )
-    .bind(operation.as_str())
+    .bind(request_id)
     .fetch_all(pool)
     .await
     .expect("reading usage_logs")
@@ -90,10 +68,9 @@ async fn usage_rows(
 async fn a_settlement_debits_and_logs_in_one_go() {
     let pool = fresh_db("settle_commits").await;
     seed_user(&pool, 7, 10.0).await;
-    let operation = hold_operation(&pool, 7, 5.0).await;
 
     let receipt = store(&pool)
-        .commit_settlement(&commit(7, &operation, 2.5))
+        .commit_settlement(&commit(7, "req-1", 2.5))
         .await
         .expect("the settlement commits");
 
@@ -101,6 +78,7 @@ async fn a_settlement_debits_and_logs_in_one_go() {
         shortfall,
         balance_before,
         balance_after,
+        ..
     } = receipt
     else {
         panic!("expected a commit, got {receipt:?}");
@@ -109,7 +87,7 @@ async fn a_settlement_debits_and_logs_in_one_go() {
     assert_eq!(balance_before, 10.0);
     assert_eq!(balance_after, 7.5);
     assert_eq!(balance_of(&pool, 7).await, 7.5);
-    assert_eq!(usage_rows(&pool, &operation).await.len(), 1);
+    assert_eq!(usage_rows(&pool, "req-1").await.len(), 1);
 }
 
 #[tokio::test]
@@ -119,10 +97,9 @@ async fn a_cost_the_balance_cannot_cover_is_debited_partially_and_recorded_as_de
     // uncovered part becomes a shortfall the tenant has to clear.
     let pool = fresh_db("settle_shortfall").await;
     seed_user(&pool, 7, 1.0).await;
-    let operation = hold_operation(&pool, 7, 5.0).await;
 
     let receipt = store(&pool)
-        .commit_settlement(&commit(7, &operation, 3.0))
+        .commit_settlement(&commit(7, "req-1", 3.0))
         .await
         .expect("the settlement commits");
 
@@ -136,7 +113,7 @@ async fn a_cost_the_balance_cannot_cover_is_debited_partially_and_recorded_as_de
         "the balance is drained, not negative"
     );
 
-    let rows = usage_rows(&pool, &operation).await;
+    let rows = usage_rows(&pool, "req-1").await;
     let metadata = rows[0].2.clone().expect("the shortfall must be annotated");
     assert_eq!(
         metadata["shortfall_usd"].as_f64(),
@@ -150,9 +127,8 @@ async fn a_cost_the_balance_cannot_cover_is_debited_partially_and_recorded_as_de
 async fn a_fallback_tag_survives_alongside_the_shortfall() {
     let pool = fresh_db("settle_fallback_tag").await;
     seed_user(&pool, 7, 1.0).await;
-    let operation = hold_operation(&pool, 7, 5.0).await;
 
-    let mut commit = commit(7, &operation, 3.0);
+    let mut commit = commit(7, "req-1", 3.0);
     commit.entry.raw_metadata =
         crate::usage::settle_annotations(Some(crate::usage::REASON_MISSING_USAGE), 0.0);
     store(&pool)
@@ -160,7 +136,7 @@ async fn a_fallback_tag_survives_alongside_the_shortfall() {
         .await
         .expect("commits");
 
-    let rows = usage_rows(&pool, &operation).await;
+    let rows = usage_rows(&pool, "req-1").await;
     let metadata = rows[0].2.clone().expect("annotated");
     assert_eq!(
         metadata["billing_fallback"]["reason"].as_str(),
@@ -176,45 +152,39 @@ async fn a_settlement_for_an_unknown_user_writes_nothing_at_all() {
     // The debit fails, so the usage row must roll back with it — a row without
     // a matching debit is the divergence this transaction exists to prevent.
     let pool = fresh_db("settle_rollback").await;
-    // The operation exists; the *user* does not, so the debit is what fails.
-    let operation = hold_operation(&pool, 404, 5.0).await;
 
     let failed = store(&pool)
-        .commit_settlement(&commit(404, &operation, 1.0))
+        .commit_settlement(&commit(404, "req-1", 1.0))
         .await;
 
     assert!(failed.is_err(), "settling against a missing user must fail");
     assert!(
-        usage_rows(&pool, &operation).await.is_empty(),
+        usage_rows(&pool, "req-1").await.is_empty(),
         "the usage row must not survive a rolled-back debit",
     );
 }
 
 #[tokio::test]
 #[ignore = "needs a local Postgres: see testsupport::PG_HOWTO"]
-async fn a_second_commit_for_one_operation_is_a_no_op() {
-    // No caller flag arms this. The operation's terminal state does.
+async fn the_reconcile_guard_makes_a_second_run_a_no_op() {
     let pool = fresh_db("settle_idempotent").await;
     seed_user(&pool, 7, 10.0).await;
     let store = store(&pool);
-    let operation = hold_operation(&pool, 7, 5.0).await;
 
-    let first = commit(7, &operation, 1.0);
+    let first = commit(7, "req-1", 1.0);
     assert!(matches!(
         store.commit_settlement(&first).await.expect("first run"),
         SettleReceipt::Committed { .. }
     ));
 
-    for _ in 0..5 {
-        let again = store.commit_settlement(&first).await.expect("re-run");
-        assert_eq!(again, SettleReceipt::AlreadyTerminal);
-    }
+    let second = store.commit_settlement(&first).await.expect("second run");
+    assert_eq!(second, SettleReceipt::AlreadySettled);
     assert_eq!(
         balance_of(&pool, 7).await,
         9.0,
-        "an orphaned operation must never be charged twice",
+        "an orphaned hold must never be charged twice",
     );
-    assert_eq!(usage_rows(&pool, &operation).await.len(), 1);
+    assert_eq!(usage_rows(&pool, "req-1").await.len(), 1);
 }
 
 #[tokio::test]
@@ -243,9 +213,8 @@ async fn a_live_subscription_accumulates_and_a_lapsed_one_does_not() {
     }
 
     let store = store(&pool);
-    for subscription_id in [1_i64, 2] {
-        let operation = hold_operation(&pool, 7, 5.0).await;
-        let mut commit = commit(7, &operation, 1.0);
+    for (subscription_id, request_id) in [(1_i64, "req-live"), (2, "req-lapsed")] {
+        let mut commit = commit(7, request_id, 1.0);
         commit.subscription_id = Some(subscription_id);
         store.commit_settlement(&commit).await.expect("commits");
     }
@@ -269,15 +238,14 @@ async fn a_standalone_usage_row_lands_outside_any_transaction() {
     let pool = fresh_db("settle_standalone_log").await;
     seed_user(&pool, 7, 10.0).await;
 
-    let operation = BillingOperationId::mint();
-    let mut failed = entry(7, &operation, 0.0);
+    let mut failed = entry(7, "req-1", 0.0);
     failed.failed = true;
     store(&pool)
         .insert_usage_log(&failed)
         .await
         .expect("inserting a failure row");
 
-    let rows = usage_rows(&pool, &operation).await;
+    let rows = usage_rows(&pool, "req-1").await;
     assert_eq!(rows.len(), 1);
     assert!(rows[0].1, "the row must record that it failed");
 }
@@ -315,23 +283,19 @@ async fn model_usage_since_sums_today_and_ignores_other_users_and_older_rows() {
     seed_user(&pool, 8, 10.0).await;
     let store = store(&pool);
 
-    let mut alpha = entry(7, &BillingOperationId::mint(), 0.0);
+    let mut alpha = entry(7, "req-a", 0.0);
     alpha.model = "alpha".to_owned();
     alpha.input_tokens = 10;
     alpha.output_tokens = 4;
-    let mut alpha_again = entry(7, &BillingOperationId::mint(), 0.0);
+    let mut alpha_again = entry(7, "req-b", 0.0);
     alpha_again.model = "alpha".to_owned();
     alpha_again.input_tokens = 3;
     alpha_again.output_tokens = 1;
-    let mut yesterday = entry(7, &BillingOperationId::mint(), 0.0);
+    let mut yesterday = entry(7, "req-c", 0.0);
     yesterday.model = "beta".to_owned();
     yesterday.input_tokens = 8;
     yesterday.output_tokens = 2;
-    // 回拨这一行的时间要挑得中它：`entry()` 给每一行的 `request_id` 都是同一个
-    // 常量，所以 `WHERE request_id = 'req-c'` 一行都改不到 —— 那样「昨天」
-    // 其实还在今天，断言测的就不是它写的那件事了。
-    yesterday.request_id = "req-c".to_owned();
-    let mut stranger = entry(8, &BillingOperationId::mint(), 0.0);
+    let mut stranger = entry(8, "req-d", 0.0);
     stranger.model = "other".to_owned();
     stranger.input_tokens = 99;
     stranger.output_tokens = 99;
@@ -342,7 +306,7 @@ async fn model_usage_since_sums_today_and_ignores_other_users_and_older_rows() {
     sqlx::query(
         "UPDATE usage_logs SET created_at = NOW() - INTERVAL '2 days' WHERE request_id = $1",
     )
-    .bind(yesterday.request_id.clone())
+    .bind("req-c")
     .execute(&pool)
     .await
     .expect("backdate yesterday");
@@ -365,68 +329,113 @@ async fn model_usage_since_sums_today_and_ignores_other_users_and_older_rows() {
     assert_eq!(rows[0].requests, 2);
 }
 
-/// **结算把在途预留转成实际用量，两件事在同一个事务里。**
-///
-/// 只删不加 = 白用一次额度；只加不删 = 在途与实际同时占着额度，
-/// 一次请求被算两遍。这条同时钉住两半。
-///
-/// 订阅 id 取自**预留行自己**（`commit.subscription_id` 这里刻意留空），
-/// 因为对账在结算一笔崩溃遗留的操作时并不知道它属于哪个订阅 —— 而那一行知道。
+fn success_usage_count(rows: &[(f64, bool, Option<serde_json::Value>)]) -> usize {
+    rows.iter().filter(|row| !row.1).count()
+}
+
+async fn second_pool(pool: &sqlx::PgPool) -> sqlx::PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(8)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .expect("second pool to the same database")
+}
+
+/// A0a: the hot path does not skip, so a serial replay of the same request id
+/// currently charges twice. The contract is one debit and one success usage row.
 #[tokio::test]
 #[ignore = "needs a local Postgres: see testsupport::PG_HOWTO"]
-async fn a_settlement_converts_the_quota_reservation_into_actual_usage() {
-    let pool = fresh_db("settle_quota_reservation").await;
+async fn serial_hot_path_replays_must_debit_once() {
+    let pool = fresh_db("settle_a0a").await;
     seed_user(&pool, 7, 10.0).await;
-    sqlx::query(
-        "INSERT INTO subscriptions (id, user_id, package_id, group_id, group_name, status, \
-                starts_at, expires_at, daily_usage_usd, daily_reset_at, weekly_usage_usd, \
-                weekly_reset_at, monthly_usage_usd, monthly_reset_at, funding_source, \
-                funding_reference, price_paid_usd, notes, created_at, updated_at) \
-         VALUES (1, 7, 1, 1, '', 'active', NOW(), NOW() + INTERVAL '1 day', 0, \
-                 NOW() + INTERVAL '1 day', 0, NOW() + INTERVAL '7 days', 0, \
-                 NOW() + INTERVAL '30 days', '', '', 0, '', NOW(), NOW())",
-    )
-    .execute(&pool)
-    .await
-    .expect("seeding a subscription");
+    let store = store(&pool);
 
-    let operation = hold_operation(&pool, 7, 5.0).await;
-    sqlx::query(
-        "INSERT INTO quota_reservations \
-            (billing_operation_id, subscription_id, reserved_amount, created_at) \
-         VALUES ($1, 1, CAST(5 AS numeric), NOW())",
-    )
-    .bind(operation.as_str())
-    .execute(&pool)
-    .await
-    .expect("seeding a reservation");
-
-    // `subscription_id` 留空：转账要靠预留行自己认领订阅。
-    store(&pool)
-        .commit_settlement(&commit(7, &operation, 1.25))
+    store
+        .commit_settlement(&commit(7, "req-1", 2.5))
         .await
-        .expect("commits");
-
-    let left: (i64,) = sqlx::query_as("SELECT COUNT(*)::bigint FROM quota_reservations")
-        .fetch_one(&pool)
+        .expect("first settle");
+    store
+        .commit_settlement(&commit(7, "req-1", 2.5))
         .await
-        .expect("counting reservations");
-    assert_eq!(left.0, 0, "结算之后预留必须消失，否则额度被算两遍");
+        .expect("replay settle");
 
-    let used: (
-        gw_model::compat::Money,
-        gw_model::compat::Money,
-        gw_model::compat::Money,
-    ) = sqlx::query_as(
-        "SELECT daily_usage_usd, weekly_usage_usd, monthly_usage_usd \
-         FROM subscriptions WHERE id = 1",
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("reading counters");
-    assert_eq!(
-        (used.0.0, used.1.0, used.2.0),
-        (1.25, 1.25, 1.25),
-        "三个周期计数器都要加上**实际**扣款，不是预留的那个上限",
+    assert!(
+        (balance_of(&pool, 7).await - 7.5).abs() < 1e-9,
+        "the same request id must reduce the balance once"
     );
+    assert_eq!(
+        success_usage_count(&usage_rows(&pool, "req-1").await),
+        1,
+        "a replay must not insert a second success usage row"
+    );
+}
+
+/// A0b: two pools, skip=true, concurrent READ COMMITTED check-then-insert.
+/// Desired: one winner, one debit. Current code can charge every racer.
+#[tokio::test]
+#[ignore = "needs a local Postgres: see testsupport::PG_HOWTO"]
+async fn concurrent_reconcile_settles_must_debit_once() {
+    let pool_a = fresh_db("settle_a0b").await;
+    let pool_b = second_pool(&pool_a).await;
+    seed_user(&pool_a, 7, 10.0).await;
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let mut handles = Vec::new();
+    for i in 0..8 {
+        let pool = if i % 2 == 0 {
+            pool_a.clone()
+        } else {
+            pool_b.clone()
+        };
+        let barrier = barrier.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store(&pool)
+                .commit_settlement(&commit(7, "req-1", 2.5))
+                .await
+        }));
+    }
+
+    let mut committed = 0usize;
+    for handle in handles {
+        match handle.await.expect("join").expect("settle") {
+            SettleReceipt::Committed { .. } => committed += 1,
+            SettleReceipt::AlreadySettled => {}
+        }
+    }
+
+    assert_eq!(committed, 1, "exactly one racer may debit");
+    assert!(
+        (balance_of(&pool_a, 7).await - 7.5).abs() < 1e-9,
+        "concurrent skip=true must not stack debits"
+    );
+    assert_eq!(success_usage_count(&usage_rows(&pool_a, "req-1").await), 1);
+}
+
+/// A0c: a failed usage audit row is not a successful settlement.
+/// Desired: a later skip=true settle still debits once.
+#[tokio::test]
+#[ignore = "needs a local Postgres: see testsupport::PG_HOWTO"]
+async fn a_failed_usage_row_must_not_block_a_successful_settle() {
+    let pool = fresh_db("settle_a0c").await;
+    seed_user(&pool, 7, 10.0).await;
+    let store = store(&pool);
+
+    let mut failed = entry(7, "req-1", 0.0);
+    failed.failed = true;
+    store
+        .insert_usage_log(&failed)
+        .await
+        .expect("failed audit row");
+
+    let receipt = store
+        .commit_settlement(&commit(7, "req-1", 2.5))
+        .await
+        .expect("success after failure");
+    assert!(
+        matches!(receipt, SettleReceipt::Committed { .. }),
+        "a failed row must not be treated as AlreadySettled: {receipt:?}"
+    );
+    assert!((balance_of(&pool, 7).await - 7.5).abs() < 1e-9);
+    assert_eq!(success_usage_count(&usage_rows(&pool, "req-1").await), 1);
 }

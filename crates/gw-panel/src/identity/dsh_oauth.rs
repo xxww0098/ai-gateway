@@ -17,8 +17,8 @@ use axum::routing::{get, post};
 use chrono::Utc;
 use serde::Deserialize;
 
-use super::{bad_request, internal, not_found, parse_json_body};
 use super::auth::{allow_auth_attempt, rate_limited};
+use super::{bad_request, internal, not_found, parse_json_body};
 use crate::identity::apikey::generate_api_key;
 use crate::identity::oplog::ReqMeta;
 use crate::{AuthUser, PanelState, codes, err, ok, ok_empty};
@@ -40,10 +40,11 @@ struct Store {
 
 impl Store {
     fn insert(&mut self, session: DeviceSession) {
-        self.by_user
-            .insert(normalize_user_code(&session.user_code), session.device_code.clone());
-        self.by_device
-            .insert(session.device_code.clone(), session);
+        self.by_user.insert(
+            normalize_user_code(&session.user_code),
+            session.device_code.clone(),
+        );
+        self.by_device.insert(session.device_code.clone(), session);
     }
 
     fn get_device(&self, device_code: &str) -> Option<DeviceSession> {
@@ -56,8 +57,7 @@ impl Store {
     }
 
     fn put(&mut self, session: DeviceSession) {
-        self.by_device
-            .insert(session.device_code.clone(), session);
+        self.by_device.insert(session.device_code.clone(), session);
     }
 
     fn sweep(&mut self, now: chrono::DateTime<Utc>) {
@@ -69,7 +69,8 @@ impl Store {
             .collect();
         for device in stale {
             if let Some(session) = self.by_device.remove(&device) {
-                self.by_user.remove(&normalize_user_code(&session.user_code));
+                self.by_user
+                    .remove(&normalize_user_code(&session.user_code));
             }
         }
     }
@@ -185,11 +186,7 @@ pub async fn poll_token(body: Bytes) -> Response {
         store.get_device(req.device_code.trim())
     };
     let Some(session) = session else {
-        return err(
-            StatusCode::BAD_REQUEST,
-            codes::BAD_REQUEST,
-            "expired_token",
-        );
+        return err(StatusCode::BAD_REQUEST, codes::BAD_REQUEST, "expired_token");
     };
     match session::poll(&session, now) {
         PollOutcome::Pending => ok(serde_json::json!({ "status": "pending" })),
@@ -225,13 +222,13 @@ pub async fn approve_device(
         return not_found("未找到该授权码");
     };
 
-    let (plaintext, _row) = match generate_api_key(
-        &state.pg,
-        user.user_id,
-        "AGW-Oauth",
-        None,
-    )
-    .await
+    // 先确认会话还能审批，再发 key：过期/已处理的会话不能留下一把没人持有
+    // 明文的孤儿 key。
+    if let Err(error) = session::require_pending(&session, now) {
+        return transition_failure(error);
+    }
+
+    let (plaintext, row) = match generate_api_key(&state.pg, user.user_id, "AGW-Oauth", None).await
     {
         Ok(pair) => pair,
         Err(error) => {
@@ -245,16 +242,30 @@ pub async fn approve_device(
             lock_store().put(next);
             ok(serde_json::json!({ "status": "approved" }))
         }
-        Err(TransitionError::Expired) => err(
-            StatusCode::BAD_REQUEST,
-            codes::BAD_REQUEST,
-            "授权码已过期",
-        ),
-        Err(TransitionError::AlreadyResolved) => err(
-            StatusCode::CONFLICT,
-            super::ERR_CONFLICT,
-            "该授权码已处理",
-        ),
+        Err(error) => {
+            // 并发审批挤进了预检和落 key 之间的窗口：把刚发的 key 删掉，
+            // 失败也只记日志（孤儿 key 无明文，不可用，只是碍眼）。
+            if let Err(db_error) = sqlx::query("DELETE FROM api_keys WHERE id = $1")
+                .bind(row.id)
+                .execute(&state.pg)
+                .await
+            {
+                tracing::warn!(event = "dsh_oauth_orphan_key", key_id = row.id, error = %db_error);
+            }
+            transition_failure(error)
+        }
+    }
+}
+
+/// [`session::approve`] / [`session::deny`] 被拒时的统一响应。
+fn transition_failure(error: TransitionError) -> Response {
+    match error {
+        TransitionError::Expired => {
+            err(StatusCode::BAD_REQUEST, codes::BAD_REQUEST, "授权码已过期")
+        }
+        TransitionError::AlreadyResolved => {
+            err(StatusCode::CONFLICT, super::ERR_CONFLICT, "该授权码已处理")
+        }
     }
 }
 
@@ -281,16 +292,7 @@ pub async fn deny_device(user: AuthUser, body: Bytes) -> Response {
             lock_store().put(next);
             ok_empty()
         }
-        Err(TransitionError::Expired) => err(
-            StatusCode::BAD_REQUEST,
-            codes::BAD_REQUEST,
-            "授权码已过期",
-        ),
-        Err(TransitionError::AlreadyResolved) => err(
-            StatusCode::CONFLICT,
-            super::ERR_CONFLICT,
-            "该授权码已处理",
-        ),
+        Err(error) => transition_failure(error),
     }
 }
 

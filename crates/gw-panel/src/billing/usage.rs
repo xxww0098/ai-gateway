@@ -38,8 +38,7 @@ pub mod user;
 #[cfg(test)]
 mod tests;
 
-/// 对应 `apiErrorInternal`。
-const ERR_INTERNAL: i32 = 5000;
+use crate::codes::INTERNAL as ERR_INTERNAL;
 
 // ---------------------------------------------------------------- usage logs
 
@@ -359,7 +358,7 @@ fn window_start(now: DateTime<Local>, days: i64) -> DateTime<Utc> {
 /// exists on that date is then the right lower bound, and a fold picks the
 /// earlier of the two ambiguous instants. 既有实现里的 `time.Date` 宁可就近取整
 /// 也不报错，so this must not panic either.
-fn local_midnight(day: NaiveDate) -> DateTime<Utc> {
+pub(crate) fn local_midnight(day: NaiveDate) -> DateTime<Utc> {
     match Local.from_local_datetime(&day.and_hms_opt(0, 0, 0).unwrap_or_default()) {
         chrono::LocalResult::Single(at) => at.with_timezone(&Utc),
         chrono::LocalResult::Ambiguous(earliest, _) => earliest.with_timezone(&Utc),

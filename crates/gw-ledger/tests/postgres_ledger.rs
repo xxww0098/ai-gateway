@@ -7,11 +7,17 @@
 
 mod common;
 
+#[path = "postgres_ledger/balance_tx.rs"]
+mod balance_tx;
+
+#[path = "postgres_ledger/intent.rs"]
+mod intent;
+
+#[path = "postgres_ledger/plan.rs"]
+mod plan;
+
 use common::{FAULT_PREFIX, Fixture, Rng};
-use gw_ledger::{
-    Admission, BillingOperationId, LedgerError, NewOperation, OperationConflict, OperationState,
-    ReleaseOnce, SettleOnce, shortfall_resolve_reference,
-};
+use gw_ledger::{LedgerError, WriteOff, shortfall_resolve_reference};
 
 const EPSILON: f64 = 1e-9;
 
@@ -338,13 +344,15 @@ async fn an_overrun_records_debt_and_blocks_the_user() {
     fx.cleanup().await;
 }
 
-/// The compensating credit clears the debt, and only through the paired
-/// reference — which is the whole point of pinning it to the debt row's id.
+/// The write-off clears the debt, and only through the paired reference —
+/// which is the whole point of pinning it to the debt row's id. And it is a
+/// *zero-amount* credit: the gate opens, the balance does not move.
 #[tokio::test]
 #[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
 async fn a_paired_credit_resolves_the_debt_and_an_unpaired_one_does_not() {
     let mut fx = Fixture::postgres_only().await;
     let user = fx.seed_user(0.0).await;
+    let admin = fx.seed_user(0.0).await;
 
     let debit_id = fx.insert_shortfall_row(user, "req-debt", 5.0).await;
     assert!(
@@ -367,21 +375,164 @@ async fn a_paired_credit_resolves_the_debt_and_an_unpaired_one_does_not() {
         "an unpaired credit must not clear a tracked debt"
     );
 
-    // The paired reference does.
-    fx.ledger
-        .resolve_shortfall(user, "req-debt", debit_id, 5.0)
-        .await
-        .expect("resolve");
+    // The paired reference does — and the user's money is not touched by it.
+    let before = fx.balance(user).await;
+    assert_eq!(
+        fx.ledger
+            .write_off_shortfall(debit_id, admin)
+            .await
+            .expect("write off"),
+        WriteOff::Written
+    );
     assert!(
         !fx.ledger
             .has_unresolved_shortfall(user)
             .await
             .expect("probe")
     );
+    assert!(
+        approx(fx.balance(user).await, before),
+        "a write-off must not hand the user any balance"
+    );
 
-    // And the resolving row is exactly the reference the SQL predicate builds.
+    // And the resolving row is exactly the reference the SQL predicate builds,
+    // carrying a zero amount so the integrity replay is undisturbed.
     let reference = shortfall_resolve_reference("req-debt", debit_id);
-    assert_eq!(fx.logs_for(user, &reference).await.len(), 1);
+    let rows = fx.logs_for(user, &reference).await;
+    assert_eq!(rows.len(), 1);
+    assert!(approx(rows[0].1, 0.0));
+    assert_eq!(rows[0].2["written_off_by"].as_i64(), Some(admin));
+    assert_eq!(
+        fx.ledger
+            .verify_balance_integrity(user)
+            .await
+            .expect("integrity"),
+        0
+    );
+
+    fx.cleanup().await;
+}
+
+/// The three states of a write-off, and the fact that a second one cannot add
+/// a second resolving row (the partitioned unique index enforces it in the DB,
+/// so this holds under concurrency too).
+#[tokio::test]
+#[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
+async fn a_write_off_happens_at_most_once_and_only_against_a_real_debt() {
+    let mut fx = Fixture::postgres_only().await;
+    let user = fx.seed_user(10.0).await;
+    let admin = fx.seed_user(0.0).await;
+
+    let debit_id = fx.insert_shortfall_row(user, "req-twice", 2.5).await;
+    assert_eq!(
+        fx.ledger
+            .write_off_shortfall(debit_id, admin)
+            .await
+            .expect("write off"),
+        WriteOff::Written
+    );
+    assert_eq!(
+        fx.ledger
+            .write_off_shortfall(debit_id, admin)
+            .await
+            .expect("write off again"),
+        WriteOff::AlreadyResolved
+    );
+
+    let reference = shortfall_resolve_reference("req-twice", debit_id);
+    assert_eq!(
+        fx.logs_for(user, &reference).await.len(),
+        1,
+        "a repeated write-off must not append a second resolving row"
+    );
+
+    // An id nobody ever issued.
+    assert_eq!(
+        fx.ledger
+            .write_off_shortfall(i64::MAX, admin)
+            .await
+            .expect("write off a phantom"),
+        WriteOff::Missing
+    );
+
+    // A settle row that carries no debt is not a write-off target either.
+    fx.ledger
+        .settle(user, "req-paid", 1.0)
+        .await
+        .expect("settle");
+    let paid_id: i64 = sqlx::query_scalar(
+        "SELECT id FROM balance_logs WHERE user_id = $1 AND reference = 'req-paid'",
+    )
+    .bind(user)
+    .fetch_one(&fx.pool)
+    .await
+    .expect("read the settle row");
+    assert_eq!(
+        fx.ledger
+            .write_off_shortfall(paid_id, admin)
+            .await
+            .expect("write off a settled row"),
+        WriteOff::Missing
+    );
+
+    fx.cleanup().await;
+}
+
+/// The admin list shows exactly the rows the gate is blocking on, and stops
+/// showing one the moment it is written off.
+#[tokio::test]
+#[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
+async fn the_admin_list_shows_the_debts_the_gate_blocks_on() {
+    let mut fx = Fixture::postgres_only().await;
+    let user = fx.seed_user(0.0).await;
+    let admin = fx.seed_user(0.0).await;
+
+    let first = fx.insert_shortfall_row(user, "req-a", 1.5).await;
+    let second = fx.insert_shortfall_row(user, "req-b", 2.5).await;
+
+    let (rows, total) = fx
+        .ledger
+        .list_unresolved_shortfalls(10, 0)
+        .await
+        .expect("list");
+    assert_eq!(total, 2);
+    let ids: Vec<i64> = rows.iter().map(|row| row.log_id).collect();
+    assert!(ids.contains(&first) && ids.contains(&second));
+    let listed = rows
+        .iter()
+        .find(|row| row.log_id == first)
+        .expect("the first debt is listed");
+    assert_eq!(listed.user_id, user);
+    assert_eq!(listed.reference, "req-a");
+    assert!(approx(listed.shortfall_usd, 1.5));
+
+    // Paging hands back one row at a time without repeating one.
+    let (page_one, _) = fx
+        .ledger
+        .list_unresolved_shortfalls(1, 0)
+        .await
+        .expect("page 1");
+    let (page_two, _) = fx
+        .ledger
+        .list_unresolved_shortfalls(1, 1)
+        .await
+        .expect("page 2");
+    assert_eq!(page_one.len(), 1);
+    assert_eq!(page_two.len(), 1);
+    assert_ne!(page_one[0].log_id, page_two[0].log_id);
+
+    fx.ledger
+        .write_off_shortfall(first, admin)
+        .await
+        .expect("write off");
+    let (rest, total) = fx
+        .ledger
+        .list_unresolved_shortfalls(10, 0)
+        .await
+        .expect("list again");
+    assert_eq!(total, 1);
+    assert_eq!(rest.len(), 1);
+    assert_eq!(rest[0].log_id, second);
 
     fx.cleanup().await;
 }
@@ -411,9 +562,14 @@ async fn the_shortfall_predicate_tracks_unpaired_debts_only() {
                 paired += 1;
             }
         }
+        // 孤儿 credit 的 reference 必须逐条唯一：0008 的分区唯一索引对
+        // `shortfall_resolve:%` 全局生效，两轮循环撞出同一个字符串会插不进去。
         for o in 0..orphans {
-            fx.insert_credit_row(user, &format!("shortfall_resolve:orphan-{o}:9999999"))
-                .await;
+            fx.insert_credit_row(
+                user,
+                &format!("shortfall_resolve:orphan-{user}-{o}:9999999"),
+            )
+            .await;
         }
 
         let want = paired < debts;
@@ -576,314 +732,91 @@ async fn balance_integrity_ignores_audit_only_rows() {
     fx.cleanup().await;
 }
 
-// =================================================== billing_operations (SM)
-
-/// Builds a fresh operation for `user`, reserving `amount`.
-fn operation_for(user: i64, amount: f64, fingerprint: &str) -> NewOperation {
-    NewOperation {
-        operation_id: BillingOperationId::mint(),
-        user_id: user,
-        reserved_amount: amount,
-        admitted_liability: amount,
-        request_fingerprint: fingerprint.to_owned(),
-        client_trace_id: "trace-the-client-chose".to_owned(),
-    }
-}
-
-/// The headline invariant, against the real conditional `UPDATE`: settling one
-/// operation a hundred times moves the balance exactly once.
-///
-/// The in-memory twin of this lives in `src/operation/tests.rs`; both pin the
-/// same property so the SQL and the pure decision cannot drift apart.
+/// `balance_logs.reference` 在热路径上就是 request id，而 request id 认客户端传来的
+/// `X-Trace-Id`。所以「一条欠款只能注销一次」那个唯一索引**必须**同时钉住
+/// `type = 'credit'`：只按 reference 前缀分区的话，客户端发一个
+/// `X-Trace-Id: shortfall_resolve:…` 就能让自己的结算行撞进索引 —— 超预留结算本来
+/// 就在同一个事务里写两条 reference 相同的 settle 行（扣款行 + 欠款标记行），
+/// 必然自撞、整个事务回滚、余额一分不扣，等于无限白嫖。
 #[tokio::test]
 #[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
-async fn settling_one_operation_a_hundred_times_debits_the_balance_once() {
+async fn a_client_chosen_trace_id_cannot_poison_the_settle_path() {
     let mut fx = Fixture::postgres_only().await;
-    let user = fx.seed_user(100.0).await;
-    let op = operation_for(user, 10.0, "fingerprint");
+    let user = fx.seed_user(1.0).await;
 
-    assert_eq!(
-        fx.ledger.begin_operation(&op).await.expect("begin"),
-        Admission::Created
-    );
-
-    let mut debited = 0;
-    for _ in 0..100 {
-        match fx
-            .ledger
-            .settle_once(&op.operation_id, user, 4.0)
-            .await
-            .expect("settle_once")
-        {
-            SettleOnce::Debited(outcome) => {
-                debited += 1;
-                assert!(approx(outcome.debited, 4.0));
-            }
-            SettleOnce::AlreadyTerminal(state) => assert_eq!(state, OperationState::Settled),
-        }
-    }
-
-    assert_eq!(debited, 1, "more than one settle moved money");
-    assert!(
-        approx(fx.balance(user).await, 96.0),
-        "balance reflects exactly one 4.0 debit"
-    );
-
-    let record = fx
-        .ledger
-        .operation(&op.operation_id)
-        .await
-        .expect("read")
-        .expect("row exists");
-    assert_eq!(record.state, OperationState::Settled);
-
-    // One settle row, not a hundred.
-    let rows = fx.logs_for(user, op.operation_id.as_str()).await;
-    assert_eq!(rows.len(), 1, "one terminal settle wrote one journal row");
-
-    fx.cleanup().await;
-}
-
-/// Two settles racing on one operation: the row lock the conditional `UPDATE`
-/// takes is what makes exactly one of them the debiter.
-#[tokio::test]
-#[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
-async fn concurrent_settles_of_one_operation_debit_once() {
-    let mut fx = Fixture::postgres_only().await;
-    let user = fx.seed_user(100.0).await;
-    let op = operation_for(user, 10.0, "fingerprint");
-    fx.ledger.begin_operation(&op).await.expect("begin");
-
-    let gate = std::sync::Arc::new(tokio::sync::Barrier::new(2));
-    let handles: Vec<_> = (0..2)
-        .map(|_| {
-            let ledger = fx.ledger.clone();
-            let id = op.operation_id.clone();
-            let gate = std::sync::Arc::clone(&gate);
-            tokio::spawn(async move {
-                gate.wait().await;
-                matches!(
-                    ledger.settle_once(&id, user, 7.0).await.expect("settle"),
-                    SettleOnce::Debited(_)
-                )
-            })
-        })
-        .collect();
-
-    let mut winners = 0;
-    for handle in handles {
-        if handle.await.expect("task") {
-            winners += 1;
-        }
-    }
-    assert_eq!(winners, 1, "both racers debited the same operation");
-    assert!(approx(fx.balance(user).await, 93.0));
-
-    fx.cleanup().await;
-}
-
-/// Re-holding an operation id with different money — or for a different
-/// request — is a conflict, and leaves the stored row untouched.
-#[tokio::test]
-#[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
-async fn re_holding_an_operation_id_with_different_facts_conflicts() {
-    let mut fx = Fixture::postgres_only().await;
-    let user = fx.seed_user(100.0).await;
-    let op = operation_for(user, 10.0, "fingerprint-a");
-    fx.ledger.begin_operation(&op).await.expect("begin");
-
-    let cases = [
-        (
-            NewOperation {
-                reserved_amount: op.reserved_amount + 1.0,
-                admitted_liability: op.admitted_liability + 1.0,
-                ..op.clone()
-            },
-            OperationConflict::Amount,
-        ),
-        (
-            NewOperation {
-                request_fingerprint: "fingerprint-b".to_owned(),
-                ..op.clone()
-            },
-            OperationConflict::Fingerprint,
-        ),
-        (
-            NewOperation {
-                user_id: user + 1,
-                ..op.clone()
-            },
-            OperationConflict::Tenant,
-        ),
-    ];
-    for (candidate, expected) in cases {
-        assert_eq!(
-            fx.ledger.begin_operation(&candidate).await.expect("begin"),
-            Admission::Conflict(expected)
-        );
-    }
-
-    // Nothing was overwritten by any of the refused re-holds.
-    let record = fx
-        .ledger
-        .operation(&op.operation_id)
-        .await
-        .expect("read")
-        .expect("row exists");
-    assert_eq!(record.user_id, user);
-    assert!(approx(record.reserved_amount, 10.0));
-    assert_eq!(record.request_fingerprint, "fingerprint-a");
-    assert_eq!(record.state, OperationState::Held);
-
-    // The identical hold, by contrast, resumes.
-    assert_eq!(
-        fx.ledger.begin_operation(&op).await.expect("begin"),
-        Admission::Resumed
-    );
-
-    fx.cleanup().await;
-}
-
-/// Prepaid reservations record the admitted liability itself, not a smaller
-/// floor: what was checked against the balance is what is reserved.
-#[tokio::test]
-#[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
-async fn a_prepaid_reservation_records_the_admitted_liability() {
-    let mut fx = Fixture::postgres_only().await;
-    let user = fx.seed_user(100.0).await;
-    let mut rng = Rng::new(0x0B11_1146);
-
-    for _ in 0..20 {
-        let amount = rng.f64_range(0.01, 50.0);
-        let op = operation_for(user, amount, "fingerprint");
-        fx.ledger.begin_operation(&op).await.expect("begin");
-        let record = fx
-            .ledger
-            .operation(&op.operation_id)
-            .await
-            .expect("read")
-            .expect("row exists");
-        assert!(
-            approx(record.reserved_amount, record.admitted_liability),
-            "reserved {} != admitted {}",
-            record.reserved_amount,
-            record.admitted_liability
-        );
-    }
-
-    fx.cleanup().await;
-}
-
-/// Release is once, too, and it never touches the balance.
-#[tokio::test]
-#[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
-async fn releasing_one_operation_repeatedly_never_moves_money() {
-    let mut fx = Fixture::postgres_only().await;
-    let user = fx.seed_user(100.0).await;
-    let op = operation_for(user, 10.0, "fingerprint");
-    fx.ledger.begin_operation(&op).await.expect("begin");
-
-    assert_eq!(
-        fx.ledger
-            .release_once(&op.operation_id, user)
-            .await
-            .expect("release"),
-        ReleaseOnce::Released
-    );
-    for _ in 0..20 {
-        assert_eq!(
-            fx.ledger
-                .release_once(&op.operation_id, user)
-                .await
-                .expect("release"),
-            ReleaseOnce::AlreadyTerminal(OperationState::Released)
-        );
-    }
-    // And a settle afterwards must not resurrect the charge.
-    assert!(matches!(
-        fx.ledger
-            .settle_once(&op.operation_id, user, 9.0)
-            .await
-            .expect("settle"),
-        SettleOnce::AlreadyTerminal(OperationState::Released)
-    ));
-    assert!(approx(fx.balance(user).await, 100.0));
-
-    fx.cleanup().await;
-}
-
-/// Reconciliation reads Postgres. A terminal operation never shows up, however
-/// old it is, and a held one shows up once it is older than the cutoff.
-#[tokio::test]
-#[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
-async fn the_reconcile_scan_reports_only_non_terminal_operations() {
-    let mut fx = Fixture::postgres_only().await;
-    let user = fx.seed_user(100.0).await;
-
-    let held = operation_for(user, 3.0, "still-running");
-    let settled = operation_for(user, 4.0, "already-done");
-    fx.ledger.begin_operation(&held).await.expect("begin");
-    fx.ledger.begin_operation(&settled).await.expect("begin");
+    // 攻击者把 request id 取成注销行的前缀，并且故意超预留触发 partial debit，
+    // 好让同一个事务写出两条 reference 相同的 settle 行。
+    let poisoned = "shortfall_resolve:free";
     fx.ledger
-        .settle_once(&settled.operation_id, user, 2.0)
+        .settle(user, poisoned, 5.0)
         .await
-        .expect("settle");
+        .expect("结算不能因为客户端选的 trace id 而失败");
 
-    // Age both rows past the cutoff so the only thing separating them is state.
-    sqlx::query(
-        "UPDATE billing_operations SET created_at = NOW() - interval '2 hours' WHERE user_id = $1",
+    assert!(
+        approx(fx.balance(user).await, 0.0),
+        "余额必须照常被扣到 0，而不是因事务回滚而分文未动"
+    );
+    assert!(
+        fx.ledger
+            .has_unresolved_shortfall(user)
+            .await
+            .expect("probe"),
+        "欠款也必须照常记下来，否则这次改动要修的机制被自己废掉了"
+    );
+
+    fx.cleanup().await;
+}
+
+/// `reference` 列可空。判定谓词与注销语句必须用同一个 COALESCE 拼法，否则这类
+/// 历史行会「列表里看得见、门锁着、却注销不掉」—— 正是本功能要救的那种账号。
+#[tokio::test]
+#[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
+async fn a_debt_row_with_no_reference_is_listed_and_can_still_be_written_off() {
+    let mut fx = Fixture::postgres_only().await;
+    let user = fx.seed_user(0.0).await;
+    let admin = fx.seed_user(0.0).await;
+
+    let orphan_id: i64 = sqlx::query_scalar(
+        "INSERT INTO balance_logs (user_id, amount, type, reference, metadata, created_at) \
+         VALUES ($1, 0, 'settle', NULL, $2, NOW()) RETURNING id",
     )
     .bind(user)
-    .execute(&fx.pool)
+    .bind(serde_json::json!({ "shortfall_usd": 3.0 }))
+    .fetch_one(&fx.pool)
     .await
-    .expect("age the rows");
+    .expect("insert a reference-less debt row");
 
-    let found = fx
+    assert!(
+        fx.ledger
+            .has_unresolved_shortfall(user)
+            .await
+            .expect("probe"),
+        "空 reference 的欠款照样该挡住计费"
+    );
+    let (rows, total) = fx
         .ledger
-        .scan_non_terminal_operations(std::time::Duration::from_secs(600), 100)
+        .list_unresolved_shortfalls(10, 0)
         .await
-        .expect("scan");
-    let mine: Vec<_> = found.into_iter().filter(|op| op.user_id == user).collect();
+        .expect("list");
+    assert_eq!(total, 1);
+    assert_eq!(rows[0].log_id, orphan_id);
 
     assert_eq!(
-        mine.len(),
-        1,
-        "only the held operation is reconcilable: {mine:?}"
+        fx.ledger
+            .write_off_shortfall(orphan_id, admin)
+            .await
+            .expect("write off"),
+        WriteOff::Written,
+        "列表里给得出的行，必须注销得掉"
     );
-    assert_eq!(mine[0].operation_id, held.operation_id);
-    assert!(approx(mine[0].reserved_amount, 3.0));
-    assert!(mine[0].age_seconds >= 3600);
-
-    // A fresh held operation is not yet reconcilable.
-    let fresh = operation_for(user, 1.0, "just-started");
-    fx.ledger.begin_operation(&fresh).await.expect("begin");
-    let found = fx
-        .ledger
-        .scan_non_terminal_operations(std::time::Duration::from_secs(600), 100)
-        .await
-        .expect("scan");
     assert!(
-        !found.iter().any(|op| op.operation_id == fresh.operation_id),
-        "a live request was reported as orphaned"
+        !fx.ledger
+            .has_unresolved_shortfall(user)
+            .await
+            .expect("probe"),
+        "注销之后门必须真的开"
     );
-
-    fx.cleanup().await;
-}
-
-/// Settling an operation that was never held is an error, not a silent debit.
-#[tokio::test]
-#[ignore = "requires a local Postgres (set GW_TEST_DATABASE_URL)"]
-async fn settling_an_unknown_operation_is_refused() {
-    let mut fx = Fixture::postgres_only().await;
-    let user = fx.seed_user(100.0).await;
-
-    let err = fx
-        .ledger
-        .settle_once(&BillingOperationId::mint(), user, 5.0)
-        .await
-        .unwrap_err();
-    assert!(matches!(err, LedgerError::HoldNotFound), "{err:?}");
-    assert!(approx(fx.balance(user).await, 100.0));
+    assert!(approx(fx.balance(user).await, 0.0), "零额注销不许动余额");
 
     fx.cleanup().await;
 }

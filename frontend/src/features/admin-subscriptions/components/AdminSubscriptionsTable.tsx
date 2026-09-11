@@ -67,7 +67,7 @@ export const AdminSubscriptionsTable = memo(function AdminSubscriptionsTable({
                   size="compact"
                   tone="first-use"
                   icon={Crown}
-                  title="暂无用户订阅记录"
+                  title="还没有用户订阅"
                   description="用户开通订阅套餐后将在此列出，支持在此进行额度重置、手动续期与撤销操作。"
                 />
               </TableCell>
@@ -82,7 +82,7 @@ export const AdminSubscriptionsTable = memo(function AdminSubscriptionsTable({
                   </div>
                 </TableCell>
                 <TableCell>
-                  <span className="font-medium text-amber-600 dark:text-amber-400">{s.group_name || `Group #${s.group_id}`}</span>
+                  <span className="font-medium text-amber-700 dark:text-amber-400">{s.group_name || `Group #${s.group_id}`}</span>
                 </TableCell>
                 <TableCell>
                   <div className="flex flex-col gap-0.5 text-left max-w-[200px]">

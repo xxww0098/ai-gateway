@@ -25,9 +25,8 @@ export function useModels(): UseModelsResult {
   const query = useQuery({
     queryKey: queryKeys.pricing.models(),
     queryFn: async () => {
-      // Ensure registries are loaded before fetching/enriching models
-      await loadModelRegistries()
-      return fetchModels()
+      const [, data] = await Promise.all([loadModelRegistries(), fetchModels()])
+      return data
     },
     select: (data) => ({
       models: (data?.models || []).map((m) => enrichModelCatalogItem(m)),

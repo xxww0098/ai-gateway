@@ -29,7 +29,7 @@ export function NeedSubscriptionDialog({ open, onOpenChange, groupName }: Props)
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader className="space-y-3">
-          <div className="mx-auto sm:mx-0 flex h-10 w-10 items-center justify-center rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400">
+          <div className="mx-auto sm:mx-0 flex h-10 w-10 items-center justify-center rounded-lg bg-amber-500/10 text-amber-700 dark:text-amber-400">
             <Crown className="h-5 w-5" />
           </div>
           <DialogTitle className="text-center sm:text-left">开通订阅后即可使用该分组</DialogTitle>

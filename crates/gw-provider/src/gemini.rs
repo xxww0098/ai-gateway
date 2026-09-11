@@ -18,7 +18,7 @@ use crate::claude::shared::{
     upstream_error,
 };
 use crate::common::{
-    PROVIDER_GEMINI, ProviderConfig, nested_string, relay_usage_stream, requested_model,
+    PROVIDER_GEMINI, ProviderConfig, Redacted, nested_string, relay_usage_stream, requested_model,
     resolve_timeout, shared_client, string_from_map,
 };
 use crate::types::{
@@ -37,12 +37,22 @@ const GEMINI_ACCESS_TOKEN: &str = "access_token";
 const GEMINI_ALT_QUERY: &str = "alt";
 
 /// Generative Language API executor.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GeminiProvider {
     base_url: String,
     api_key: String,
     timeout: Duration,
     client: reqwest::Client,
+}
+
+impl std::fmt::Debug for GeminiProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeminiProvider")
+            .field("base_url", &self.base_url)
+            .field("api_key", &Redacted(&self.api_key))
+            .field("timeout", &self.timeout)
+            .finish_non_exhaustive()
+    }
 }
 
 impl GeminiProvider {

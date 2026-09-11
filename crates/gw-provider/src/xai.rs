@@ -9,9 +9,9 @@
 
 use crate::claude::shared::{base_url_attribute, default_content_negotiation, upstream_error};
 use crate::common::{
-    PROVIDER_XAI, ProviderConfig, attach_body, chat_completions_endpoint, ensure_include_usage,
-    nested_string, relay_usage_stream, request_surface, requested_model, resolve_timeout,
-    responses_endpoint, shared_client, string_from_map,
+    PROVIDER_XAI, ProviderConfig, Redacted, attach_body, chat_completions_endpoint,
+    ensure_include_usage, nested_string, relay_usage_stream, request_surface, requested_model,
+    resolve_timeout, responses_endpoint, shared_client, string_from_map,
 };
 use crate::openai::bearer;
 use crate::types::{
@@ -45,7 +45,7 @@ const META_EXPIRED: &str = "expired";
 const META_LAST_REFRESH: &str = "last_refresh";
 const META_ID_TOKEN: &str = "id_token";
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 struct XaiRefreshResponse {
     #[serde(default)]
     access_token: String,
@@ -58,12 +58,22 @@ struct XaiRefreshResponse {
 }
 
 /// Executor for xAI Grok OAuth credentials.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct XaiProvider {
     base_url: String,
     access_token: String,
     timeout: Duration,
     client: reqwest::Client,
+}
+
+impl std::fmt::Debug for XaiProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("XaiProvider")
+            .field("base_url", &self.base_url)
+            .field("access_token", &Redacted(&self.access_token))
+            .field("timeout", &self.timeout)
+            .finish_non_exhaustive()
+    }
 }
 
 impl XaiProvider {

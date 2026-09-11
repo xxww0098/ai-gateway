@@ -8,8 +8,8 @@
 
 use crate::claude::shared::{base_url_attribute, default_content_negotiation, upstream_error};
 use crate::common::{
-    PROVIDER_KIRO, ProviderConfig, attach_body, nested_string, relay_usage_stream, requested_model,
-    resolve_timeout, shared_client, string_from_map,
+    PROVIDER_KIRO, ProviderConfig, Redacted, attach_body, nested_string, relay_usage_stream,
+    requested_model, resolve_timeout, shared_client, string_from_map,
 };
 use crate::openai::bearer;
 use crate::types::{
@@ -41,7 +41,7 @@ const META_EXPIRES_AT: &str = "expires_at";
 const META_EXPIRED: &str = "expired";
 const META_LAST_REFRESH: &str = "last_refresh";
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 struct KiroRefreshResponse {
     #[serde(default, alias = "accessToken")]
     access_token: String,
@@ -54,12 +54,22 @@ struct KiroRefreshResponse {
 }
 
 /// Executor for Kiro / AWS Builder ID credentials.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct KiroProvider {
     base_url: String,
     access_token: String,
     timeout: Duration,
     client: reqwest::Client,
+}
+
+impl std::fmt::Debug for KiroProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KiroProvider")
+            .field("base_url", &self.base_url)
+            .field("access_token", &Redacted(&self.access_token))
+            .field("timeout", &self.timeout)
+            .finish_non_exhaustive()
+    }
 }
 
 impl KiroProvider {

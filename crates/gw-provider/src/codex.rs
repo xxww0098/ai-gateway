@@ -9,9 +9,9 @@
 
 use crate::claude::shared::{base_url_attribute, default_content_negotiation, upstream_error};
 use crate::common::{
-    PROVIDER_CODEX, ProviderConfig, attach_body, chat_completions_endpoint, ensure_include_usage,
-    nested_string, relay_usage_stream, request_surface, requested_model, resolve_timeout,
-    responses_endpoint, shared_client, string_from_map,
+    PROVIDER_CODEX, ProviderConfig, Redacted, attach_body, chat_completions_endpoint,
+    ensure_include_usage, nested_string, relay_usage_stream, request_surface, requested_model,
+    resolve_timeout, responses_endpoint, shared_client, string_from_map,
 };
 use crate::openai::bearer;
 use crate::types::{
@@ -45,7 +45,7 @@ const CODEX_METADATA_EXPIRED: &str = "expired";
 const CODEX_METADATA_LAST_REFRESH: &str = "last_refresh";
 const CODEX_METADATA_ID_TOKEN: &str = "id_token";
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 struct CodexRefreshResponse {
     #[serde(default)]
     access_token: String,
@@ -58,12 +58,22 @@ struct CodexRefreshResponse {
 }
 
 /// Executor for Codex / OpenAI OAuth credentials.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CodexProvider {
     base_url: String,
     access_token: String,
     timeout: Duration,
     client: reqwest::Client,
+}
+
+impl std::fmt::Debug for CodexProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodexProvider")
+            .field("base_url", &self.base_url)
+            .field("access_token", &Redacted(&self.access_token))
+            .field("timeout", &self.timeout)
+            .finish_non_exhaustive()
+    }
 }
 
 impl CodexProvider {
@@ -180,7 +190,10 @@ impl CodexProvider {
         copy_outbound_headers(&mut headers, &req.headers);
         default_content_negotiation(&mut headers, stream);
         headers.insert(AUTHORIZATION, bearer(access_token)?);
-        headers.insert(USER_AGENT, HeaderValue::from_static(gw_oauth::codex::USER_AGENT));
+        headers.insert(
+            USER_AGENT,
+            HeaderValue::from_static(gw_oauth::codex::USER_AGENT),
+        );
         headers.insert(
             http::HeaderName::from_static("originator"),
             HeaderValue::from_static(gw_oauth::codex::ORIGINATOR),
@@ -197,7 +210,9 @@ impl CodexProvider {
                 for (name, value) in cache_headers.iter() {
                     headers.append(name.clone(), value.clone());
                 }
-                bytes::Bytes::from(serde_json::to_vec(&rewritten.payload).unwrap_or_else(|_| req.payload.to_vec()))
+                bytes::Bytes::from(
+                    serde_json::to_vec(&rewritten.payload).unwrap_or_else(|_| req.payload.to_vec()),
+                )
             }
             Err(_) => req.payload.clone(),
         };

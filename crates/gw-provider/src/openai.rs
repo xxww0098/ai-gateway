@@ -4,9 +4,9 @@
 
 use crate::claude::shared::{base_url_attribute, default_content_negotiation, upstream_error};
 use crate::common::{
-    PROVIDER_OPENAI, ProviderConfig, attach_body, chat_completions_endpoint, ensure_include_usage,
-    nested_string, relay_usage_stream, request_surface, requested_model, resolve_timeout,
-    responses_endpoint, shared_client, string_from_map,
+    PROVIDER_OPENAI, ProviderConfig, Redacted, attach_body, chat_completions_endpoint,
+    ensure_include_usage, nested_string, relay_usage_stream, request_surface, requested_model,
+    resolve_timeout, responses_endpoint, shared_client, string_from_map,
 };
 use crate::types::{
     Provider, ProviderError, ProviderRequest, ProviderResponse, StreamResponse,
@@ -21,7 +21,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 /// Executor for any OpenAI-compatible API.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenAiCompatibleProvider {
     provider: &'static str,
     base_url: String,
@@ -30,6 +30,17 @@ pub struct OpenAiCompatibleProvider {
     client: reqwest::Client,
     /// 配置默认 key 的 `Authorization` 头。热路径上不再每请求 `format!`。
     bearer: HeaderValue,
+}
+
+impl std::fmt::Debug for OpenAiCompatibleProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiCompatibleProvider")
+            .field("provider", &self.provider)
+            .field("base_url", &self.base_url)
+            .field("api_key", &Redacted(&self.api_key))
+            .field("timeout", &self.timeout)
+            .finish_non_exhaustive()
+    }
 }
 
 impl OpenAiCompatibleProvider {

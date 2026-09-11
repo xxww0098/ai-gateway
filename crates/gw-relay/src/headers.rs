@@ -21,7 +21,9 @@
 //! | #5  | `accept-encoding` 原样转发导致旁路 usage 必然读到 gzip 魔数 → 默认收敛成 `identity` |
 
 use http::HeaderMap;
-use http::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, HOST, HeaderName, HeaderValue};
+use http::header::{
+    ACCEPT_ENCODING, AUTHORIZATION, CONNECTION, CONTENT_LENGTH, HOST, HeaderName, HeaderValue,
+};
 
 use crate::contract::{Credential, RelayTransportError};
 
@@ -62,7 +64,40 @@ fn is_locally_rebuilt(name: &HeaderName) -> bool {
     name == HOST || name == CONTENT_LENGTH
 }
 
+/// 这条消息的 `Connection` **额外点名**的逐跳头名（RFC 7230 §6.1），全部小写。
+///
+/// > The "Connection" header field allows the sender to indicate desired
+/// > control options for the current connection. […] a proxy MUST parse a
+/// > received Connection header field before a message is forwarded and, for
+/// > each connection-option in this field-value, remove any header field(s)
+/// > from the message with the same name as the connection-option.
+///
+/// 也就是说逐跳名单**一半是静态的**（[`is_hop_by_hop`]），**一半随消息来**。
+/// 只认静态那一半，`Connection: close, x-foo` 里的 `x-foo` 就会被原样转到下一跳
+/// —— 那是一个显式声明「只在这一跳有效」的头被越跳带走，正是这条规则要拦的事。
+///
+/// `Connection` 可以出现多次，也可以逗号分隔；名字大小写不敏感，所以统一折成小写。
+/// `close` / `keep-alive` 这类连接选项本身不是 header 名，跟着进名单也无害 ——
+/// 名单只用来跳过**同名的 header**，没有同名的就什么都不发生。
+///
+/// 没有 `Connection` 时 [`HeaderMap::get_all`] 直接空迭代，`Vec` 不分配。
+fn connection_listed(src: &HeaderMap) -> Vec<String> {
+    src.get_all(CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|raw| raw.split(','))
+        .map(|option| option.trim().to_ascii_lowercase())
+        .filter(|option| !option.is_empty())
+        .collect()
+}
+
 /// 把 `src` 的 header 复制到 `dst`，**保留同名多值**，跳过逐跳头与本地重算头。
+///
+/// # 逐跳名单是**按消息**算的
+///
+/// 除了 [`is_hop_by_hop`] 的静态那一半，还要跳掉 `src` 自己的 `Connection`
+/// 点名的每一个头（[`connection_listed`]）。名单先从 `src` 收齐再进循环：
+/// 判定属于**这条消息**，与遍历到第几个 header 无关。
 ///
 /// # 根除缺陷 #7
 ///
@@ -81,8 +116,12 @@ fn is_locally_rebuilt(name: &HeaderName) -> bool {
 /// 出站方向额外的凭证换绑在 [`upstream_headers`] 里做 —— 那是**请求方向独有**的
 /// 语义，塞进这里会让回写方向平白无故丢 header。
 pub fn copy_preserving_multivalue(dst: &mut HeaderMap, src: &HeaderMap) {
+    let listed = connection_listed(src);
     for name in src.keys() {
-        if is_hop_by_hop(name) || is_locally_rebuilt(name) {
+        if is_hop_by_hop(name)
+            || is_locally_rebuilt(name)
+            || listed.iter().any(|option| option == name.as_str())
+        {
             continue;
         }
         for value in src.get_all(name) {

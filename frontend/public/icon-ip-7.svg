@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none" role="img" aria-label="AI-GateWay porter bot">
+  <defs>
+    <clipPath id="ip7-clip"><rect width="512" height="512" rx="114"/></clipPath>
+    <linearGradient id="ip7-bg" x1="22%" y1="0%" x2="80%" y2="100%">
+      <stop offset="0%" stop-color="#D4B03A"/>
+      <stop offset="100%" stop-color="#A88820"/>
+    </linearGradient>
+    <radialGradient id="ip7-skin" cx="42%" cy="28%" r="72%">
+      <stop offset="0%" stop-color="#FFFEFA"/>
+      <stop offset="58%" stop-color="#F0E6D4"/>
+      <stop offset="100%" stop-color="#D8C8B0"/>
+    </radialGradient>
+    <radialGradient id="ip7-knob" cx="40%" cy="30%" r="70%">
+      <stop offset="0%" stop-color="#F6E8A0"/>
+      <stop offset="100%" stop-color="#C9A227"/>
+    </radialGradient>
+    <filter id="ip7-blur" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="16"/>
+    </filter>
+  </defs>
+  <g clip-path="url(#ip7-clip)">
+    <rect width="512" height="512" fill="url(#ip7-bg)"/>
+    <ellipse cx="256" cy="502" rx="158" ry="38" fill="#5A4810" opacity="0.28" filter="url(#ip7-blur)"/>
+    <rect x="248" y="78" width="16" height="86" rx="8" fill="url(#ip7-skin)"/>
+    <circle cx="256" cy="78" r="18" fill="url(#ip7-knob)"/>
+    <rect x="118" y="168" width="276" height="360" rx="92" fill="url(#ip7-skin)"/>
+    <ellipse cx="210" cy="248" rx="64" ry="30" fill="#FFFFFF" opacity="0.2"/>
+    <circle cx="196" cy="292" r="14" fill="#2A2118"/>
+    <circle cx="316" cy="292" r="14" fill="#2A2118"/>
+    <circle cx="201" cy="287" r="4" fill="#FFF8F0" opacity="0.85"/>
+    <circle cx="321" cy="287" r="4" fill="#FFF8F0" opacity="0.85"/>
+    <path d="M232 332 C246 348 266 348 280 332" stroke="#2A2118" stroke-width="5" stroke-linecap="round"/>
+    <rect x="206" y="392" width="100" height="72" rx="22" fill="#A88820" opacity="0.22"/>
+    <circle cx="286" cy="428" r="8" fill="#C9A227"/>
+  </g>
+</svg>

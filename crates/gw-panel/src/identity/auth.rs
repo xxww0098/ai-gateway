@@ -250,7 +250,7 @@ pub async fn register(
     let now = Utc::now();
     let created: Result<AuthUserRow, sqlx::Error> = sqlx::query_as(
         "INSERT INTO users (email, password_hash, role, username, balance, status, concurrency, created_at, updated_at) \
-         VALUES ($1, $2, 'user', '', 0, $3, 1, $4, $4) \
+         VALUES ($1, $2, 'user', '', 0, $3, 0, $4, $4) \
          RETURNING id, email, role, balance, status, created_at",
     )
     .bind(&email)

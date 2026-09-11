@@ -13,8 +13,13 @@ mod tests;
 
 /// Idle-connection default (`pool_value_or_default(_, 25)`).
 pub const DEFAULT_MAX_IDLE_CONNS: u32 = 25;
-/// Open-connection default (`pool_value_or_default(_, 200)`).
-pub const DEFAULT_MAX_OPEN_CONNS: u32 = 200;
+/// Open-connection default (`pool_value_or_default(_, 50)`).
+///
+/// Sized under a stock Postgres `max_connections = 100`: 50 leaves headroom
+/// for the panel, migrations, and admin clients, and two gateway instances
+/// still fit on one default Postgres. Operators running a raised
+/// `max_connections` or a pooler can widen `database.max_open_conns`.
+pub const DEFAULT_MAX_OPEN_CONNS: u32 = 50;
 /// Connection-lifetime default (`pool_value_or_default(_, 30)`).
 pub const DEFAULT_CONN_MAX_LIFETIME_MINUTES: u32 = 30;
 

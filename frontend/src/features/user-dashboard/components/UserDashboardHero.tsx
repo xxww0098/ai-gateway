@@ -111,7 +111,7 @@ export function UserDashboardHero({ email, stats, usageStats }: UserDashboardHer
             </span>
           </div>
           <div className="flex items-center justify-between text-xs text-muted-foreground pt-1 border-t border-border/40">
-            <span>成功率 {totalReq > 0 ? ((success / totalReq) * 100).toFixed(1) : 100}%</span>
+            <span>成功率 {totalReq > 0 ? `${((success / totalReq) * 100).toFixed(1)}%` : '—'}</span>
             <span className="tabular-nums">{success.toLocaleString()} 成功</span>
           </div>
         </div>

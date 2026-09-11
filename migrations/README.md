@@ -8,6 +8,15 @@
 | `0001_init.sql` | 22 张表的 `CREATE TABLE IF NOT EXISTS` | 既有库建表脚本 |
 | `0002_columns.sql` | 每张表每个非主键列的 `ADD COLUMN IF NOT EXISTS` | 既有库补列行为 |
 | `0003_indexes.sql` | 自动索引 + 7 个手写索引 | 既有库索引全集 |
+| `0004_model_capabilities.sql` | `model_catalog_entries.capabilities` | GET /v1/models 能力字段 |
+| `0005_hot_path_indexes.sql` | 订阅 / 模型目录热路径复合索引 | hold 与 GET /v1/models |
+| `0006_billing_operations.sql` | `billing_operations` 计费操作状态机 | 钱的键是服务端 `BillingOperationId` |
+| `0007_quota_reservations.sql` | `quota_reservations` 订阅在途预留 | 配额比较在锁内 |
+| `0008_users_concurrency_default.sql` | `users.concurrency` 默认 0（沿用限流器配置） | 新租户不再被锁死在单并发 |
+
+索引删除不进迁移目录（规矩禁 DROP/TRUNCATE）；冗余索引清理与
+`usage_logs.event_key` 成功行唯一化在 [scripts/index-housekeeping.sql](../scripts/index-housekeeping.sql)，
+运维对已部署的库手动执行一次。
 
 ## 两条不可违反的规矩
 

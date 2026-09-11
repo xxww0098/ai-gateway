@@ -8,8 +8,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
-/// Top-up hint returned in structured 402 bodies.
-pub const TOP_UP_URL: &str = "/api/panel/billing/topup";
+/// Top-up hint returned in structured 402 bodies: the panel page where the
+/// tenant actually recharges (same origin as `/v1`). `/api/panel/billing/topup`
+/// is a 404 — no such endpoint exists.
+pub const TOP_UP_URL: &str = "/finance?tab=topup";
 
 /// Authentication failure shapes produced by [`crate::access`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

@@ -304,8 +304,9 @@ pub struct UsageLogEntry {
     pub output_tokens: i64,
     pub cached_tokens: i64,
     pub reasoning_tokens: i64,
-    pub total_cost: f64,
-    pub actual_cost: f64,
+    /// The single charge column. `total_cost`/`actual_cost` were triplicates
+    /// written with the same value and are retired from the insert — every
+    /// reader coalesces canonical-first, so the panel wire shape is unchanged.
     pub cost: f64,
     pub rate_multiplier: f64,
     pub stream: bool,

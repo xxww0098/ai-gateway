@@ -221,9 +221,13 @@ struct ModelUsageRow {
 
 /// The `usage_logs` insert, shared by the transactional and standalone paths.
 ///
-/// Every column is listed rather than relying on defaults, because the table's
-/// `NOT NULL`s do not all carry one. `input_cost` / `output_cost` stay zero: it
-/// was never populated — the itemised split is not what gets debited.
+/// Only canonical columns are written: the legacy `tokens_in`/`tokens_out`
+/// dual-write and the `total_cost`/`actual_cost`/`input_cost`/`output_cost`
+/// copies were retired — every reader coalesces canonical-first, so rows
+/// predating this change and rows written after read identically, and the
+/// panel wire shape is untouched. The retired columns stay physically present
+/// (nullable, `DEFAULT 0`); dropping them is an ops step, not a migration —
+/// migrations are forbidden from `DROP`.
 async fn insert_usage_log(
     conn: &mut sqlx::PgConnection,
     entry: &UsageLogEntry,
@@ -232,15 +236,15 @@ async fn insert_usage_log(
         "INSERT INTO usage_logs ( \
             user_id, api_key_id, group_id, request_id, idempotency_key, event_key, \
             model, provider, auth_id, \
-            tokens_in, tokens_out, input_tokens, output_tokens, reasoning_tokens, cached_tokens, \
-            input_cost, output_cost, total_cost, actual_cost, cost, \
+            input_tokens, output_tokens, reasoning_tokens, cached_tokens, \
+            cost, \
             rate_multiplier, stream, duration_ms, ip_address, raw_metadata, failed, created_at \
          ) VALUES ( \
             $1, $2, $3, $4, $5, $6, \
             $7, $8, $9, \
-            $10, $11, $10, $11, $12, $13, \
-            0, 0, $14, $15, $16, \
-            $17, $18, $19, $20, $21, $22, NOW() \
+            $10, $11, $12, $13, \
+            $14, \
+            $15, $16, $17, $18, $19, $20, NOW() \
          )",
     )
     .bind(entry.user_id)
@@ -254,14 +258,10 @@ async fn insert_usage_log(
     .bind(&entry.model)
     .bind(&entry.provider)
     .bind(&entry.auth_id)
-    // tokens_in / input_tokens and tokens_out / output_tokens are the same
-    // numbers under the legacy and current column names; both are written.
     .bind(entry.input_tokens)
     .bind(entry.output_tokens)
     .bind(entry.reasoning_tokens)
     .bind(entry.cached_tokens)
-    .bind(entry.total_cost)
-    .bind(entry.actual_cost)
     .bind(entry.cost)
     .bind(entry.rate_multiplier)
     .bind(entry.stream)

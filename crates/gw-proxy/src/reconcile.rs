@@ -100,8 +100,6 @@ pub async fn reconcile_orphaned_operations(
             request_id: op.client_trace_id.clone(),
             // Never empty on a settled row: this is the money key.
             event_key: op.operation.to_string(),
-            total_cost: op.reserved_amount,
-            actual_cost: op.reserved_amount,
             cost: op.reserved_amount,
             rate_multiplier: 1.0,
             failed: false,

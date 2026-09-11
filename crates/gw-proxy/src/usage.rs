@@ -410,8 +410,17 @@ impl Settlement {
                 );
                 let mut failed = commit.entry.clone();
                 failed.failed = true;
+                // 事务回滚了，所以**一分钱都没动** —— 这条审计行的金额列必须
+                // 归零。面板的总花费直接 `SUM(usage_logs.cost)`、不按 `failed`
+                // 过滤，留着全额就会把一个「尝试收 but 失败」的请求算成真花掉
+                // 的钱，与 `balance_logs` 对不上账。
+                //
+                // 尝试收多少不能丢：它是运维判断「这次回滚值不值得追」的唯一线索，
+                // 所以挪进 metadata，而不是留在会被求和的列里。
+                failed.cost = 0.0;
                 failed.raw_metadata = Some(json!({
                     "reason": err.to_string(),
+                    "attempted_cost": cost,
                     "timestamp": Utc::now().to_rfc3339(),
                 }));
                 self.write_log(&failed).await;
@@ -487,8 +496,6 @@ impl Settlement {
             output_tokens: observed.output,
             cached_tokens: observed.cached,
             reasoning_tokens: observed.reasoning,
-            total_cost: cost,
-            actual_cost: cost,
             cost,
             rate_multiplier: ctx.rate_mult(),
             stream: ctx.stream,

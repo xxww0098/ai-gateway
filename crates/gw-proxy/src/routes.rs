@@ -223,7 +223,16 @@ impl Dispatcher {
         drop(snapshot);
 
         let Ok(_guard) = self.reloading.try_lock() else {
-            // 别人正在重载。用当前快照往前走，而不是排队等 DB。
+            // 别人正在重载。有过期的旧快照就用旧的往前走（stale-while-
+            // revalidate），而不是排队等 DB；但「从未加载过」的空快照不是
+            // 旧数据、是没有数据——这时候把请求放行只会换来 NoUpstream，
+            // 所以冷启动窗口里要等正在进行的这次重载。
+            let current = self.auths.load();
+            if current.loaded_at.is_some() {
+                return current.get(provider);
+            }
+            drop(current);
+            let _guard = self.reloading.lock().await;
             return self.auths.load().get(provider);
         };
         // 拿到闸门之后再看一眼：等锁期间可能已经有人刷好了。

@@ -2,8 +2,9 @@
 //!
 //! 契约 §3.1：email 先 trim + 小写；已存在同 email 返回既有 `user_id` 与
 //! `created:false` 且**不动余额、不动状态**；已存在但 `status != active` 是
-//! `409 + 4009`；新行的 `role=user`、`status=active`、`concurrency=1`，
-//! `username` 取 `display_name`。
+//! `409 + 4009`；新行的 `role=user`、`status=active`、`concurrency=0`
+//! （0 = 沿用限流器的 `max_concurrent` 配置，见迁移 0016 —— 供给账号与面板
+//! 注册账号同规则），`username` 取 `display_name`。
 //!
 //! # 供给账号没有可用口令
 //!
@@ -103,7 +104,7 @@ pub async fn provision(
     let inserted: Result<Option<(i64, String)>, _> = sqlx::query_as(
         "INSERT INTO users \
              (email, password_hash, role, username, balance, status, concurrency, created_at, updated_at) \
-         VALUES ($1, $2, 'user', $3, 0, 'active', 1, $4, $4) \
+         VALUES ($1, $2, 'user', $3, 0, 'active', 0, $4, $4) \
          ON CONFLICT (email) DO NOTHING \
          RETURNING id, COALESCE(status, '')",
     )

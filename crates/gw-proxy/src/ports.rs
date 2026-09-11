@@ -260,9 +260,15 @@ pub trait SubscriptionQuotaStore: Send + Sync {
 
 // ---------------------------------------------------------------- settlement
 
-/// A `usage_logs` row, field-for-field with `model.UsageLog`.
+/// A `usage_logs` row.
 ///
-/// Built by [`crate::usage`]; written verbatim by [`UsageStore`].
+/// Built by [`crate::usage`]; written verbatim by [`UsageStore`]. Carries only
+/// the canonical columns — `cost` is the single charge column: the legacy
+/// `tokens_in`/`tokens_out` dual-write and the `total_cost`/`actual_cost`
+/// triplicates were retired from the insert and stay at their column defaults
+/// (0). Every reader coalesces canonical-first, so historical rows and the
+/// panel wire shape are unchanged; physically dropping the retired columns is
+/// an ops step (`scripts/usage-log-columns.sql`), not a migration.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UsageLogEntry {
     pub user_id: Id,
@@ -277,8 +283,6 @@ pub struct UsageLogEntry {
     pub output_tokens: i64,
     pub cached_tokens: i64,
     pub reasoning_tokens: i64,
-    pub total_cost: f64,
-    pub actual_cost: f64,
     pub cost: f64,
     pub rate_multiplier: f64,
     pub stream: bool,

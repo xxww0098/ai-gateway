@@ -14,8 +14,6 @@ fn entry(user_id: Id, request_id: &str, cost: f64) -> UsageLogEntry {
         provider: "openai".to_owned(),
         input_tokens: 100,
         output_tokens: 200,
-        total_cost: cost,
-        actual_cost: cost,
         cost,
         rate_multiplier: 1.0,
         ..UsageLogEntry::default()
@@ -54,7 +52,7 @@ async fn usage_rows(
     request_id: &str,
 ) -> Vec<(f64, bool, Option<serde_json::Value>)> {
     sqlx::query_as::<_, (gw_model::compat::Money, bool, Option<serde_json::Value>)>(
-        "SELECT actual_cost, failed, raw_metadata FROM usage_logs WHERE request_id = $1",
+        "SELECT cost, failed, raw_metadata FROM usage_logs WHERE request_id = $1",
     )
     .bind(request_id)
     .fetch_all(pool)

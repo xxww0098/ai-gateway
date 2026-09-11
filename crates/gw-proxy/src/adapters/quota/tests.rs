@@ -200,8 +200,6 @@ async fn concurrent_quota_admission_currently_overshoots_the_daily_limit() {
                     request_id,
                     model: "gpt-4o".to_owned(),
                     provider: "openai".to_owned(),
-                    total_cost: 1.0,
-                    actual_cost: 1.0,
                     cost: 1.0,
                     rate_multiplier: 1.0,
                     ..UsageLogEntry::default()

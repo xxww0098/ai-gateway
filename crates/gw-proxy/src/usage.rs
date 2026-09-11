@@ -454,8 +454,6 @@ impl Settlement {
                 //
                 // 尝试收多少不能丢：它是运维判断「这次回滚值不值得追」的唯一线索，
                 // 所以挪进 metadata，而不是留在会被求和的列里。
-                failed.total_cost = 0.0;
-                failed.actual_cost = 0.0;
                 failed.cost = 0.0;
                 failed.raw_metadata = Some(json!({
                     "reason": err.to_string(),
@@ -534,8 +532,6 @@ impl Settlement {
             output_tokens: tokens.output,
             cached_tokens: tokens.cached,
             reasoning_tokens: tokens.reasoning,
-            total_cost: cost,
-            actual_cost: cost,
             cost,
             rate_multiplier: ctx.rate_mult,
             stream: ctx.stream,

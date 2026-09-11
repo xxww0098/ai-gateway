@@ -70,8 +70,6 @@ pub async fn reconcile_orphaned_holds(settlement: &Settlement, holds: &[StaleHol
         let entry = UsageLogEntry {
             user_id: hold.user_id,
             request_id: hold.request_id.clone(),
-            total_cost: hold.amount,
-            actual_cost: hold.amount,
             cost: hold.amount,
             rate_multiplier: 1.0,
             failed: false,
